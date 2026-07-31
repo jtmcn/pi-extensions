@@ -1,0 +1,9 @@
+# Test harness deps
+tests/node_modules/
+
+# Extension deps, if an extension ever needs npm packages
+*/node_modules/
+
+# Editor / OS noise
+.DS_Store
+*.log

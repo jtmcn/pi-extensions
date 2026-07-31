@@ -1,0 +1,7 @@
+{
+  "name": "pi-extensions-tests",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node worktree.test.mjs" },
+  "dependencies": { "jiti": "^2.4.2" }
+}
