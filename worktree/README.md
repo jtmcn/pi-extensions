@@ -21,7 +21,11 @@ other worktrees, `/tmp`, system files — pass through untouched, so this is a
 redirect, **not a sandbox**. Focus changes are announced to the model so it
 knows where it is working.
 
-Focus is stored in the session transcript, so it survives `/reload` and resume.
+Focus is written to the session transcript as a custom entry the moment it
+changes, so it survives `/reload` and resume. On restore the worktree is
+re-checked: if it was removed by another session, focus is cleared with a
+warning rather than turning every `bash` call into `cd '<gone>' || exit 1`.
+Focus is *not* inherited by a new session (`/new`).
 
 ## Commands
 
@@ -36,8 +40,15 @@ Focus is stored in the session transcript, so it survives `/reload` and resume.
 /worktree config          show effective configuration and where it came from
 ```
 
-`focus` and `remove` autocomplete worktree names. Names are slugified, so
-`/worktree new "My Feature!"` creates `my-feature`.
+`focus` and `remove` autocomplete worktree names. A name is matched by exact
+path, directory name or branch first, then by unique prefix; an ambiguous
+prefix is reported rather than resolved to whichever worktree git listed first.
+In non-interactive mode (`pi -p`) only exact matches are accepted, since there
+is no confirmation prompt.
+
+Names are slugified, and quoting works, so `/worktree new "My Feature!"`
+creates `my-feature`. The second token is the base ref, so an unquoted
+multi-word name is an error rather than a mystery branch.
 
 When focused, the footer shows `⑂ <name> (<branch>)`.
 
@@ -47,6 +58,12 @@ The model gets a `worktree` tool with `action: "list" | "create"`. It can spin
 up an isolated worktree for a parallel experiment. It deliberately **cannot**
 change focus — that stays a user decision. Creating a worktree does not move
 the model; it gets the path back and must use it explicitly.
+
+Note that `create` runs the configured `postCreate` command, so a model tool
+call can execute the project's setup command. `postCreate` therefore only comes
+from `~/.pi/agent/worktree.json` or from a **trusted** project's
+`.pi/worktree.json` — the same trust boundary as the rest of pi's project
+config.
 
 ## Layouts
 
@@ -70,7 +87,8 @@ Later files win:
 ```jsonc
 {
   // Where worktrees go. Relative to the project root. "{name}" is substituted;
-  // without it the name is appended.
+  // without it the name is appended. The default matches the Claude Code
+  // convention so both agents find the same worktrees in a shared checkout.
   "path": ".claude/worktrees",
 
   // Prepended to branch names created by /worktree new.
@@ -80,7 +98,8 @@ Later files win:
   // local config that a fresh checkout would be missing.
   "copyFiles": [".env", ".env.local"],
 
-  // Shell command run inside a newly created worktree.
+  // Shell command run inside a newly created worktree. Executed via `bash -lc`,
+  // including when the model creates a worktree through the tool.
   "postCreate": "npm install",
 
   // Focus a newly created worktree automatically.
@@ -101,6 +120,7 @@ lib/git.ts             shared git helpers (used by other extensions too)
 worktree/index.ts      command, focus state, footer status, tool
 worktree/config.ts     config loading and path templating
 worktree/focus.ts      tool-input rewriting (pure, heavily tested)
+worktree/select.ts     argument parsing and name matching (pure)
 worktree/worktrees.ts  create / remove / prune
 ```
 
@@ -113,4 +133,6 @@ node worktree.test.mjs
 ```
 
 Runs against throwaway repos in `$TMPDIR`, covering both plain and bare
-layouts, plus pure-function tests for focus rewriting and config precedence.
+layouts, plus pure-function tests for focus rewriting, argument parsing, name
+matching and config precedence. Set `PI_TEST_BARE_REPO` to also check a real
+bare-layout checkout on this machine.

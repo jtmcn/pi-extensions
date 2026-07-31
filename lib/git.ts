@@ -5,7 +5,7 @@
  * (`.git` file), and bare layouts (`proj/.bare` + `proj/main` + siblings).
  */
 
-import { basename } from "node:path";
+import { basename, posix } from "node:path";
 import type { ExecOptions, ExecResult, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export interface GitRunner {
@@ -70,9 +70,11 @@ export async function getRepoInfo(pi: GitRunner, cwd: string): Promise<RepoInfo 
 	const commonDir = common.stdout.trim();
 	if (!commonDir) return undefined;
 
+	// git reports `--path-format=absolute` with forward slashes on every platform,
+	// so the POSIX flavour of dirname is the correct one here.
 	const info: RepoInfo = {
 		commonDir,
-		projectRoot: dirnameOf(commonDir),
+		projectRoot: posix.dirname(commonDir.replace(/\/+$/, "")),
 	};
 
 	const top = await git(pi, ["rev-parse", "--show-toplevel"], cwd);
@@ -202,12 +204,6 @@ export function describeWorktree(worktree: Worktree): string {
 		.filter(Boolean)
 		.join(", ");
 	return flags ? `${name} [${ref}] (${flags})` : `${name} [${ref}]`;
-}
-
-function dirnameOf(path: string): string {
-	const normalized = path.replace(/\/+$/, "");
-	const at = normalized.lastIndexOf("/");
-	return at <= 0 ? "/" : normalized.slice(0, at);
 }
 
 /** Convenience adapter so helpers can take the ExtensionAPI directly. */

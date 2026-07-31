@@ -21,10 +21,12 @@ extensions/
 ├── tests/              test harness for the collection (jiti, plain node)
 │   ├── package.json
 │   └── worktree.test.mjs
+├── typecheck.sh        tsc over every extension (no build step otherwise)
 └── worktree/           an extension (loaded via worktree/index.ts)
     ├── index.ts
     ├── config.ts
     ├── focus.ts
+    ├── select.ts
     ├── worktrees.ts
     └── README.md
 ```
@@ -44,9 +46,17 @@ Things worth keeping consistent as this grows:
 
 - **Shared code goes in `lib/`.** Import it as `../lib/thing.ts` with the
   explicit `.ts` extension — jiti resolves it, and it matches pi's own style.
-- **Keep the rewriting/decision logic pure.** `worktree/focus.ts` is a good
-  template: no I/O, no pi types, trivially testable. The `index.ts` does the
-  wiring, everything else stays a library.
+- **Keep the rewriting/decision logic pure.** `worktree/focus.ts` and
+  `worktree/select.ts` are the template: no I/O, no pi types, trivially
+  testable. The `index.ts` does the wiring, everything else stays a library.
+- **Reset all session state in `session_start`.** Extension closures outlive
+  the session they were created for — `/new` and resume re-fire `session_start`
+  against a different transcript. Anything not explicitly cleared leaks into
+  the next session.
+- **Persist state with `pi.appendEntry`, not `pi.sendMessage`.** A custom
+  message sent with `deliverAs: "nextTurn"` is only queued in memory and is
+  lost if the session reloads before the next prompt. Use an entry for the
+  state and a message only to tell the model.
 - **Never touch a captured `ctx` from a timer or async callback that can
   outlive the turn.** It throws "extension ctx is stale" after session
   replacement or shutdown and takes down the process. Clear UI on the `input`
@@ -65,20 +75,22 @@ Things worth keeping consistent as this grows:
 
 ## Type checking
 
-There is no build step — pi loads TypeScript through jiti. To type check
-manually:
+There is no build step — pi loads TypeScript through jiti — so this is the only
+thing that catches type errors:
 
 ```bash
-cd ~/Code/pi-extensions
-npx -p typescript@5.7 -p @types/node tsc --noEmit --strict \
-  --module esnext --moduleResolution bundler --allowImportingTsExtensions \
-  --skipLibCheck lib/*.ts worktree/*.ts
+./typecheck.sh
 ```
 
-(Module paths resolve through the globally installed pi package.)
+It generates a tsconfig pointing at the globally installed pi package (whose
+path differs per machine, which is why the config is not committed) and runs
+`tsc --noEmit --strict` over `lib/` and every extension directory.
 
 ## Tests
 
 ```bash
 cd tests && npm install && node worktree.test.mjs
+
+# optionally exercise a real bare-layout checkout
+PI_TEST_BARE_REPO=~/Code/hellos node worktree.test.mjs
 ```

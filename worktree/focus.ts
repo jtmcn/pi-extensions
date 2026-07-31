@@ -51,6 +51,7 @@ export function applyFocus(
 	target: FocusTarget,
 	options: FocusOptions,
 ): Rewrite | undefined {
+	if (!input || typeof input !== "object") return undefined;
 	if (toolName === "bash") return rewriteBash(input, target);
 	if (PATH_TOOLS.has(toolName)) return rewritePath(toolName, input, target, options);
 	return undefined;
@@ -73,8 +74,7 @@ function rewritePath(
 	target: FocusTarget,
 	options: FocusOptions,
 ): Rewrite | undefined {
-	// `read` historically also accepts `file_path`.
-	const key = typeof input.path === "string" ? "path" : typeof input.file_path === "string" ? "file_path" : "path";
+	const key = "path";
 	const raw = input[key];
 
 	if (raw === undefined || raw === "") {
@@ -105,7 +105,7 @@ export function redirect(path: string, worktree: string, options: FocusOptions):
 	if (!sameOrInside(path, sessionRoot)) return undefined;
 
 	const suffix = relative(sessionRoot, path);
-	if (suffix === "" ) return worktree;
+	if (suffix === "") return worktree;
 	if (suffix.startsWith("..")) return undefined;
 	return resolve(worktree, suffix);
 }

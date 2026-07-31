@@ -4,10 +4,11 @@
  *   cd ~/.pi/agent/extensions/tests && npm install && node worktree.test.mjs
  *
  * Covers layout detection (plain / bare), porcelain parsing, path slugging,
- * focus-mode rewriting, create/remove/prune, and config precedence.
+ * focus-mode rewriting, argument parsing / worktree matching, create/remove/
+ * prune, and config precedence.
  *
  * Everything runs against throwaway repos in $TMPDIR. A small extra section
- * runs only if a known bare-layout repo is present locally.
+ * runs only when $PI_TEST_BARE_REPO points at a bare-layout checkout.
  */
 
 import { execFile } from "node:child_process";
@@ -20,7 +21,7 @@ import { createJiti } from "jiti";
 const pexec = promisify(execFile);
 const EXT = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 const PI_ENTRY = process.env.PI_DIST ?? (await resolvePiEntry());
-const OPTIONAL_BARE_REPO = "/Users/joel/Code/hellos";
+const OPTIONAL_BARE_REPO = process.env.PI_TEST_BARE_REPO;
 
 const jiti = createJiti(import.meta.url, {
 	alias: { "@earendil-works/pi-coding-agent": PI_ENTRY },
@@ -29,6 +30,7 @@ const git = await jiti.import(`${EXT}/lib/git.ts`);
 const focus = await jiti.import(`${EXT}/worktree/focus.ts`);
 const config = await jiti.import(`${EXT}/worktree/config.ts`);
 const worktrees = await jiti.import(`${EXT}/worktree/worktrees.ts`);
+const select = await jiti.import(`${EXT}/worktree/select.ts`);
 
 /** Minimal GitRunner: same shape pi's `pi.exec` provides. */
 const runner = {
@@ -143,11 +145,46 @@ ok("focus: grep defaults to worktree", rewrite("grep", { pattern: "TODO" }).path
 ok("focus: find defaults to worktree", rewrite("find", { pattern: "*.ts" }).path === "/proj/.claude/worktrees/feat");
 ok("focus: read without path is left alone", rewrite("read", {}).path === undefined);
 ok("focus: unknown tools are left alone", rewrite("some_custom_tool", { path: "x.ts" }).path === "x.ts");
-ok("focus: read file_path alias", rewrite("read", { file_path: "src/a.ts" }).file_path === "/proj/.claude/worktrees/feat/src/a.ts");
+ok("focus: malformed input is ignored", focus.applyFocus("bash", undefined, target, opts) === undefined);
 
 ok("focus: sameOrInside exact", focus.sameOrInside("/a/b", "/a/b"));
 ok("focus: sameOrInside nested", focus.sameOrInside("/a/b/c", "/a/b"));
 ok("focus: sameOrInside rejects prefix collision", !focus.sameOrInside("/a/bc", "/a/b"));
+
+// ================================================ argument parsing / matching
+
+ok("args: name and base", JSON.stringify(select.parseNewArgs("feat main")) === '{"name":"feat","base":"main","extra":[]}');
+ok(
+	"args: quoted name with spaces",
+	select.parseNewArgs('"My Feature!" main').name === "My Feature!",
+	JSON.stringify(select.parseNewArgs('"My Feature!" main')),
+);
+ok("args: single quotes too", select.parseNewArgs("'my feat'").name === "my feat");
+ok(
+	"args: unquoted two-word name is still name + base",
+	select.parseNewArgs("My Feature").name === "My" && select.parseNewArgs("My Feature").base === "Feature",
+);
+ok(
+	"args: third token lands in extra",
+	JSON.stringify(select.parseNewArgs("a b c").extra) === '["c"]',
+	JSON.stringify(select.parseNewArgs("a b c")),
+);
+ok("args: empty", select.parseNewArgs("   ").name === undefined);
+
+const wts = [
+	{ path: "/proj/main", branch: "main", detached: false, bare: false, locked: false, prunable: false },
+	{ path: "/proj/wt/feature-a", branch: "joel/feature-a", detached: false, bare: false, locked: false, prunable: false },
+	{ path: "/proj/wt/feature-b", branch: "joel/feature-b", detached: false, bare: false, locked: false, prunable: false },
+];
+ok("match: exact basename", select.matchWorktree(wts, "feature-a").worktree === wts[1]);
+ok("match: exact path", select.matchWorktree(wts, "/proj/main").worktree === wts[0]);
+ok("match: exact branch", select.matchWorktree(wts, "joel/feature-b").worktree === wts[2]);
+ok("match: unique prefix", select.matchWorktree(wts, "ma").worktree === wts[0]);
+ok("match: ambiguous prefix is refused", select.matchWorktree(wts, "feature").kind === "many");
+ok("match: ambiguous prefix lists candidates", select.matchWorktree(wts, "feature").worktrees.length === 2);
+ok("match: no match", select.matchWorktree(wts, "nope").kind === "none");
+ok("match: exactOnly rejects prefixes", select.matchWorktree(wts, "ma", { exactOnly: true }).kind === "none");
+ok("match: exactOnly still takes exact", select.matchWorktree(wts, "main", { exactOnly: true }).kind === "one");
 
 // ============================================== integration: plain git repo
 
@@ -190,6 +227,7 @@ ok("create: branch created", created.createdBranch === true);
 ok("create: base is default branch", created.base === "main", String(created.base));
 ok("create: gitignored file copied", created.copied.includes(".env"), JSON.stringify(created.copied));
 ok("create: copied contents match", (await readFile(join(created.path, ".env"), "utf8")) === "SECRET=1\n");
+ok("create: no warnings on the happy path", created.warnings.length === 0, JSON.stringify(created.warnings));
 ok("create: postCreate ran in worktree", created.postCreate.code === 0);
 ok("create: postCreate side effect", (await readFile(join(created.path, ".built"), "utf8")).trim() === "built");
 ok("create: tracked files checked out", (await readFile(join(created.path, "README.md"), "utf8")) === "hi\n");
@@ -256,9 +294,34 @@ await rejects(
 	() => worktrees.removeWorktree(runner, { worktree: entry, projectRoot: repo, force: false }),
 	/contains modified|untracked/,
 );
-await worktrees.removeWorktree(runner, { worktree: entry, projectRoot: repo, force: true, deleteBranch: true });
-ok("remove: gone from list", !(await git.listWorktrees(runner, repo)).some((w) => w.path === created.path));
-ok("remove: branch deleted", !(await git.branchExists(runner, "joel/my-feature", repo)));
+// A dirty worktree says nothing about whether its branch is merged: forcing the
+// worktree removal must not force the branch deletion.
+await pexec("git", ["commit", "-qm", "unmerged", "--allow-empty"], { cwd: created.path });
+await rejects(
+	"remove: unmerged branch is kept, not force-deleted",
+	() => worktrees.removeWorktree(runner, { worktree: entry, projectRoot: repo, force: true, deleteBranch: true }),
+	/not fully merged|was kept/,
+);
+ok("remove: worktree still gone after branch failure", !(await git.listWorktrees(runner, repo)).some((w) => w.path === created.path));
+ok("remove: unmerged branch survives", await git.branchExists(runner, "joel/my-feature", repo));
+await pexec("git", ["branch", "-D", "joel/my-feature"], { cwd: repo });
+
+const merged = await worktrees.createWorktree(runner, {
+	name: "mergeable",
+	branch: "joel/mergeable",
+	config: { ...cfg, postCreate: undefined },
+	projectRoot: repo,
+	sourceWorktree: repo,
+});
+const mergedEntry = (await git.listWorktrees(runner, repo)).find((w) => w.path === merged.path);
+await worktrees.removeWorktree(runner, {
+	worktree: mergedEntry,
+	projectRoot: repo,
+	force: false,
+	deleteBranch: true,
+});
+ok("remove: gone from list", !(await git.listWorktrees(runner, repo)).some((w) => w.path === merged.path));
+ok("remove: merged branch deleted", !(await git.branchExists(runner, "joel/mergeable", repo)));
 
 // ============================================= integration: bare layout
 
@@ -325,7 +388,7 @@ ok("config: bad values do not clobber defaults", badTypes.config.path === ".clau
 
 // ======================== optional: real bare-layout repo on this machine
 
-if (await exists(join(OPTIONAL_BARE_REPO, ".bare"))) {
+if (OPTIONAL_BARE_REPO && (await exists(join(OPTIONAL_BARE_REPO, ".bare")))) {
 	const info = await git.getRepoInfo(runner, join(OPTIONAL_BARE_REPO, "main"));
 	ok("local repo: projectRoot", info.projectRoot === OPTIONAL_BARE_REPO, info.projectRoot);
 	ok("local repo: commonDir is .bare", info.commonDir.endsWith("/.bare"), info.commonDir);
@@ -346,7 +409,7 @@ if (await exists(join(OPTIONAL_BARE_REPO, ".bare"))) {
 		JSON.stringify(list.map((w) => w.branch)),
 	);
 } else {
-	console.log("skip  local bare-layout repo checks (no fixture on this machine)");
+	console.log("skip  local bare-layout repo checks (set PI_TEST_BARE_REPO to enable)");
 }
 
 await rm(root, { recursive: true, force: true });

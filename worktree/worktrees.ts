@@ -39,6 +39,8 @@ export interface CreateResult {
 	base?: string;
 	createdBranch: boolean;
 	copied: string[];
+	/** Non-fatal problems (a `copyFiles` entry that could not be copied, etc.). */
+	warnings: string[];
 	postCreate?: { command: string; code: number; output: string };
 }
 
@@ -80,7 +82,10 @@ export async function createWorktree(pi: CommandRunner, options: CreateOptions):
 		await gitOrThrow(pi, args, projectRoot, { signal });
 	}
 
-	const copied = await copyFiles(options.sourceWorktree, target, config.copyFiles);
+	// The worktree exists from here on: a copy failure must not reject, or the
+	// caller reports failure while leaving an orphan that blocks the retry.
+	const warnings: string[] = [];
+	const copied = await copyFiles(options.sourceWorktree, target, config.copyFiles, warnings);
 
 	let postCreate: CreateResult["postCreate"];
 	if (config.postCreate) {
@@ -92,15 +97,22 @@ export async function createWorktree(pi: CommandRunner, options: CreateOptions):
 		};
 	}
 
-	return { path: target, branch, base, createdBranch: !existing, copied, postCreate };
+	return { path: target, branch, base, createdBranch: !existing, copied, warnings, postCreate };
 }
 
 export interface RemoveOptions {
 	worktree: Worktree;
 	projectRoot: string;
+	/** Force removal of a worktree with uncommitted changes. */
 	force: boolean;
 	/** Also delete the branch that was checked out there. */
 	deleteBranch?: boolean;
+	/**
+	 * Use `git branch -D` instead of `-d`. Deliberately separate from `force`:
+	 * a dirty working tree says nothing about whether the branch is merged, and
+	 * conflating the two silently discards unmerged commits.
+	 */
+	forceDeleteBranch?: boolean;
 	signal?: AbortSignal;
 }
 
@@ -111,7 +123,7 @@ export async function removeWorktree(pi: GitRunner, options: RemoveOptions): Pro
 	await gitOrThrow(pi, args, options.projectRoot, { signal: options.signal });
 
 	if (options.deleteBranch && options.worktree.branch) {
-		const flag = options.force ? "-D" : "-d";
+		const flag = options.forceDeleteBranch ? "-D" : "-d";
 		const result = await git(pi, ["branch", flag, options.worktree.branch], options.projectRoot, {
 			signal: options.signal,
 		});
@@ -127,16 +139,25 @@ export async function pruneWorktrees(pi: GitRunner, projectRoot: string, signal?
 	return gitOrThrow(pi, ["worktree", "prune", "--verbose"], projectRoot, { signal });
 }
 
-async function copyFiles(source: string | undefined, target: string, patterns: string[]): Promise<string[]> {
+async function copyFiles(
+	source: string | undefined,
+	target: string,
+	patterns: string[],
+	warnings: string[],
+): Promise<string[]> {
 	if (!source || patterns.length === 0) return [];
 	const copied: string[] = [];
 	for (const entry of patterns) {
 		const from = join(source, entry);
 		if (!(await pathExists(from))) continue;
 		const to = join(target, entry);
-		await mkdir(dirname(to), { recursive: true });
-		await cp(from, to, { recursive: true, errorOnExist: false, force: true });
-		copied.push(entry);
+		try {
+			await mkdir(dirname(to), { recursive: true });
+			await cp(from, to, { recursive: true, errorOnExist: false, force: true });
+			copied.push(entry);
+		} catch (error) {
+			warnings.push(`could not copy ${entry}: ${(error as Error).message}`);
+		}
 	}
 	return copied;
 }
