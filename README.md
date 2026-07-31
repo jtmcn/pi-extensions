@@ -1,7 +1,16 @@
 # pi extensions
 
-Personal extension collection, auto-discovered by pi from
-`~/.pi/agent/extensions/`.
+Personal extension collection.
+
+The repo lives at `~/Code/pi-extensions` and is symlinked into pi's discovery
+path, so a plain `git clone` + one symlink sets up a new machine:
+
+```bash
+git clone <url> ~/Code/pi-extensions
+ln -s ~/Code/pi-extensions ~/.pi/agent/extensions
+```
+
+pi follows the symlink and loads everything normally.
 
 ## Layout
 
@@ -60,7 +69,7 @@ There is no build step — pi loads TypeScript through jiti. To type check
 manually:
 
 ```bash
-cd ~/.pi/agent/extensions
+cd ~/Code/pi-extensions
 npx -p typescript@5.7 -p @types/node tsc --noEmit --strict \
   --module esnext --moduleResolution bundler --allowImportingTsExtensions \
   --skipLibCheck lib/*.ts worktree/*.ts

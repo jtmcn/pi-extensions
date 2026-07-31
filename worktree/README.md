@@ -107,7 +107,7 @@ worktree/worktrees.ts  create / remove / prune
 ## Tests
 
 ```bash
-cd ~/.pi/agent/extensions/tests
+cd ~/Code/pi-extensions/tests
 npm install
 node worktree.test.mjs
 ```
