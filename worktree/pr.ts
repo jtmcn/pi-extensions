@@ -105,3 +105,54 @@ export function formatPr(pr: PullRequest, nameWithOwner: string): string {
 	const label = `#${pr.number} ${prState(pr)}${glyph ? ` ${glyph}` : ""}`;
 	return hyperlink(graphiteUrl(nameWithOwner, pr.number), label);
 }
+
+// ---- Poll cadence ----------------------------------------------------------
+
+/** Cadence while a PR is open or draft: CI moves on roughly this timescale. */
+export const POLL_OPEN_MS = 60_000;
+/** Cadence with no PR on the branch, so a freshly created one still appears. */
+export const POLL_NO_PR_MS = 300_000;
+/** Backoff after consecutive fetch errors, indexed by error count. */
+export const ERROR_BACKOFF_MS = [60_000, 120_000, 300_000];
+/** No user input for this long suspends polling until the next input. */
+export const IDLE_SUSPEND_MS = 900_000;
+/** Delay after a submitting command, giving GitHub time to create the PR. */
+export const BASH_TRIGGER_DELAY_MS = 8_000;
+/** A cached entry older than this is repainted, then refreshed in background. */
+export const STALE_MS = 60_000;
+
+export type PollStatus = "pr" | "none" | "error";
+
+export interface PollInput {
+	status: PollStatus;
+	/** Present when `status` is "pr". */
+	state?: PrState;
+	/** Consecutive failures so far, including the one that just happened. */
+	consecutiveErrors?: number;
+}
+
+/**
+ * Milliseconds until the next fetch, or `undefined` to stop polling.
+ *
+ * Merged and closed are terminal: nothing about them changes again, so the
+ * timer stops until a branch or focus change revives it.
+ */
+export function nextPollDelay(input: PollInput): number | undefined {
+	if (input.status === "error") {
+		const index = Math.min(Math.max(input.consecutiveErrors ?? 1, 1), ERROR_BACKOFF_MS.length) - 1;
+		return ERROR_BACKOFF_MS[index];
+	}
+	if (input.status === "none") return POLL_NO_PR_MS;
+	return input.state === "open" || input.state === "draft" ? POLL_OPEN_MS : undefined;
+}
+
+/**
+ * True for commands that plausibly create a PR or move its head.
+ *
+ * A heuristic on command text, deliberately: a miss only means the display
+ * waits for the normal cadence. `\b` on the trailing word keeps `git pushed`
+ * and `echo pushing` from matching.
+ */
+export function matchesPrCommand(command: string): boolean {
+	return /\b(?:gt\s+submit|gh\s+pr\s+create|git\s+push)\b/.test(command);
+}

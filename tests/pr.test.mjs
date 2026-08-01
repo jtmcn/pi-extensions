@@ -117,6 +117,29 @@ ok(
 	stripAnsi(pr.formatPr({ ...base, statusCheckRollup: [] }, "o/r")),
 );
 
+// =========================================================== poll cadence
+
+ok("poll: open polls every minute", pr.nextPollDelay({ status: "pr", state: "open" }) === 60_000);
+ok("poll: draft polls every minute", pr.nextPollDelay({ status: "pr", state: "draft" }) === 60_000);
+ok("poll: merged stops", pr.nextPollDelay({ status: "pr", state: "merged" }) === undefined);
+ok("poll: closed stops", pr.nextPollDelay({ status: "pr", state: "closed" }) === undefined);
+ok("poll: no PR waits five minutes", pr.nextPollDelay({ status: "none" }) === 300_000);
+ok("poll: first error backs off a minute", pr.nextPollDelay({ status: "error", consecutiveErrors: 1 }) === 60_000);
+ok("poll: second error backs off two", pr.nextPollDelay({ status: "error", consecutiveErrors: 2 }) === 120_000);
+ok("poll: third error backs off five", pr.nextPollDelay({ status: "error", consecutiveErrors: 3 }) === 300_000);
+ok("poll: backoff is capped", pr.nextPollDelay({ status: "error", consecutiveErrors: 99 }) === 300_000);
+
+// ========================================================== bash trigger
+
+ok("trigger: gt submit", pr.matchesPrCommand("gt submit"));
+ok("trigger: gt submit with flags", pr.matchesPrCommand("gt submit --no-interactive"));
+ok("trigger: gh pr create", pr.matchesPrCommand("gh pr create --fill"));
+ok("trigger: git push", pr.matchesPrCommand("git push -u origin HEAD"));
+ok("trigger: later in a chain", pr.matchesPrCommand("pants test :: && git push"));
+ok("trigger: ignores unrelated commands", !pr.matchesPrCommand("git status"));
+ok("trigger: ignores gh pr view", !pr.matchesPrCommand("gh pr view 123"));
+ok("trigger: ignores a substring match", !pr.matchesPrCommand("echo pushing"));
+
 console.log(fails === 0 ? "\nALL PASS" : `\n${fails} FAILURE(S)`);
 process.exit(fails ? 1 : 0);
 
