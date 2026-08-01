@@ -2,13 +2,14 @@
  * Worktree create/remove operations layered on the shared git helpers.
  */
 
-import { cp, mkdir, stat } from "node:fs/promises";
+import { chmod, cp, lstat, mkdir, readdir, rm, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { ExecOptions, ExecResult } from "@earendil-works/pi-coding-agent";
 import {
 	branchExists,
 	defaultBranch,
 	git,
+	GitError,
 	type GitRunner,
 	gitOrThrow,
 	listWorktrees,
@@ -120,7 +121,8 @@ export async function removeWorktree(pi: GitRunner, options: RemoveOptions): Pro
 	const args = ["worktree", "remove"];
 	if (options.force) args.push("--force");
 	args.push(options.worktree.path);
-	await gitOrThrow(pi, args, options.projectRoot, { signal: options.signal });
+	const removal = await git(pi, args, options.projectRoot, { signal: options.signal });
+	if (removal.code !== 0) await finishFailedRemoval(pi, options, args, removal);
 
 	if (options.deleteBranch && options.worktree.branch) {
 		const flag = options.forceDeleteBranch ? "-D" : "-d";
@@ -132,6 +134,83 @@ export async function removeWorktree(pi: GitRunner, options: RemoveOptions): Pro
 				`Worktree removed, but branch "${options.worktree.branch}" was kept: ${(result.stderr || result.stdout).trim()}`,
 			);
 		}
+	}
+}
+
+/**
+ * Salvage a `git worktree remove` that died partway through deleting files.
+ *
+ * git unlinks the administrative directory under `worktrees/` even when the
+ * working-tree delete fails — there is no point keeping a corrupted worktree —
+ * so the failure is *not* retryable: the worktree is already deregistered and a
+ * second `git worktree remove` just reports "is not a working tree". What it
+ * leaves behind is an orphaned directory that also blocks re-creating a
+ * worktree at that path.
+ *
+ * The usual cause is a read-only subtree. pants materializes its tool digests
+ * under `pants.d/tmp/immutable_inputs*​/` as mode 555 directories, and unlinking
+ * a file needs the write bit on its *parent*, so the recursive delete stops
+ * with EACCES on the first file inside one.
+ *
+ * Registration is the discriminator, and it has to be: when git still lists the
+ * worktree it refused before touching anything (a dirty tree without `--force`,
+ * a lock), and finishing the job on the filesystem would destroy exactly the
+ * files that refusal exists to protect.
+ */
+async function finishFailedRemoval(
+	pi: GitRunner,
+	options: RemoveOptions,
+	args: string[],
+	result: ExecResult,
+): Promise<void> {
+	const detail = (result.stderr || result.stdout).trim();
+	const failure = new GitError(detail || `git ${args.join(" ")} failed (exit ${result.code})`, args, result);
+
+	// A listing that itself fails tells us nothing, so assume the worktree stands.
+	const registered = await listWorktrees(pi, options.projectRoot).catch(() => undefined);
+	if (!registered || registered.some((wt) => wt.path === options.worktree.path)) throw failure;
+
+	if (!(await pathExists(options.worktree.path))) return;
+	try {
+		await removeTree(options.worktree.path);
+	} catch (error) {
+		throw new Error(
+			`${failure.message}\nWorktree was deregistered, but ${options.worktree.path} could not be cleaned up: ${(error as Error).message}`,
+		);
+	}
+}
+
+/** `rm -rf` that first restores write permission when it is what is missing. */
+async function removeTree(path: string): Promise<void> {
+	try {
+		await rm(path, { recursive: true, force: true });
+		return;
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code;
+		if (code !== "EACCES" && code !== "EPERM") throw error;
+	}
+	await makeWritable(path);
+	await rm(path, { recursive: true, force: true });
+}
+
+/**
+ * Add the owner write bit to every directory in a tree.
+ *
+ * Only directories matter — POSIX unlink checks the parent directory's
+ * permissions, not the file's. Symlinks are skipped rather than followed:
+ * `chmod` resolves them, and worktrees routinely hold symlinks to shared config
+ * outside the tree that is being deleted.
+ */
+async function makeWritable(path: string): Promise<void> {
+	const info = await lstat(path).catch(() => undefined);
+	if (!info?.isDirectory()) return;
+
+	// u+rwx: write to unlink children, read and execute to list and descend.
+	if ((info.mode & 0o700) !== 0o700) await chmod(path, info.mode | 0o700).catch(() => {});
+
+	const entries = await readdir(path, { withFileTypes: true }).catch(() => []);
+	for (const entry of entries) {
+		if (entry.isDirectory()) await makeWritable(join(path, entry.name));
 	}
 }
 
