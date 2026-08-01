@@ -38,6 +38,8 @@ import {
 import { DEFAULT_CONFIG, loadConfig, type WorktreeConfig, worktreePath } from "./config.ts";
 import { applyFocus, type FocusTarget } from "./focus.ts";
 import { matchWorktree, parseNewArgs } from "./select.ts";
+import { fetchNameWithOwner, fetchPr, type PrLookup } from "./gh.ts";
+import { formatPr, STALE_MS } from "./pr.ts";
 import { createWorktree, pruneWorktrees, removeWorktree } from "./worktrees.ts";
 
 const STATUS_KEY = "worktree";
@@ -73,6 +75,87 @@ export default function (pi: ExtensionAPI) {
 
 	/** Worktree names for autocomplete; refreshed opportunistically. */
 	let knownWorktrees: Worktree[] = [];
+
+	// ---- PR status ---------------------------------------------------------
+
+	/**
+	 * Last lookup per `<cwd>\0<branch>`, so switching focus repaints instantly
+	 * and only refreshes in the background.
+	 */
+	const prCache = new Map<string, { fetchedAt: number; lookup: PrLookup }>();
+	/** `owner/name` for the repo, fetched once per session. */
+	let nameWithOwner: string | undefined;
+	/** Cleared for the session when gh is missing, unauthenticated, or non-GitHub. */
+	let prAvailable = true;
+	/** Consecutive fetch failures, for backoff. */
+	let prErrors = 0;
+	/** Guard so overlapping triggers cannot start two fetches. */
+	let prFetching = false;
+
+	/** The worktree whose PR is displayed: the focused one, else the session's. */
+	const prTarget = (): { cwd: string; branch: string } | undefined => {
+		const cwd = focus?.path ?? repo?.worktreeRoot;
+		const branch = focus?.branch ?? repo?.branch;
+		return cwd && branch ? { cwd, branch } : undefined;
+	};
+
+	const prKey = (target: { cwd: string; branch: string }) => `${target.cwd}\0${target.branch}`;
+
+	/** The formatted PR label for the active target, if one is cached. */
+	const prLabel = (): string | undefined => {
+		const target = prTarget();
+		if (!target || !nameWithOwner) return undefined;
+		const entry = prCache.get(prKey(target));
+		if (entry?.lookup.status !== "pr") return undefined;
+		return formatPr(entry.lookup.pr, nameWithOwner);
+	};
+
+	/**
+	 * Refresh the active target's PR in the background.
+	 *
+	 * Never awaited by a handler: a session must not wait on the network. The
+	 * result is dropped if focus moved while the fetch was in flight.
+	 */
+	const refreshPr = (force = false): void => {
+		const target = prTarget();
+		if (!prAvailable || prFetching || !target) return;
+
+		const key = prKey(target);
+		const cached = prCache.get(key);
+		if (!force && cached && Date.now() - cached.fetchedAt < STALE_MS) return;
+
+		prFetching = true;
+		void (async () => {
+			try {
+				if (!nameWithOwner) {
+					nameWithOwner = await fetchNameWithOwner(pi, target.cwd);
+					if (!nameWithOwner) {
+						prAvailable = false;
+						return;
+					}
+				}
+
+				const lookup = await fetchPr(pi, target.branch, target.cwd);
+				if (lookup.status === "unavailable") {
+					prAvailable = false;
+					return;
+				}
+				if (lookup.status === "error") {
+					prErrors += 1;
+					return;
+				}
+
+				prErrors = 0;
+				prCache.set(key, { fetchedAt: Date.now(), lookup });
+
+				// Focus may have moved while gh was running; only paint if not.
+				const current = prTarget();
+				if (sessionCtx && current && prKey(current) === key) setStatus(sessionCtx);
+			} finally {
+				prFetching = false;
+			}
+		})();
+	};
 
 	/**
 	 * Emit a one-line message. Falls back to stdout in print mode, where
@@ -116,14 +199,23 @@ export default function (pi: ExtensionAPI) {
 		widgetShown = false;
 	};
 
+	/**
+	 * Paint the footer segment: focused worktree, PR, or both.
+	 *
+	 * Unfocused sessions show the PR alone — pi's own footer line already reads
+	 * `<pwd> (<branch>)`, so the branch is not lost. With neither, the segment
+	 * is cleared rather than left showing something stale.
+	 */
 	const setStatus = (ctx: ExtensionContext) => {
 		if (!ctx.hasUI) return;
-		if (!focus) {
-			ctx.ui.setStatus(STATUS_KEY, undefined);
-			return;
+		const parts: string[] = [];
+		if (focus) {
+			const label = focus.branch ? `${basename(focus.path)} (${focus.branch})` : basename(focus.path);
+			parts.push(`⑂ ${label}`);
 		}
-		const label = focus.branch ? `${basename(focus.path)} (${focus.branch})` : basename(focus.path);
-		ctx.ui.setStatus(STATUS_KEY, `⑂ ${label}`);
+		const pr = prLabel();
+		if (pr) parts.push(pr);
+		ctx.ui.setStatus(STATUS_KEY, parts.length > 0 ? parts.join(" ") : undefined);
 	};
 
 	pi.on("session_start", async (_event, ctx) => {
@@ -135,6 +227,10 @@ export default function (pi: ExtensionAPI) {
 		configSources = [];
 		knownWorktrees = [];
 		focus = undefined;
+		prCache.clear();
+		nameWithOwner = undefined;
+		prAvailable = true;
+		prErrors = 0;
 
 		repo = await getRepoInfo(pi, ctx.cwd);
 		if (!repo) {
@@ -170,6 +266,7 @@ export default function (pi: ExtensionAPI) {
 			setFocus(ctx, undefined, false);
 		}
 		setStatus(ctx);
+		refreshPr();
 	});
 
 	pi.on("session_shutdown", (_event, ctx) => {
@@ -202,6 +299,8 @@ export default function (pi: ExtensionAPI) {
 	const setFocus = (ctx: ExtensionContext, target: FocusTarget | undefined, announce = true) => {
 		focus = target;
 		setStatus(ctx);
+		// Repaint from cache above, then reconcile the new target in background.
+		refreshPr();
 
 		// State lives in a custom *entry*: it is written to the transcript now.
 		// A custom message with deliverAs "nextTurn" is only queued in memory, so
