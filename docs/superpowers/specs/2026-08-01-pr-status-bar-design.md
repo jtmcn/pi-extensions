@@ -12,14 +12,20 @@ facts you want at a glance while working on a branch.
 
 ## Solution
 
-Extend the existing `worktree` extension's footer segment with a PR suffix:
+Extend the existing `worktree` extension's footer segment with the PR:
 
 ```
-⑂ main (joel/ont-mount-constant) #26904 open ●
+⑂ main (joel/ont-mount-constant) #26904 open ●    ← worktree focused
+#26904 open ●                                     ← no focus (the common case)
 ```
 
 Only the `#26904 open ●` part is an OSC 8 hyperlink, pointing at the Graphite PR
 page. The branch portion stays plain text.
+
+The segment today renders **only when a worktree is focused** and is cleared
+otherwise, so unfocused sessions have no `⑂ …` prefix to hang a suffix on. The
+PR therefore stands alone in that case; branch context is not lost, because
+pi's own footer line already reads `<pwd> (<branch>)`.
 
 ## Why the `worktree` extension and not a new one
 
@@ -96,7 +102,9 @@ in the background if stale.
 
 - `session_start` and every focus change — fire-and-forget, never awaited, so
   startup is not delayed by a `gh` round trip.
-- A `setInterval` timer, started lazily at the first refresh:
+- A self-rescheduling `setTimeout`, started lazily at the first refresh and
+  re-armed after each one (a fixed-period `setInterval` cannot express a
+  cadence that depends on the result it just fetched):
 
   | State | Cadence |
   |---|---|
@@ -131,8 +139,8 @@ All failures are silent — no notifications, ever. This is decoration.
 `worktree/index.ts` already documents the footgun: a timer that captures a `ctx`
 fires with a stale one after session replacement or shutdown. The interval
 therefore captures no `ctx` and reads the module-scoped `sessionCtx`, which the
-existing `session_shutdown` handler clears — extended to `clearInterval` as
-well, idempotently. pi's extension guidance also forbids starting timers in the
+existing `session_shutdown` handler clears — extended to cancel the pending
+timers as well, idempotently. pi's extension guidance also forbids starting timers in the
 factory; startup is deferred to the first refresh.
 
 ## Files
@@ -140,7 +148,8 @@ factory; startup is deferred to the first refresh.
 | File | Role |
 |---|---|
 | `worktree/pr.ts` | Pure, I/O-free: `rollupGlyph()`, `formatPr()`, `graphiteUrl()`, `hyperlink()`, `nextPollDelay()`. Follows the `focus.ts` / `select.ts` precedent. |
-| `worktree/index.ts` | Wiring only: fetch, cache, timer, and the suffix inside the existing `setStatus`. |
+| `worktree/gh.ts` | The two `gh` calls, behind the `GitRunner` interface `lib/git.ts` already defines, so a fake runner tests them. Keeps `index.ts` (already ~500 lines) from absorbing the network layer. |
+| `worktree/index.ts` | Wiring only: cache, timer, and the PR text inside the existing `setStatus`. |
 | `tests/pr.test.mjs` | Table-driven tests over the pure functions, with `statusCheckRollup` fixtures captured from a real PR (mixed `CheckRun` + `StatusContext`). |
 | `worktree/README.md` | A short "PR in the status bar" section. |
 
