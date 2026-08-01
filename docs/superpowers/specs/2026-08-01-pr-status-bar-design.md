@@ -107,10 +107,12 @@ in the background if stale.
 - Idle suspension: after 15 minutes with no `input` event the timer stops. The
   next `input` refreshes immediately and restarts it.
 - Bash trigger: a command matching `gt submit`, `gh pr create`, or `git push`
-  — seen via `tool_call` or `user_bash` — forces a refresh, so the number
-  appears the moment you submit rather than up to 5 minutes later. This is a
-  heuristic on command text; missing a match only delays the update to the
-  normal cadence.
+  schedules a refresh 8s later, so the number appears the moment you submit
+  rather than up to 5 minutes later. Hooked on `tool_result` (agent bash) and
+  `user_bash` (`!` commands). `tool_result` is post-execution — `tool_call`
+  would fetch before the push had landed — and the 8s delay gives GitHub time
+  to create the PR and register its checks. This is a heuristic on command
+  text; missing a match only delays the update to the normal cadence.
 
 **Concurrency.** One in-flight fetch at a time, 10s `exec` timeout. A result
 whose key no longer matches the active key is discarded.
