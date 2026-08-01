@@ -55,9 +55,14 @@ When focused, the footer shows `⑂ <name> (<branch>)`.
 ## Tool
 
 The model gets a `worktree` tool with `action: "list" | "create"`. It can spin
-up an isolated worktree for a parallel experiment. It deliberately **cannot**
-change focus — that stays a user decision. Creating a worktree does not move
-the model; it gets the path back and must use it explicitly.
+up an isolated worktree for a parallel experiment.
+
+`create` focuses the new worktree when `autoFocus` is on (the default), so the
+model keeps working where it just landed instead of threading an absolute path
+through every later call. The footer shows the focus and `/worktree focus off`
+undoes it. Set `"autoFocus": false` for the old behaviour, where the tool only
+returns the path. The tool still cannot focus an *existing* worktree — switching
+between worktrees stays a user decision.
 
 Note that `create` runs the configured `postCreate` command, so a model tool
 call can execute the project's setup command. `postCreate` therefore only comes
@@ -102,7 +107,8 @@ Later files win:
   // including when the model creates a worktree through the tool.
   "postCreate": "npm install",
 
-  // Focus a newly created worktree automatically.
+  // Focus a newly created worktree automatically — both `/worktree new` and the
+  // model's `worktree` tool.
   "autoFocus": true,
 
   // Remap absolute paths under the session worktree while focused.

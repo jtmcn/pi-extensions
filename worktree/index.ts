@@ -61,6 +61,16 @@ export default function (pi: ExtensionAPI) {
 	let repo: RepoInfo | undefined;
 	let focus: FocusTarget | undefined;
 
+	/**
+	 * The live session context, captured at session_start.
+	 *
+	 * Tool `execute` gets no context, but focusing needs one (status line,
+	 * notifications). A session can be replaced while this closure lives on, so
+	 * this is re-assigned on every session_start and dropped on shutdown rather
+	 * than captured once.
+	 */
+	let sessionCtx: ExtensionContext | undefined;
+
 	/** Worktree names for autocomplete; refreshed opportunistically. */
 	let knownWorktrees: Worktree[] = [];
 
@@ -117,6 +127,7 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	pi.on("session_start", async (_event, ctx) => {
+		sessionCtx = ctx;
 		// Every field below is session state. A session can be *replaced* (`/new`,
 		// resume) while this closure lives on, so reset everything first — leaving
 		// a stale `focus` here silently redirects a session that never asked for it.
@@ -162,6 +173,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", (_event, ctx) => {
+		sessionCtx = undefined;
 		if (!ctx.hasUI) return;
 		ctx.ui.setStatus(STATUS_KEY, undefined);
 		ctx.ui.setWidget(STATUS_KEY, undefined);
@@ -482,9 +494,10 @@ export default function (pi: ExtensionAPI) {
 		label: "Worktree",
 		description:
 			"List or create git worktrees for the current repository. Use this to run an experiment " +
-			"on a separate branch without disturbing the user's working tree. Creating a worktree does " +
-			"not change your working directory; the returned path must be used explicitly. Creating one " +
-			"may run the project's configured postCreate setup command inside it.",
+			"on a separate branch without disturbing the user's working tree. Unless auto-focus is " +
+			"disabled, creating a worktree moves you into it: relative paths and bash commands then " +
+			"resolve there. The tool result says which happened. Creating one may run the project's " +
+			"configured postCreate setup command inside it.",
 		promptSnippet: "List or create git worktrees for isolated parallel work",
 		parameters: Type.Object({
 			action: StringEnum(["list", "create"] as const, {
@@ -530,6 +543,16 @@ export default function (pi: ExtensionAPI) {
 					signal,
 				});
 				knownWorktrees = (await listWorktrees(pi, repo.projectRoot)).filter((wt) => !wt.bare);
+
+				// Move the model into the new worktree, same as `/worktree new`. Without
+				// a context there is no status line to update, so focus would be invisible
+				// to the user — leave it alone in that case.
+				const focused =
+					config.autoFocus && sessionCtx !== undefined && result.path !== repo.worktreeRoot;
+				if (focused) {
+					setFocus(sessionCtx as ExtensionContext, { path: result.path, branch: result.branch }, false);
+				}
+
 				const notes = [
 					`Created worktree at ${result.path}`,
 					`Branch: ${result.branch}${result.base ? ` (from ${result.base})` : ""}`,
@@ -538,7 +561,10 @@ export default function (pi: ExtensionAPI) {
 					result.postCreate
 						? `postCreate exit ${result.postCreate.code}: ${result.postCreate.output.slice(0, 500)}`
 						: undefined,
-					"Your working directory is unchanged. Use absolute paths under the new worktree to work in it.",
+					focused
+						? "You are now working in this worktree: relative paths and bash commands resolve there. " +
+							"Absolute paths outside it are unchanged. The user can undo this with `/worktree focus off`."
+						: "Your working directory is unchanged. Use absolute paths under the new worktree to work in it.",
 				].filter(Boolean);
 				return { content: [{ type: "text", text: notes.join("\n") }], details: { ...result } };
 			} catch (error) {
