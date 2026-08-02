@@ -106,6 +106,25 @@ export function formatPr(pr: PullRequest, nameWithOwner: string): string {
 	return hyperlink(graphiteUrl(nameWithOwner, pr.number), label);
 }
 
+/**
+ * The worktree/branch pair whose PR should be displayed: the focused one, or
+ * else the session's own — resolved as a unit so a focused worktree can never
+ * pair with a *different* worktree's branch.
+ *
+ * Focused: a detached worktree (no `branch`) has no PR to show, and must never
+ * fall back to the session's branch — that would render another worktree's
+ * name beside this session's PR, linked to the wrong thing. Unfocused: the
+ * session's own worktree and branch, or nothing if either is missing (not in a
+ * worktree, or detached).
+ */
+export function resolveTarget(
+	focus: { path: string; branch?: string } | undefined,
+	repo: { worktreeRoot?: string; branch?: string } | undefined,
+): { cwd: string; branch: string } | undefined {
+	if (focus) return focus.branch ? { cwd: focus.path, branch: focus.branch } : undefined;
+	return repo?.worktreeRoot && repo.branch ? { cwd: repo.worktreeRoot, branch: repo.branch } : undefined;
+}
+
 // ---- Poll cadence ----------------------------------------------------------
 
 /** Cadence while a PR is open or draft: CI moves on roughly this timescale. */

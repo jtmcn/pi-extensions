@@ -30,6 +30,7 @@ import {
 	countDirty,
 	describeWorktree,
 	getRepoInfo,
+	git,
 	listWorktrees,
 	type RepoInfo,
 	slugify,
@@ -46,6 +47,7 @@ import {
 	matchesPrCommand,
 	nextPollDelay,
 	prState,
+	resolveTarget,
 	STALE_MS,
 } from "./pr.ts";
 import { createWorktree, pruneWorktrees, removeWorktree } from "./worktrees.ts";
@@ -105,6 +107,12 @@ export default function (pi: ExtensionAPI) {
 	let prBashTimer: ReturnType<typeof setTimeout> | undefined;
 	/** Last user input, for idle suspension. */
 	let lastInputAt = Date.now();
+	/** When the last fetch attempt failed, for M-1's input-path backoff. */
+	let prLastErrorAt: number | undefined;
+	/** A refresh was requested while one was already in flight; re-run once done. */
+	let prPending = false;
+	/** Whether the pending, dropped refresh above was forced. */
+	let prPendingForce = false;
 
 	/** Cancel every pending PR timer. Idempotent. */
 	const stopPrTimers = () => {
@@ -123,11 +131,7 @@ export default function (pi: ExtensionAPI) {
 	let prGeneration = 0;
 
 	/** The worktree whose PR is displayed: the focused one, else the session's. */
-	const prTarget = (): { cwd: string; branch: string } | undefined => {
-		const cwd = focus?.path ?? repo?.worktreeRoot;
-		const branch = focus?.branch ?? repo?.branch;
-		return cwd && branch ? { cwd, branch } : undefined;
-	};
+	const prTarget = (): { cwd: string; branch: string } | undefined => resolveTarget(focus, repo);
 
 	const prKey = (target: { cwd: string; branch: string }) => `${target.cwd}\0${target.branch}`;
 
@@ -147,17 +151,46 @@ export default function (pi: ExtensionAPI) {
 	 * result is dropped if focus moved while the fetch was in flight.
 	 */
 	const refreshPr = (force = false): void => {
-		const target = prTarget();
-		if (!prAvailable || prFetching || !target) return;
+		// Print, JSON, and headless runs have no footer to paint into; never spawn
+		// gh for output that can never render.
+		if (!sessionCtx?.hasUI) return;
+		if (!prAvailable) return;
 
-		const key = prKey(target);
-		const cached = prCache.get(key);
-		if (!force && cached && Date.now() - cached.fetchedAt < STALE_MS) return;
+		if (prFetching) {
+			// The request is not lost: re-run once the in-flight fetch settles.
+			prPending = true;
+			prPendingForce = prPendingForce || force;
+			return;
+		}
+
+		// During an outage, every keystroke would otherwise spawn another gh call
+		// (up to 10s, serialized). Bypassed by a forced refresh (bash trigger).
+		if (!force && prErrors > 0 && prLastErrorAt !== undefined) {
+			const backoff = nextPollDelay({ status: "error", consecutiveErrors: prErrors });
+			if (backoff !== undefined && Date.now() - prLastErrorAt < backoff) return;
+		}
 
 		const generation = prGeneration;
 		prFetching = true;
 		void (async () => {
 			try {
+				// The branch can change inside a live session (`git switch`, `gt submit`
+				// on a new branch); re-read it rather than trust the one-shot value from
+				// session_start, so prTarget() below sees the current branch.
+				if (repo?.worktreeRoot) {
+					const symbolicRef = await git(pi, ["symbolic-ref", "--quiet", "--short", "HEAD"], repo.worktreeRoot);
+					// The session may have been replaced while that git call ran.
+					if (generation !== prGeneration) return;
+					repo.branch = symbolicRef.code === 0 && symbolicRef.stdout.trim() ? symbolicRef.stdout.trim() : undefined;
+				}
+
+				const target = prTarget();
+				if (!target) return;
+
+				const key = prKey(target);
+				const cached = prCache.get(key);
+				if (!force && cached && Date.now() - cached.fetchedAt < STALE_MS) return;
+
 				if (!nameWithOwner) {
 					const lookup = await fetchNameWithOwner(pi, target.cwd);
 					// The session may have been replaced — possibly into another repo.
@@ -169,6 +202,7 @@ export default function (pi: ExtensionAPI) {
 					}
 					if (lookup.status === "error") {
 						prErrors += 1;
+						prLastErrorAt = Date.now();
 						return;
 					}
 					nameWithOwner = lookup.nameWithOwner;
@@ -182,10 +216,12 @@ export default function (pi: ExtensionAPI) {
 				}
 				if (lookup.status === "error") {
 					prErrors += 1;
+					prLastErrorAt = Date.now();
 					return;
 				}
 
 				prErrors = 0;
+				prLastErrorAt = undefined;
 				prCache.set(key, { fetchedAt: Date.now(), lookup });
 
 				// Focus may have moved while gh was running; only paint if not.
@@ -195,6 +231,12 @@ export default function (pi: ExtensionAPI) {
 				if (generation === prGeneration) {
 					prFetching = false;
 					schedulePoll();
+					if (prPending) {
+						const pendingForce = prPendingForce;
+						prPending = false;
+						prPendingForce = false;
+						refreshPr(pendingForce);
+					}
 				}
 			}
 		})();
@@ -208,6 +250,8 @@ export default function (pi: ExtensionAPI) {
 	 * next `input` refreshes and re-arms.
 	 */
 	const schedulePoll = () => {
+		// Mirrors refreshPr: no footer to keep live means no reason to keep polling.
+		if (!sessionCtx?.hasUI) return;
 		if (prTimer) clearTimeout(prTimer);
 		prTimer = undefined;
 		if (!prAvailable || Date.now() - lastInputAt > IDLE_SUSPEND_MS) return;
@@ -306,11 +350,16 @@ export default function (pi: ExtensionAPI) {
 		configSources = [];
 		knownWorktrees = [];
 		focus = undefined;
+		repo = undefined;
 		prCache.clear();
 		nameWithOwner = undefined;
 		prAvailable = true;
 		prErrors = 0;
+		prLastErrorAt = undefined;
 		prFetching = false;
+		prPending = false;
+		prPendingForce = false;
+		lastInputAt = Date.now();
 		prGeneration += 1;
 
 		repo = await getRepoInfo(pi, ctx.cwd);

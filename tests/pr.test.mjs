@@ -3,9 +3,10 @@
  *
  *   cd ~/.pi/agent/extensions/tests && npm install && node pr.test.mjs
  *
- * Pure functions only: formatting, CI rollup, poll cadence, command matching.
- * The rollup fixtures are real payloads from `gh pr view --json
- * statusCheckRollup` — a mixed array of CheckRun and StatusContext objects.
+ * Pure functions only: formatting, CI rollup, poll cadence, command matching,
+ * and target resolution (focused worktree vs. session worktree). The rollup
+ * fixtures are real payloads from `gh pr view --json statusCheckRollup` — a
+ * mixed array of CheckRun and StatusContext objects.
  */
 
 import { join } from "node:path";
@@ -139,6 +140,35 @@ ok("trigger: later in a chain", pr.matchesPrCommand("pants test :: && git push")
 ok("trigger: ignores unrelated commands", !pr.matchesPrCommand("git status"));
 ok("trigger: ignores gh pr view", !pr.matchesPrCommand("gh pr view 123"));
 ok("trigger: ignores a substring match", !pr.matchesPrCommand("echo pushing"));
+
+// ========================================================= target identity
+
+// The feature's founding invariant: a focused worktree's branch never falls
+// back to the session's, and vice versa. Each field is resolved as a unit.
+ok(
+	"target: focused with a branch wins, ignoring repo",
+	JSON.stringify(
+		pr.resolveTarget({ path: "/wt", branch: "feature" }, { worktreeRoot: "/repo", branch: "main" }),
+	) === JSON.stringify({ cwd: "/wt", branch: "feature" }),
+	JSON.stringify(pr.resolveTarget({ path: "/wt", branch: "feature" }, { worktreeRoot: "/repo", branch: "main" })),
+);
+ok(
+	"target: focused but detached is undefined, never the session's branch",
+	pr.resolveTarget({ path: "/wt" }, { worktreeRoot: "/repo", branch: "main" }) === undefined,
+	JSON.stringify(pr.resolveTarget({ path: "/wt" }, { worktreeRoot: "/repo", branch: "main" })),
+);
+ok(
+	"target: unfocused uses the session's worktree and branch",
+	JSON.stringify(pr.resolveTarget(undefined, { worktreeRoot: "/repo", branch: "main" })) ===
+		JSON.stringify({ cwd: "/repo", branch: "main" }),
+	JSON.stringify(pr.resolveTarget(undefined, { worktreeRoot: "/repo", branch: "main" })),
+);
+ok(
+	"target: unfocused and detached is undefined",
+	pr.resolveTarget(undefined, { worktreeRoot: "/repo" }) === undefined,
+	JSON.stringify(pr.resolveTarget(undefined, { worktreeRoot: "/repo" })),
+);
+ok("target: neither focused nor in a repo is undefined", pr.resolveTarget(undefined, undefined) === undefined);
 
 console.log(fails === 0 ? "\nALL PASS" : `\n${fails} FAILURE(S)`);
 process.exit(fails ? 1 : 0);
