@@ -294,6 +294,10 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	pi.on("session_start", async (_event, ctx) => {
+		// A leftover poll or bash-trigger timer from the previous session must not
+		// fire mid-reset below: it would run refreshPr against this session's
+		// already-bumped generation but the old repo/focus, corrupting nameWithOwner.
+		stopPrTimers();
 		sessionCtx = ctx;
 		// Every field below is session state. A session can be *replaced* (`/new`,
 		// resume) while this closure lives on, so reset everything first — leaving
