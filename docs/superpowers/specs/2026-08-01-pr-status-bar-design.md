@@ -107,13 +107,21 @@ Switching focus swaps the key and paints from cache immediately, then refreshes
 in the background if stale.
 
 **Branch identity.** The active branch is re-read (one local `git symbolic-ref`,
-~2ms) at the start of every refresh rather than trusted from session start. A
-branch switch inside a live session is otherwise invisible — the display would
-keep showing, and linking, the PR of the branch the session happened to start
-on, which is the one thing the feature must never do. The focused-worktree case
-resolves its path and branch as a unit: a worktree with a detached HEAD has no
-branch, so it gets no PR text, never the session branch's PR beside another
-worktree's name.
+~2ms, with the same timeout discipline as the `gh` calls) at the start of every
+refresh rather than trusted from session start — for the *focused* worktree when
+one is focused, otherwise for the session's own. A branch switch inside a live
+session is otherwise invisible: the display would keep showing, and linking, the
+PR of the branch the session happened to start on, which is the one thing the
+feature must never do.
+
+The path and branch resolve as a unit. A worktree with a detached HEAD has no
+branch, so it gets no PR text — never another branch's PR beside its name.
+
+A re-read that changes the branch repaints immediately, before any early return.
+Detecting the change and then returning without painting — because the new HEAD
+is detached, or because the new branch's cache entry is still fresh — would
+strand the *previous* branch's PR on screen, which is the same defect wearing a
+different hat.
 
 **No UI, no work.** Print, JSON, and headless runs never render a status
 segment, so the whole feature short-circuits when `ctx.hasUI` is false rather
