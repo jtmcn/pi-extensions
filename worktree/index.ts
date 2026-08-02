@@ -57,6 +57,14 @@ const STATUS_KEY = "worktree";
 const FOCUS_ENTRY_TYPE = "worktree-focus";
 /** Custom message announcing focus to the model. Carries no state. */
 const FOCUS_MESSAGE_TYPE = "worktree-focus-note";
+/**
+ * Timeout for the HEAD re-read inside a PR refresh.
+ *
+ * `git symbolic-ref` only reads a local ref, so it is milliseconds even on a
+ * cold repo; the bound exists purely so a wedged git (locked index, stalled
+ * network filesystem) cannot latch `prFetching` for the rest of the session.
+ */
+const BRANCH_READ_TIMEOUT_MS = 5_000;
 
 const SUBCOMMANDS = [
 	{ value: "list", label: "list", description: "Show worktrees for this repo" },
@@ -163,8 +171,9 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		// During an outage, every keystroke would otherwise spawn another gh call
-		// (up to 10s, serialized). Bypassed by a forced refresh (bash trigger).
+		// During an outage, every submitted message would otherwise spawn another
+		// gh call (up to 10s, serialized). Bypassed by a forced refresh (bash
+		// trigger).
 		if (!force && prErrors > 0 && prLastErrorAt !== undefined) {
 			const backoff = nextPollDelay({ status: "error", consecutiveErrors: prErrors });
 			if (backoff !== undefined && Date.now() - prLastErrorAt < backoff) return;
@@ -176,12 +185,36 @@ export default function (pi: ExtensionAPI) {
 			try {
 				// The branch can change inside a live session (`git switch`, `gt submit`
 				// on a new branch); re-read it rather than trust the one-shot value from
-				// session_start, so prTarget() below sees the current branch.
-				if (repo?.worktreeRoot) {
-					const symbolicRef = await git(pi, ["symbolic-ref", "--quiet", "--short", "HEAD"], repo.worktreeRoot);
+				// session_start (or from when focus was set), so prTarget() below sees
+				// the current branch. Read the *displayed* worktree: while focused, the
+				// session's own branch is not what the footer shows.
+				const previous = prTarget();
+				const previousKey = previous ? prKey(previous) : undefined;
+				const head = focus?.path ?? repo?.worktreeRoot;
+				if (head) {
+					const symbolicRef = await git(pi, ["symbolic-ref", "--quiet", "--short", "HEAD"], head, {
+						timeout: BRANCH_READ_TIMEOUT_MS,
+					});
 					// The session may have been replaced while that git call ran.
 					if (generation !== prGeneration) return;
-					repo.branch = symbolicRef.code === 0 && symbolicRef.stdout.trim() ? symbolicRef.stdout.trim() : undefined;
+					const branch = symbolicRef.code === 0 && symbolicRef.stdout.trim() ? symbolicRef.stdout.trim() : undefined;
+					// Write back to whichever object supplied the path. The same worktree
+					// with a different HEAD is not a focus change: no setFocus, no entry,
+					// no message. Focus may also have moved while git ran, in which case
+					// the branch belongs to a worktree nobody is showing — drop it.
+					if (focus) {
+						if (focus.path === head) focus.branch = branch;
+					} else if (repo?.worktreeRoot === head) {
+						repo.branch = branch;
+					}
+
+					// The only other repaint is on the success path below, so both early
+					// returns that follow would otherwise leave the previous branch's PR
+					// on screen, linked. Repaint from cache the moment the target moves;
+					// setStatus renders no PR when the new target has no cached entry, so
+					// a detached HEAD clears the label instead of stranding it.
+					const moved = prTarget();
+					if ((moved ? prKey(moved) : undefined) !== previousKey && sessionCtx) setStatus(sessionCtx);
 				}
 
 				const target = prTarget();
