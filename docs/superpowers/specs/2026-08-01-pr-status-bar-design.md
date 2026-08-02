@@ -90,6 +90,11 @@ Two `gh` calls, both run with `cwd` set to the active worktree:
 - `gh pr view <branch> --json number,state,isDraft,url,statusCheckRollup` —
   everything the display needs in one round trip (~0.5s measured).
 
+Both return the same three-way classification (`unavailable` / `error` /
+result). The repo lookup must not collapse its failures into one bare
+"missing" answer: a transient blip on the *first* call would otherwise disable
+the feature for the whole session, since the poll is gated on the same flag.
+
 ## Refresh policy
 
 **Cache.** A map keyed by `<repoRoot>\0<branch>`, holding
@@ -125,14 +130,29 @@ in the background if stale.
 **Concurrency.** One in-flight fetch at a time, 10s `exec` timeout. A result
 whose key no longer matches the active key is discarded.
 
+**Session replacement.** A session can be replaced (`/new`, resume) while a
+fetch is in flight, and the extension closure — with all its PR state — lives
+on. A generation counter, incremented on every `session_start`, is captured
+before each fetch and re-checked after every `await`; a fetch from a superseded
+session discards its result and does not touch shared state. Without it two
+things break: the in-flight flag is never cleared for the new session, so its
+own refresh silently no-ops; and `nameWithOwner`, which is a single unkeyed
+variable rather than a per-target cache entry, can be overwritten with the
+*previous* repo's `owner/name` after the reset — producing Graphite links to
+the wrong repository, silently. `session_start` also resets the in-flight flag
+directly.
+
 ## Failure handling
 
 All failures are silent — no notifications, ever. This is decoration.
 
 - `gh` missing (ENOENT), unauthenticated, or a non-GitHub remote: the PR feature
-  disables itself for the rest of the session.
+  disables itself for the rest of the session. This applies to whichever call
+  reports it, including the repo lookup.
 - Transient errors: keep the last known value on screen, back off 60s → 2m →
-  5m. After three consecutive failures with nothing cached, show no suffix.
+  5m. After three consecutive failures with nothing cached, show no suffix. A
+  failed repo lookup is retried on the same backoff — it is only terminal when
+  `gh` says it is.
 
 ## Timer discipline
 

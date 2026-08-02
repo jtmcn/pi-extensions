@@ -10,6 +10,17 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-01-pr-status-bar-design.md`
 
+**Amendment 1 (during execution, after Task 4's review).** The original plan let
+an in-flight `gh` fetch outlive a session replacement, which left three holes:
+the in-flight flag was never reset on `session_start`; a stale fetch could
+overwrite `nameWithOwner` with the previous repo's `owner/name` and silently
+link to the wrong repository; and any failure of the repo lookup — including a
+transient one — permanently disabled the feature. Task 3's `fetchNameWithOwner`
+therefore returns the same three-way classification as `fetchPr`, and Task 4
+carries a session generation counter. The task text below reflects the
+amendment; Tasks 3 and 4 were already committed against the original text, so
+the difference lands as a fix round on Task 4.
+
 ## Global Constraints
 
 - **No build step.** pi loads TypeScript via jiti. Import local modules with the explicit `.ts` extension (`../lib/git.ts`), matching the rest of the repo.
@@ -475,7 +486,8 @@ Two subprocess calls behind the runner interface, with every failure classified.
 - Consumes: `PullRequest` from Task 1; `GitRunner` from `../lib/git.ts` (shape: `{ exec(command, args, options?) => Promise<{ stdout, stderr, code, killed }> }`).
 - Produces:
   - `type PrLookup = { status: "pr"; pr: PullRequest } | { status: "none" } | { status: "error" } | { status: "unavailable" }`
-  - `fetchNameWithOwner(runner: GitRunner, cwd: string): Promise<string | undefined>`
+  - `type RepoLookup = { status: "repo"; nameWithOwner: string } | { status: "error" } | { status: "unavailable" }` *(Amendment 1)*
+  - `fetchNameWithOwner(runner: GitRunner, cwd: string): Promise<RepoLookup>` *(Amendment 1 — was `Promise<string | undefined>`; a bare `undefined` could not distinguish a transient blip from "not a GitHub repo", so one blip disabled the feature for the session)*
   - `fetchPr(runner: GitRunner, branch: string, cwd: string): Promise<PrLookup>`
   - `GH_TIMEOUT_MS`
 
@@ -539,20 +551,33 @@ const PR_JSON = JSON.stringify({
 
 {
 	const runner = fakeRunner({ stdout: '{"nameWithOwner":"equilibrium-energy/helios"}\n' });
-	const name = await gh.fetchNameWithOwner(runner, "/repo");
-	ok("repo: parses nameWithOwner", name === "equilibrium-energy/helios", name);
+	const result = await gh.fetchNameWithOwner(runner, "/repo");
+	ok("repo: parses nameWithOwner", result.status === "repo" && result.nameWithOwner === "equilibrium-energy/helios", JSON.stringify(result));
 	ok("repo: runs in the given cwd", runner.calls[0].options.cwd === "/repo");
 	ok("repo: passes a timeout", runner.calls[0].options.timeout === gh.GH_TIMEOUT_MS);
 }
 
 {
-	const runner = fakeRunner({ code: 1, stderr: "not a github repository" });
-	ok("repo: failure yields undefined", (await gh.fetchNameWithOwner(runner, "/repo")) === undefined);
+	const runner = fakeRunner({ code: 1, stderr: "dial tcp: lookup api.github.com: no such host\n" });
+	ok("repo: a network failure is retryable", (await gh.fetchNameWithOwner(runner, "/repo")).status === "error");
+}
+
+{
+	const runner = fakeRunner({
+		code: 1,
+		stderr: "none of the git remotes configured for this repository point to a known GitHub host\n",
+	});
+	ok("repo: a non-github remote is terminal", (await gh.fetchNameWithOwner(runner, "/repo")).status === "unavailable");
+}
+
+{
+	const runner = { async exec() { throw Object.assign(new Error("spawn gh ENOENT"), { code: "ENOENT" }); } };
+	ok("repo: a missing gh binary is terminal", (await gh.fetchNameWithOwner(runner, "/repo")).status === "unavailable");
 }
 
 {
 	const runner = fakeRunner({ stdout: "not json" });
-	ok("repo: unparseable output yields undefined", (await gh.fetchNameWithOwner(runner, "/repo")) === undefined);
+	ok("repo: unparseable output is retryable", (await gh.fetchNameWithOwner(runner, "/repo")).status === "error");
 }
 
 // ================================================================= fetchPr
@@ -655,6 +680,12 @@ export type PrLookup =
 	| { status: "error" }
 	| { status: "unavailable" };
 
+/** Outcome of a repo lookup, classified the same way. */
+export type RepoLookup =
+	| { status: "repo"; nameWithOwner: string }
+	| { status: "error" }
+	| { status: "unavailable" };
+
 /** Substrings in gh's stderr that mean "never going to work here". */
 const UNAVAILABLE_PATTERNS = [
 	"gh auth login",
@@ -664,15 +695,28 @@ const UNAVAILABLE_PATTERNS = [
 	"could not determine",
 ];
 
-/** The repo's `owner/name`, or undefined when gh cannot say. Cache this. */
-export async function fetchNameWithOwner(runner: GitRunner, cwd: string): Promise<string | undefined> {
+/**
+ * The repo's `owner/name`, classified like a PR lookup. Cache the success.
+ *
+ * A bare "missing" answer would be indistinguishable between a transient blip
+ * and "this is not a GitHub repo" — and since the caller disables the whole
+ * feature on a terminal answer, one blip would kill it for the session.
+ */
+export async function fetchNameWithOwner(runner: GitRunner, cwd: string): Promise<RepoLookup> {
 	const result = await run(runner, ["repo", "view", "--json", "nameWithOwner"], cwd);
-	if (!result || result.code !== 0) return undefined;
+	if (!result) return { status: "unavailable" };
+
+	if (result.code !== 0) {
+		const stderr = result.stderr.toLowerCase();
+		if (UNAVAILABLE_PATTERNS.some((pattern) => stderr.includes(pattern))) return { status: "unavailable" };
+		return { status: "error" };
+	}
+
 	try {
 		const parsed = JSON.parse(result.stdout) as { nameWithOwner?: string };
-		return parsed.nameWithOwner || undefined;
+		return parsed.nameWithOwner ? { status: "repo", nameWithOwner: parsed.nameWithOwner } : { status: "error" };
 	} catch {
-		return undefined;
+		return { status: "error" };
 	}
 }
 
@@ -779,6 +823,14 @@ In `worktree/index.ts`, immediately after the `let knownWorktrees: Worktree[] = 
 	let prErrors = 0;
 	/** Guard so overlapping triggers cannot start two fetches. */
 	let prFetching = false;
+	/**
+	 * Bumped on every session_start.
+	 *
+	 * A session can be replaced (`/new`, resume) while a fetch is in flight, and
+	 * this closure outlives it. Each fetch captures the generation and rechecks
+	 * it after every await, so a superseded fetch touches no shared state.
+	 */
+	let prGeneration = 0;
 
 	/** The worktree whose PR is displayed: the focused one, else the session's. */
 	const prTarget = (): { cwd: string; branch: string } | undefined => {
@@ -812,18 +864,28 @@ In `worktree/index.ts`, immediately after the `let knownWorktrees: Worktree[] = 
 		const cached = prCache.get(key);
 		if (!force && cached && Date.now() - cached.fetchedAt < STALE_MS) return;
 
+		const generation = prGeneration;
 		prFetching = true;
 		void (async () => {
 			try {
 				if (!nameWithOwner) {
-					nameWithOwner = await fetchNameWithOwner(pi, target.cwd);
-					if (!nameWithOwner) {
+					const lookup = await fetchNameWithOwner(pi, target.cwd);
+					// The session may have been replaced — possibly into another repo.
+					// Writing nameWithOwner now would link every later PR to the wrong one.
+					if (generation !== prGeneration) return;
+					if (lookup.status === "unavailable") {
 						prAvailable = false;
 						return;
 					}
+					if (lookup.status === "error") {
+						prErrors += 1;
+						return;
+					}
+					nameWithOwner = lookup.nameWithOwner;
 				}
 
 				const lookup = await fetchPr(pi, target.branch, target.cwd);
+				if (generation !== prGeneration) return;
 				if (lookup.status === "unavailable") {
 					prAvailable = false;
 					return;
@@ -840,7 +902,8 @@ In `worktree/index.ts`, immediately after the `let knownWorktrees: Worktree[] = 
 				const current = prTarget();
 				if (sessionCtx && current && prKey(current) === key) setStatus(sessionCtx);
 			} finally {
-				prFetching = false;
+				// A superseded fetch must not clear the flag its successor set.
+				if (generation === prGeneration) prFetching = false;
 			}
 		})();
 	};
@@ -909,7 +972,13 @@ Append the PR resets to it:
 		nameWithOwner = undefined;
 		prAvailable = true;
 		prErrors = 0;
+		prFetching = false;
+		prGeneration += 1;
 ```
+
+The generation bump is what makes the `prFetching = false` reset safe: a fetch
+from the replaced session will not clear the flag afterwards, and will not write
+its repo name or result into the new session's state.
 
 Then, at the very end of the same handler, the final line is `setStatus(ctx);`. Add a refresh after it:
 
@@ -1014,11 +1083,12 @@ And add to the PR state block, after `let prFetching = false;`:
 
 - [ ] **Step 2: Re-arm the timer after each refresh**
 
-Inside `refreshPr`'s async body, the `finally` block currently reads:
+Inside `refreshPr`'s async body, the `finally` block currently reads (as amended in Task 4):
 
 ```typescript
 			} finally {
-				prFetching = false;
+				// A superseded fetch must not clear the flag its successor set.
+				if (generation === prGeneration) prFetching = false;
 			}
 ```
 
@@ -1026,8 +1096,10 @@ Replace it with:
 
 ```typescript
 			} finally {
-				prFetching = false;
-				schedulePoll();
+				if (generation === prGeneration) {
+					prFetching = false;
+					schedulePoll();
+				}
 			}
 ```
 
