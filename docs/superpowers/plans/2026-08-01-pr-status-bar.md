@@ -1302,3 +1302,29 @@ git commit -m "Document the PR status display"
 **Type consistency.** `PullRequest` is defined in `pr.ts` (Task 1) and imported by `gh.ts` (Task 3). `PrLookup` is defined in `gh.ts` and consumed in `index.ts` (Task 4). `prState` returns the `PrState` that `nextPollDelay` accepts (Tasks 1, 2, 5). `GitRunner` comes from the existing `lib/git.ts`, and `pi` satisfies it (noted in Task 4 step 2).
 
 **Known risk, accepted.** `prErrors` drives the backoff but is a single counter shared across branches; switching branches mid-backoff inherits the count. It self-clears on the first success, and the cost of being wrong is a delayed status refresh.
+
+---
+
+## Amendment 2 (final whole-branch review)
+
+The whole-branch review found three Important issues that no task-scoped review
+could see, plus minors worth folding into the same pass. All are addressed in
+one fix wave after Task 6:
+
+1. **`prTarget()` resolved `cwd` and `branch` through independent `??` chains**,
+   so focusing a detached worktree paired that worktree's path with the
+   *session's* branch — rendering another branch's PR beside it. The target is
+   now resolved as a unit, in a pure `resolveTarget(focus, repo)` in `pr.ts`
+   with tests, since this is the feature's founding invariant.
+2. **A branch switch inside a live session was never detected.** `repo.branch`
+   was read once at `session_start`, so the footer kept showing and linking the
+   original branch's PR. The branch is now re-read before each fetch.
+3. **The feature ran with no UI**, spawning two `gh` calls per headless or print
+   run whose result could never render, and a fetch completing after
+   `session_shutdown` could arm a post-shutdown poll loop. Both are gated on
+   `sessionCtx?.hasUI`.
+
+Also folded in: the error backoff no longer bypassed by the input path; a
+refresh dropped because one was in flight is re-armed rather than lost;
+`lastInputAt` and `repo` reset on `session_start`; `worktree/README.md`'s file
+list and test command updated.

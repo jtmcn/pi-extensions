@@ -97,11 +97,27 @@ the feature for the whole session, since the poll is gated on the same flag.
 
 ## Refresh policy
 
-**Cache.** A map keyed by `<repoRoot>\0<branch>`, holding
-`{ fetchedAt, pr | "none", consecutiveErrors }`. The active key derives from the
+**Cache.** A map keyed by `<repoRoot>\0<branch>`, holding `{ fetchedAt, pr |
+"none" }`. The consecutive-error count is deliberately *not* per entry: it is one
+session-wide counter, because every error it counts means "gh is unhappy", which
+is a property of the machine and the network rather than of one branch. Any
+success zeroes it. The active key derives from the
 focused worktree when focus is on, otherwise the session's own worktree.
 Switching focus swaps the key and paints from cache immediately, then refreshes
 in the background if stale.
+
+**Branch identity.** The active branch is re-read (one local `git symbolic-ref`,
+~2ms) at the start of every refresh rather than trusted from session start. A
+branch switch inside a live session is otherwise invisible — the display would
+keep showing, and linking, the PR of the branch the session happened to start
+on, which is the one thing the feature must never do. The focused-worktree case
+resolves its path and branch as a unit: a worktree with a detached HEAD has no
+branch, so it gets no PR text, never the session branch's PR beside another
+worktree's name.
+
+**No UI, no work.** Print, JSON, and headless runs never render a status
+segment, so the whole feature short-circuits when `ctx.hasUI` is false rather
+than spawning `gh` for output that cannot exist.
 
 **Triggers.**
 
