@@ -26,6 +26,12 @@ export type PrLookup =
 	| { status: "error" }
 	| { status: "unavailable" };
 
+/** Outcome of a repo lookup, classified the same way. */
+export type RepoLookup =
+	| { status: "repo"; nameWithOwner: string }
+	| { status: "error" }
+	| { status: "unavailable" };
+
 /** Substrings in gh's stderr that mean "never going to work here". */
 const UNAVAILABLE_PATTERNS = [
 	"gh auth login",
@@ -35,15 +41,28 @@ const UNAVAILABLE_PATTERNS = [
 	"could not determine",
 ];
 
-/** The repo's `owner/name`, or undefined when gh cannot say. Cache this. */
-export async function fetchNameWithOwner(runner: GitRunner, cwd: string): Promise<string | undefined> {
+/**
+ * The repo's `owner/name`, classified like a PR lookup. Cache the success.
+ *
+ * A bare "missing" answer would be indistinguishable between a transient blip
+ * and "this is not a GitHub repo" — and since the caller disables the whole
+ * feature on a terminal answer, one blip would kill it for the session.
+ */
+export async function fetchNameWithOwner(runner: GitRunner, cwd: string): Promise<RepoLookup> {
 	const result = await run(runner, ["repo", "view", "--json", "nameWithOwner"], cwd);
-	if (!result || result.code !== 0) return undefined;
+	if (!result) return { status: "unavailable" };
+
+	if (result.code !== 0) {
+		const stderr = result.stderr.toLowerCase();
+		if (UNAVAILABLE_PATTERNS.some((pattern) => stderr.includes(pattern))) return { status: "unavailable" };
+		return { status: "error" };
+	}
+
 	try {
 		const parsed = JSON.parse(result.stdout) as { nameWithOwner?: string };
-		return parsed.nameWithOwner || undefined;
+		return parsed.nameWithOwner ? { status: "repo", nameWithOwner: parsed.nameWithOwner } : { status: "error" };
 	} catch {
-		return undefined;
+		return { status: "error" };
 	}
 }
 

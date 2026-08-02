@@ -91,6 +91,14 @@ export default function (pi: ExtensionAPI) {
 	let prErrors = 0;
 	/** Guard so overlapping triggers cannot start two fetches. */
 	let prFetching = false;
+	/**
+	 * Bumped on every session_start.
+	 *
+	 * A session can be replaced (`/new`, resume) while a fetch is in flight, and
+	 * this closure outlives it. Each fetch captures the generation and rechecks
+	 * it after every await, so a superseded fetch touches no shared state.
+	 */
+	let prGeneration = 0;
 
 	/** The worktree whose PR is displayed: the focused one, else the session's. */
 	const prTarget = (): { cwd: string; branch: string } | undefined => {
@@ -124,18 +132,28 @@ export default function (pi: ExtensionAPI) {
 		const cached = prCache.get(key);
 		if (!force && cached && Date.now() - cached.fetchedAt < STALE_MS) return;
 
+		const generation = prGeneration;
 		prFetching = true;
 		void (async () => {
 			try {
 				if (!nameWithOwner) {
-					nameWithOwner = await fetchNameWithOwner(pi, target.cwd);
-					if (!nameWithOwner) {
+					const lookup = await fetchNameWithOwner(pi, target.cwd);
+					// The session may have been replaced — possibly into another repo.
+					// Writing nameWithOwner now would link every later PR to the wrong one.
+					if (generation !== prGeneration) return;
+					if (lookup.status === "unavailable") {
 						prAvailable = false;
 						return;
 					}
+					if (lookup.status === "error") {
+						prErrors += 1;
+						return;
+					}
+					nameWithOwner = lookup.nameWithOwner;
 				}
 
 				const lookup = await fetchPr(pi, target.branch, target.cwd);
+				if (generation !== prGeneration) return;
 				if (lookup.status === "unavailable") {
 					prAvailable = false;
 					return;
@@ -152,7 +170,8 @@ export default function (pi: ExtensionAPI) {
 				const current = prTarget();
 				if (sessionCtx && current && prKey(current) === key) setStatus(sessionCtx);
 			} finally {
-				prFetching = false;
+				// A superseded fetch must not clear the flag its successor set.
+				if (generation === prGeneration) prFetching = false;
 			}
 		})();
 	};
@@ -231,6 +250,8 @@ export default function (pi: ExtensionAPI) {
 		nameWithOwner = undefined;
 		prAvailable = true;
 		prErrors = 0;
+		prFetching = false;
+		prGeneration += 1;
 
 		repo = await getRepoInfo(pi, ctx.cwd);
 		if (!repo) {

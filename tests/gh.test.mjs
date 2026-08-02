@@ -51,20 +51,33 @@ const PR_JSON = JSON.stringify({
 
 {
 	const runner = fakeRunner({ stdout: '{"nameWithOwner":"equilibrium-energy/helios"}\n' });
-	const name = await gh.fetchNameWithOwner(runner, "/repo");
-	ok("repo: parses nameWithOwner", name === "equilibrium-energy/helios", name);
+	const result = await gh.fetchNameWithOwner(runner, "/repo");
+	ok("repo: parses nameWithOwner", result.status === "repo" && result.nameWithOwner === "equilibrium-energy/helios", JSON.stringify(result));
 	ok("repo: runs in the given cwd", runner.calls[0].options.cwd === "/repo");
 	ok("repo: passes a timeout", runner.calls[0].options.timeout === gh.GH_TIMEOUT_MS);
 }
 
 {
-	const runner = fakeRunner({ code: 1, stderr: "not a github repository" });
-	ok("repo: failure yields undefined", (await gh.fetchNameWithOwner(runner, "/repo")) === undefined);
+	const runner = fakeRunner({ code: 1, stderr: "dial tcp: lookup api.github.com: no such host\n" });
+	ok("repo: a network failure is retryable", (await gh.fetchNameWithOwner(runner, "/repo")).status === "error");
+}
+
+{
+	const runner = fakeRunner({
+		code: 1,
+		stderr: "none of the git remotes configured for this repository point to a known GitHub host\n",
+	});
+	ok("repo: a non-github remote is terminal", (await gh.fetchNameWithOwner(runner, "/repo")).status === "unavailable");
+}
+
+{
+	const runner = { async exec() { throw Object.assign(new Error("spawn gh ENOENT"), { code: "ENOENT" }); } };
+	ok("repo: a missing gh binary is terminal", (await gh.fetchNameWithOwner(runner, "/repo")).status === "unavailable");
 }
 
 {
 	const runner = fakeRunner({ stdout: "not json" });
-	ok("repo: unparseable output yields undefined", (await gh.fetchNameWithOwner(runner, "/repo")) === undefined);
+	ok("repo: unparseable output is retryable", (await gh.fetchNameWithOwner(runner, "/repo")).status === "error");
 }
 
 // ================================================================= fetchPr
