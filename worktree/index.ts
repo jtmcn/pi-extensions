@@ -39,7 +39,15 @@ import { DEFAULT_CONFIG, loadConfig, type WorktreeConfig, worktreePath } from ".
 import { applyFocus, type FocusTarget } from "./focus.ts";
 import { matchWorktree, parseNewArgs } from "./select.ts";
 import { fetchNameWithOwner, fetchPr, type PrLookup } from "./gh.ts";
-import { formatPr, STALE_MS } from "./pr.ts";
+import {
+	BASH_TRIGGER_DELAY_MS,
+	formatPr,
+	IDLE_SUSPEND_MS,
+	matchesPrCommand,
+	nextPollDelay,
+	prState,
+	STALE_MS,
+} from "./pr.ts";
 import { createWorktree, pruneWorktrees, removeWorktree } from "./worktrees.ts";
 
 const STATUS_KEY = "worktree";
@@ -91,6 +99,20 @@ export default function (pi: ExtensionAPI) {
 	let prErrors = 0;
 	/** Guard so overlapping triggers cannot start two fetches. */
 	let prFetching = false;
+	/** Pending poll. Holds no ctx: a captured one is stale after session replacement. */
+	let prTimer: ReturnType<typeof setTimeout> | undefined;
+	/** Pending post-submit refresh. */
+	let prBashTimer: ReturnType<typeof setTimeout> | undefined;
+	/** Last user input, for idle suspension. */
+	let lastInputAt = Date.now();
+
+	/** Cancel every pending PR timer. Idempotent. */
+	const stopPrTimers = () => {
+		if (prTimer) clearTimeout(prTimer);
+		if (prBashTimer) clearTimeout(prBashTimer);
+		prTimer = undefined;
+		prBashTimer = undefined;
+	};
 	/**
 	 * Bumped on every session_start.
 	 *
@@ -170,10 +192,44 @@ export default function (pi: ExtensionAPI) {
 				const current = prTarget();
 				if (sessionCtx && current && prKey(current) === key) setStatus(sessionCtx);
 			} finally {
-				// A superseded fetch must not clear the flag its successor set.
-				if (generation === prGeneration) prFetching = false;
+				if (generation === prGeneration) {
+					prFetching = false;
+					schedulePoll();
+				}
 			}
 		})();
+	};
+
+	/**
+	 * Arm the next poll, cadence chosen by what the last fetch found.
+	 *
+	 * A self-rescheduling timeout rather than an interval: the delay depends on
+	 * the result just fetched. Sleeping sessions stop polling entirely — the
+	 * next `input` refreshes and re-arms.
+	 */
+	const schedulePoll = () => {
+		if (prTimer) clearTimeout(prTimer);
+		prTimer = undefined;
+		if (!prAvailable || Date.now() - lastInputAt > IDLE_SUSPEND_MS) return;
+
+		const target = prTarget();
+		if (!target) return;
+
+		const cached = prCache.get(prKey(target));
+		const delay =
+			prErrors > 0
+				? nextPollDelay({ status: "error", consecutiveErrors: prErrors })
+				: cached?.lookup.status === "pr"
+					? nextPollDelay({ status: "pr", state: prState(cached.lookup.pr) })
+					: nextPollDelay({ status: "none" });
+		if (delay === undefined) return;
+
+		prTimer = setTimeout(() => {
+			prTimer = undefined;
+			refreshPr(true);
+		}, delay);
+		// Do not hold the process open for a status decoration.
+		prTimer.unref?.();
 	};
 
 	/**
@@ -291,6 +347,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", (_event, ctx) => {
+		stopPrTimers();
 		sessionCtx = undefined;
 		if (!ctx.hasUI) return;
 		ctx.ui.setStatus(STATUS_KEY, undefined);
@@ -301,6 +358,36 @@ export default function (pi: ExtensionAPI) {
 	// Reports stay up until the user does something else.
 	pi.on("input", (_event, ctx) => {
 		clearReport(ctx);
+		// Input also ends idle suspension: refresh if stale, then re-arm.
+		lastInputAt = Date.now();
+		refreshPr();
+		if (!prTimer) schedulePoll();
+	});
+
+	/**
+	 * Refresh shortly after a command that may have created or moved a PR.
+	 *
+	 * Post-execution on purpose — `tool_call` fires before the push lands — and
+	 * delayed, because GitHub needs a moment to create the PR and register its
+	 * checks.
+	 */
+	const scheduleBashRefresh = (command: unknown) => {
+		if (typeof command !== "string" || !matchesPrCommand(command)) return;
+		if (prBashTimer) clearTimeout(prBashTimer);
+		prBashTimer = setTimeout(() => {
+			prBashTimer = undefined;
+			refreshPr(true);
+		}, BASH_TRIGGER_DELAY_MS);
+		prBashTimer.unref?.();
+	};
+
+	pi.on("tool_result", (event) => {
+		if (event.toolName !== "bash") return;
+		scheduleBashRefresh((event.input as { command?: unknown } | undefined)?.command);
+	});
+
+	pi.on("user_bash", (event) => {
+		scheduleBashRefresh(event.command);
 	});
 
 	// ---- Focus mode: rewrite tool inputs -----------------------------------
