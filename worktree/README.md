@@ -155,6 +155,8 @@ worktree/config.ts     config loading and path templating
 worktree/focus.ts      tool-input rewriting (pure, heavily tested)
 worktree/select.ts     argument parsing and name matching (pure)
 worktree/worktrees.ts  create / remove / prune
+worktree/pr.ts         PR display formatting and poll cadence (pure)
+worktree/gh.ts         the gh calls behind the PR status display
 ```
 
 ## Tests
@@ -162,10 +164,13 @@ worktree/worktrees.ts  create / remove / prune
 ```bash
 cd ~/Code/pi-extensions/tests
 npm install
-node worktree.test.mjs
+npm test
 ```
 
-Runs against throwaway repos in `$TMPDIR`, covering both plain and bare
-layouts, plus pure-function tests for focus rewriting, argument parsing, name
-matching and config precedence. Set `PI_TEST_BARE_REPO` to also check a real
-bare-layout checkout on this machine.
+Runs `worktree.test.mjs`, `mcp.test.mjs`, `pr.test.mjs`, and `gh.test.mjs`.
+`worktree.test.mjs` runs against throwaway repos in `$TMPDIR`, covering both
+plain and bare layouts, plus pure-function tests for focus rewriting, argument
+parsing, name matching and config precedence. Set `PI_TEST_BARE_REPO` to also
+check a real bare-layout checkout on this machine. `pr.test.mjs` and
+`gh.test.mjs` cover the PR status display and its `gh` calls, both pure or
+fake-runner tests with no network or subprocesses.
