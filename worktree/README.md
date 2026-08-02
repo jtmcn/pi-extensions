@@ -119,6 +119,33 @@ Later files win:
 }
 ```
 
+## PR in the status bar
+
+When the current branch has a pull request, the status segment shows it:
+
+```
+⑂ main (joel/ont-mount-constant) #26904 open ●    ← worktree focused
+#26904 open ●                                     ← no focus
+```
+
+The PR text is an OSC 8 hyperlink to the Graphite PR page
+(`app.graphite.com/github/pr/<owner>/<repo>/<number>`); cmd-click it in a
+terminal that supports hyperlinks. The glyph is the CI rollup: `✓` all passed,
+`✗` something failed, `●` still running, absent when there are no checks. The
+state word is `open`, `draft`, `merged`, or `closed`.
+
+Unfocused sessions show the PR alone, because pi's own footer line already
+reads `<pwd> (<branch>)`.
+
+Data comes from `gh pr view <branch>`, refreshed every 60s while the PR is open,
+every 5 min when the branch has no PR, and never once it is merged or closed.
+Polling suspends after 15 minutes without input and resumes on the next one. A
+`gt submit`, `gh pr create`, or `git push` schedules a refresh 8s later so a new
+PR appears promptly.
+
+Everything fails silently: no `gh`, not logged in, no network, or a non-GitHub
+remote simply means no PR text.
+
 ## Files
 
 ```

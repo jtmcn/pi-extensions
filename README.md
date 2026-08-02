@@ -47,7 +47,7 @@ Discovery only picks up `*.ts` and `*/index.ts` at the top level, so `lib/` and
 | Name | What it does |
 |---|---|
 | [`mcp`](mcp/README.md) | MCP client: spawn stdio MCP servers and expose their tools as native pi tools. |
-| [`worktree`](worktree/README.md) | Manage git worktrees; optionally redirect the agent's tool calls into one without restarting the session. |
+| [`worktree`](worktree/README.md) | Manage git worktrees; optionally redirect the agent's tool calls into one without restarting the session. Shows the branch's PR in the status bar. |
 
 ## Conventions
 
