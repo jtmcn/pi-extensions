@@ -35,6 +35,8 @@ cat >"$config" <<EOF
     "moduleResolution": "bundler",
     "allowImportingTsExtensions": true,
     "skipLibCheck": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
     "baseUrl": "$root",
     "paths": {
       "@earendil-works/pi-ai": ["$pi/node_modules/@earendil-works/pi-ai"],
