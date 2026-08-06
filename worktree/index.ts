@@ -30,7 +30,6 @@ import {
 	countDirty,
 	describeWorktree,
 	getRepoInfo,
-	git,
 	listWorktrees,
 	type RepoInfo,
 	slugify,
@@ -39,18 +38,8 @@ import {
 import { DEFAULT_CONFIG, loadConfig, type WorktreeConfig, worktreePath } from "./config.ts";
 import { applyFocus, type FocusTarget } from "./focus.ts";
 import { matchWorktree, parseNewArgs } from "./select.ts";
-import { fetchNameWithOwner, fetchPr, type PrLookup } from "./gh.ts";
-import {
-	BASH_TRIGGER_DELAY_MS,
-	BRANCH_READ_TIMEOUT_MS,
-	formatPr,
-	IDLE_SUSPEND_MS,
-	matchesPrCommand,
-	nextPollDelay,
-	prState,
-	resolveTarget,
-	STALE_MS,
-} from "./pr.ts";
+import { createPrMonitor } from "./pr-monitor.ts";
+import { resolveTarget } from "./pr.ts";
 import { createWorktree, pruneWorktrees, removeWorktree } from "./worktrees.ts";
 
 const STATUS_KEY = "worktree";
@@ -90,221 +79,32 @@ export default function (pi: ExtensionAPI) {
 	// ---- PR status ---------------------------------------------------------
 
 	/**
-	 * Last lookup per `<cwd>\0<branch>`, so switching focus repaints instantly
-	 * and only refreshes in the background.
-	 */
-	const prCache = new Map<string, { fetchedAt: number; lookup: PrLookup }>();
-	/** `owner/name` for the repo, fetched once per session. */
-	let nameWithOwner: string | undefined;
-	/** Cleared for the session when gh is missing, unauthenticated, or non-GitHub. */
-	let prAvailable = true;
-	/** Consecutive fetch failures, for backoff. */
-	let prErrors = 0;
-	/** Guard so overlapping triggers cannot start two fetches. */
-	let prFetching = false;
-	/** Pending poll. Holds no ctx: a captured one is stale after session replacement. */
-	let prTimer: ReturnType<typeof setTimeout> | undefined;
-	/** Pending post-submit refresh. */
-	let prBashTimer: ReturnType<typeof setTimeout> | undefined;
-	/** Last user input, for idle suspension. */
-	let lastInputAt = Date.now();
-	/** When the last fetch attempt failed, for M-1's input-path backoff. */
-	let prLastErrorAt: number | undefined;
-	/** A refresh was requested while one was already in flight; re-run once done. */
-	let prPending = false;
-	/** Whether the pending, dropped refresh above was forced. */
-	let prPendingForce = false;
-
-	/**
-	 * Bumped on every session_start.
+	 * The PR status monitor.
 	 *
-	 * A session can be replaced (`/new`, resume) while a fetch is in flight, and
-	 * this closure outlives it. Each fetch captures the generation and rechecks
-	 * it after every await, so a superseded fetch touches no shared state.
+	 * Owns every piece of PR state. Created once per process and reset on each
+	 * session_start, like the rest of this closure. It reaches git and gh through
+	 * `pi` and reports back through the callbacks below; it deliberately knows
+	 * nothing about focus, repo, or ctx.
 	 */
-	let prGeneration = 0;
-
-	/** Cancel every pending PR timer. Idempotent. */
-	const stopPrTimers = () => {
-		if (prTimer) clearTimeout(prTimer);
-		if (prBashTimer) clearTimeout(prBashTimer);
-		prTimer = undefined;
-		prBashTimer = undefined;
-	};
-
-	/** The worktree whose PR is displayed: the focused one, else the session's. */
-	const prTarget = (): { cwd: string; branch: string } | undefined => resolveTarget(focus, repo);
-
-	const prKey = (target: { cwd: string; branch: string }) => `${target.cwd}\0${target.branch}`;
-
-	/** The formatted PR label for the active target, if one is cached. */
-	const prLabel = (): string | undefined => {
-		const target = prTarget();
-		if (!target || !nameWithOwner) return undefined;
-		const entry = prCache.get(prKey(target));
-		if (entry?.lookup.status !== "pr") return undefined;
-		return formatPr(entry.lookup.pr, nameWithOwner);
-	};
-
-	/**
-	 * Refresh the active target's PR in the background.
-	 *
-	 * Never awaited by a handler: a session must not wait on the network. The
-	 * result is dropped if focus moved while the fetch was in flight.
-	 */
-	const refreshPr = (force = false): void => {
-		// Print, JSON, and headless runs have no footer to paint into; never spawn
-		// gh for output that can never render.
-		if (!sessionCtx?.hasUI) return;
-		if (!prAvailable) return;
-
-		if (prFetching) {
-			// The request is not lost: re-run once the in-flight fetch settles.
-			prPending = true;
-			prPendingForce = prPendingForce || force;
-			return;
-		}
-
-		const generation = prGeneration;
-		prFetching = true;
-		void (async () => {
-			try {
-				// The branch can change inside a live session (`git switch`, `gt submit`
-				// on a new branch); re-read it rather than trust the one-shot value from
-				// session_start (or from when focus was set), so prTarget() below sees
-				// the current branch. Read the *displayed* worktree: while focused, the
-				// session's own branch is not what the footer shows.
-				const previous = prTarget();
-				const previousKey = previous ? prKey(previous) : undefined;
-				const head = focus?.path ?? repo?.worktreeRoot;
-				if (head) {
-					const symbolicRef = await git(pi, ["symbolic-ref", "--quiet", "--short", "HEAD"], head, {
-						timeout: BRANCH_READ_TIMEOUT_MS,
-					});
-					// The session may have been replaced while that git call ran.
-					if (generation !== prGeneration) return;
-					const branch = symbolicRef.code === 0 && symbolicRef.stdout.trim() ? symbolicRef.stdout.trim() : undefined;
-					// Write back to whichever object supplied the path. The same worktree
-					// with a different HEAD is not a focus change: no setFocus, no entry,
-					// no message. Focus may also have moved while git ran, in which case
-					// the branch belongs to a worktree nobody is showing — drop it.
-					if (focus) {
-						if (focus.path === head) focus.branch = branch;
-					} else if (repo?.worktreeRoot === head) {
-						repo.branch = branch;
-					}
-
-					// The only other repaint is on the success path below, so both early
-					// returns that follow would otherwise leave the previous branch's PR
-					// on screen, linked. Repaint from cache the moment the target moves;
-					// setStatus renders no PR when the new target has no cached entry, so
-					// a detached HEAD clears the label instead of stranding it.
-					const moved = prTarget();
-					if ((moved ? prKey(moved) : undefined) !== previousKey && sessionCtx) setStatus(sessionCtx);
-				}
-
-				// During a gh outage, every submitted message would otherwise spawn
-				// another gh call (up to 10s, serialized). Bypassed by a forced refresh
-				// (poll timer, bash trigger). Deliberately *after* the branch re-read
-				// above: that read is local git and unaffected by whatever is wrong with
-				// gh, and gating it would leave a `git switch` showing the old branch's
-				// PR — linked — for the length of the backoff.
-				if (!force && prErrors > 0 && prLastErrorAt !== undefined) {
-					const backoff = nextPollDelay({ status: "error", consecutiveErrors: prErrors });
-					if (backoff !== undefined && Date.now() - prLastErrorAt < backoff) return;
-				}
-
-				const target = prTarget();
-				if (!target) return;
-
-				const key = prKey(target);
-				const cached = prCache.get(key);
-				if (!force && cached && Date.now() - cached.fetchedAt < STALE_MS) return;
-
-				if (!nameWithOwner) {
-					const lookup = await fetchNameWithOwner(pi, target.cwd);
-					// The session may have been replaced — possibly into another repo.
-					// Writing nameWithOwner now would link every later PR to the wrong one.
-					if (generation !== prGeneration) return;
-					if (lookup.status === "unavailable") {
-						prAvailable = false;
-						return;
-					}
-					if (lookup.status === "error") {
-						prErrors += 1;
-						prLastErrorAt = Date.now();
-						return;
-					}
-					nameWithOwner = lookup.nameWithOwner;
-				}
-
-				const lookup = await fetchPr(pi, target.branch, target.cwd);
-				if (generation !== prGeneration) return;
-				if (lookup.status === "unavailable") {
-					prAvailable = false;
-					return;
-				}
-				if (lookup.status === "error") {
-					prErrors += 1;
-					prLastErrorAt = Date.now();
-					return;
-				}
-
-				prErrors = 0;
-				prLastErrorAt = undefined;
-				prCache.set(key, { fetchedAt: Date.now(), lookup });
-
-				// Focus may have moved while gh was running; only paint if not.
-				const current = prTarget();
-				if (sessionCtx && current && prKey(current) === key) setStatus(sessionCtx);
-			} finally {
-				if (generation === prGeneration) {
-					prFetching = false;
-					schedulePoll();
-					if (prPending) {
-						const pendingForce = prPendingForce;
-						prPending = false;
-						prPendingForce = false;
-						refreshPr(pendingForce);
-					}
-				}
+	const prMonitor = createPrMonitor({
+		runner: pi,
+		getTarget: () => resolveTarget(focus, repo),
+		getHead: () => focus?.path ?? repo?.worktreeRoot,
+		// Write back to whichever object supplied the path. Focus may have moved
+		// while git ran, in which case the branch belongs to a worktree nobody is
+		// showing — drop it.
+		setBranch: (head, branch) => {
+			if (focus) {
+				if (focus.path === head) focus.branch = branch;
+			} else if (repo?.worktreeRoot === head) {
+				repo.branch = branch;
 			}
-		})();
-	};
-
-	/**
-	 * Arm the next poll, cadence chosen by what the last fetch found.
-	 *
-	 * A self-rescheduling timeout rather than an interval: the delay depends on
-	 * the result just fetched. Sleeping sessions stop polling entirely — the
-	 * next `input` refreshes and re-arms.
-	 */
-	const schedulePoll = () => {
-		// Mirrors refreshPr: no footer to keep live means no reason to keep polling.
-		if (!sessionCtx?.hasUI) return;
-		if (prTimer) clearTimeout(prTimer);
-		prTimer = undefined;
-		if (!prAvailable || Date.now() - lastInputAt > IDLE_SUSPEND_MS) return;
-
-		const target = prTarget();
-		if (!target) return;
-
-		const cached = prCache.get(prKey(target));
-		const delay =
-			prErrors > 0
-				? nextPollDelay({ status: "error", consecutiveErrors: prErrors })
-				: cached?.lookup.status === "pr"
-					? nextPollDelay({ status: "pr", state: prState(cached.lookup.pr) })
-					: nextPollDelay({ status: "none" });
-		if (delay === undefined) return;
-
-		prTimer = setTimeout(() => {
-			prTimer = undefined;
-			refreshPr(true);
-		}, delay);
-		// Do not hold the process open for a status decoration.
-		prTimer.unref?.();
-	};
+		},
+		paint: () => {
+			if (sessionCtx) setStatus(sessionCtx);
+		},
+		hasUI: () => sessionCtx?.hasUI === true,
+	});
 
 	/**
 	 * Emit a one-line message. Falls back to stdout in print mode, where
@@ -362,16 +162,12 @@ export default function (pi: ExtensionAPI) {
 			const label = focus.branch ? `${basename(focus.path)} (${focus.branch})` : basename(focus.path);
 			parts.push(`⑂ ${label}`);
 		}
-		const pr = prLabel();
+		const pr = prMonitor.label();
 		if (pr) parts.push(pr);
 		ctx.ui.setStatus(STATUS_KEY, parts.length > 0 ? parts.join(" ") : undefined);
 	};
 
 	pi.on("session_start", async (_event, ctx) => {
-		// A leftover poll or bash-trigger timer from the previous session must not
-		// fire mid-reset below: it would run refreshPr against this session's
-		// already-bumped generation but the old repo/focus, corrupting nameWithOwner.
-		stopPrTimers();
 		sessionCtx = ctx;
 		// Every field below is session state. A session can be *replaced* (`/new`,
 		// resume) while this closure lives on, so reset everything first — leaving
@@ -381,16 +177,9 @@ export default function (pi: ExtensionAPI) {
 		knownWorktrees = [];
 		focus = undefined;
 		repo = undefined;
-		prCache.clear();
-		nameWithOwner = undefined;
-		prAvailable = true;
-		prErrors = 0;
-		prLastErrorAt = undefined;
-		prFetching = false;
-		prPending = false;
-		prPendingForce = false;
-		lastInputAt = Date.now();
-		prGeneration += 1;
+		// Cancels leftover timers before dropping state: a poll that fired mid-reset
+		// would run against this session's generation but the previous repo/focus.
+		prMonitor.reset();
 
 		repo = await getRepoInfo(pi, ctx.cwd);
 		if (!repo) {
@@ -426,11 +215,11 @@ export default function (pi: ExtensionAPI) {
 			setFocus(ctx, undefined, false);
 		}
 		setStatus(ctx);
-		refreshPr();
+		prMonitor.refresh();
 	});
 
 	pi.on("session_shutdown", (_event, ctx) => {
-		stopPrTimers();
+		prMonitor.stopTimers();
 		sessionCtx = undefined;
 		if (!ctx.hasUI) return;
 		ctx.ui.setStatus(STATUS_KEY, undefined);
@@ -442,35 +231,16 @@ export default function (pi: ExtensionAPI) {
 	pi.on("input", (_event, ctx) => {
 		clearReport(ctx);
 		// Input also ends idle suspension: refresh if stale, then re-arm.
-		lastInputAt = Date.now();
-		refreshPr();
-		if (!prTimer) schedulePoll();
+		prMonitor.onInput();
 	});
-
-	/**
-	 * Refresh shortly after a command that may have created or moved a PR.
-	 *
-	 * Post-execution on purpose — `tool_call` fires before the push lands — and
-	 * delayed, because GitHub needs a moment to create the PR and register its
-	 * checks.
-	 */
-	const scheduleBashRefresh = (command: unknown) => {
-		if (typeof command !== "string" || !matchesPrCommand(command)) return;
-		if (prBashTimer) clearTimeout(prBashTimer);
-		prBashTimer = setTimeout(() => {
-			prBashTimer = undefined;
-			refreshPr(true);
-		}, BASH_TRIGGER_DELAY_MS);
-		prBashTimer.unref?.();
-	};
 
 	pi.on("tool_result", (event) => {
 		if (event.toolName !== "bash") return;
-		scheduleBashRefresh((event.input as { command?: unknown } | undefined)?.command);
+		prMonitor.onBashCommand((event.input as { command?: unknown } | undefined)?.command);
 	});
 
 	pi.on("user_bash", (event) => {
-		scheduleBashRefresh(event.command);
+		prMonitor.onBashCommand(event.command);
 	});
 
 	// ---- Focus mode: rewrite tool inputs -----------------------------------
@@ -491,7 +261,7 @@ export default function (pi: ExtensionAPI) {
 		focus = target;
 		setStatus(ctx);
 		// Repaint from cache above, then reconcile the new target in background.
-		refreshPr();
+		prMonitor.refresh();
 
 		// State lives in a custom *entry*: it is written to the transcript now.
 		// A custom message with deliverAs "nextTurn" is only queued in memory, so
