@@ -137,8 +137,11 @@ state word is `open`, `draft`, `merged`, or `closed`.
 Unfocused sessions show the PR alone, because pi's own footer line already
 reads `<pwd> (<branch>)`.
 
-Data comes from `gh pr view <branch>`, refreshed every 60s while the PR is open,
-every 5 min when the branch has no PR, and never once it is merged or closed.
+Data comes from `gh pr list --head <branch> --state all`, refreshed every 60s
+while the PR is open, every 5 min when the branch has no PR, and never once it is
+merged or closed. (`gh pr view <branch>` would be shorter, but its argument is
+parsed as a PR number first, so a branch named `1234` would show PR #1234.) When
+a reused branch has several PRs, the open one wins, else the newest.
 Polling suspends after 15 minutes without input and resumes on the next one. A
 `gt submit`, `gh pr create`, or `git push` schedules a refresh 8s later so a new
 PR appears promptly.
@@ -167,10 +170,13 @@ npm install
 npm test
 ```
 
-Runs `worktree.test.mjs`, `mcp.test.mjs`, `pr.test.mjs`, and `gh.test.mjs`.
-`worktree.test.mjs` runs against throwaway repos in `$TMPDIR`, covering both
-plain and bare layouts, plus pure-function tests for focus rewriting, argument
-parsing, name matching and config precedence. Set `PI_TEST_BARE_REPO` to also
-check a real bare-layout checkout on this machine. `pr.test.mjs` and
-`gh.test.mjs` cover the PR status display and its `gh` calls, both pure or
-fake-runner tests with no network or subprocesses.
+Runs `worktree.test.mjs`, `mcp.test.mjs`, `pr.test.mjs`, `gh.test.mjs`, and
+`pr-status.test.mjs`. `worktree.test.mjs` runs against throwaway repos in
+`$TMPDIR`, covering both plain and bare layouts, plus pure-function tests for
+focus rewriting, argument parsing, name matching and config precedence. Set
+`PI_TEST_BARE_REPO` to also check a real bare-layout checkout on this machine.
+`pr.test.mjs` and `gh.test.mjs` cover the PR display and its `gh` calls, both
+pure or fake-runner tests with no network or subprocesses. `pr-status.test.mjs`
+drives `index.ts` itself through a fake `pi`: real git in a throwaway repo,
+scripted `gh`, asserting the generation guard, the branch re-read and repaint,
+the error backoff, and the `hasUI` gate.

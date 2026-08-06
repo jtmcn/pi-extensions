@@ -1,7 +1,8 @@
 # PR number in the pi status bar
 
 **Date:** 2026-08-01
-**Status:** approved, not yet implemented
+**Status:** implemented (see the plan's amendments for changes made during and
+after execution)
 
 ## Problem
 
@@ -62,7 +63,7 @@ has disabled itself (see Failure handling).
 
 ### CI rollup
 
-`gh pr view --json statusCheckRollup` returns a *mixed* array with no
+`--json statusCheckRollup` returns a *mixed* array with no
 server-side rollup field: `CheckRun` entries (`status` + `conclusion`) and
 `StatusContext` entries (`state`). The glyph is computed from all of them:
 
@@ -87,8 +88,17 @@ end of every line, so the link cannot leak into adjacent content.
 Two `gh` calls, both run with `cwd` set to the active worktree:
 
 - `gh repo view --json nameWithOwner` — once per repo, cached for the session.
-- `gh pr view <branch> --json number,state,isDraft,url,statusCheckRollup` —
-  everything the display needs in one round trip (~0.5s measured).
+- `gh pr list --head <branch> --state all --limit 10 --json
+  number,state,isDraft,url,statusCheckRollup` — everything the display needs in
+  one round trip (~0.5s measured).
+
+`pr list --head` rather than the shorter `pr view <branch>`: `pr view`'s argument
+is `<number> | <url> | <branch>` resolved number-first, so a branch literally
+named `1234` would display and link PR #1234 — the one failure this feature must
+not have. `--state all` is also required for merged and closed PRs to appear at
+all, and it makes "no PR" an empty array with exit 0 rather than a stderr
+string. A reused branch can then return several PRs: the open one wins, else the
+newest (`selectPr` in `pr.ts`).
 
 Both return the same three-way classification (`unavailable` / `error` /
 result). The repo lookup must not collapse its failures into one bare
@@ -170,13 +180,25 @@ directly.
 
 All failures are silent — no notifications, ever. This is decoration.
 
-- `gh` missing (ENOENT), unauthenticated, or a non-GitHub remote: the PR feature
-  disables itself for the rest of the session. This applies to whichever call
-  reports it, including the repo lookup.
+- `gh` missing, unauthenticated, or a non-GitHub remote: the PR feature disables
+  itself for the rest of the session. This applies to whichever call reports it,
+  including the repo lookup.
 - Transient errors: keep the last known value on screen, back off 60s → 2m →
   5m. After three consecutive failures with nothing cached, show no suffix. A
   failed repo lookup is retried on the same backoff — it is only terminal when
   `gh` says it is.
+
+How "missing" arrives matters, because it is not a thrown error: `pi.exec`
+resolves an unspawnable binary as `{ code: 1, stdout: "", stderr: "" }` rather
+than rejecting. Exit non-zero with *both* streams empty is therefore the signal
+for a `gh` that never ran; a `gh` that ran always says something on stderr. A
+timed-out or aborted call is different again — it resolves as `{ code: 0, killed:
+true }` with a possibly truncated payload — and is always classified as a
+retryable error, never parsed.
+
+The backoff gates only the `gh` call. The local branch re-read below still runs
+during an outage, or a `git switch` would leave the previous branch's PR on
+screen, linked, for the length of the backoff.
 
 ## Timer discipline
 
@@ -195,6 +217,8 @@ factory; startup is deferred to the first refresh.
 | `worktree/gh.ts` | The two `gh` calls, behind the `GitRunner` interface `lib/git.ts` already defines, so a fake runner tests them. Keeps `index.ts` (already ~500 lines) from absorbing the network layer. |
 | `worktree/index.ts` | Wiring only: cache, timer, and the PR text inside the existing `setStatus`. |
 | `tests/pr.test.mjs` | Table-driven tests over the pure functions, with `statusCheckRollup` fixtures captured from a real PR (mixed `CheckRun` + `StatusContext`). |
+| `tests/gh.test.mjs` | The failure classification, against a fake runner returning the exact strings and result shapes `gh` and `pi.exec` produce. |
+| `tests/pr-status.test.mjs` | The wiring in `index.ts`, driven through a fake `pi`: real git in a throwaway repo, scripted `gh`. Covers the generation guard, the branch re-read and repaint, the backoff, and the `hasUI` gate. |
 | `worktree/README.md` | A short "PR in the status bar" section. |
 
 ## Out of scope

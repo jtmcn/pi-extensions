@@ -1328,3 +1328,49 @@ Also folded in: the error backoff no longer bypassed by the input path; a
 refresh dropped because one was in flight is re-armed rather than lost;
 `lastInputAt` and `repo` reset on `session_start`; `worktree/README.md`'s file
 list and test command updated.
+
+---
+
+## Amendment 3 (repaint on branch change)
+
+One hole survived Amendment 2's fix wave. Re-reading the branch was not enough:
+both early returns after the re-read (no target, or a cache entry still fresh)
+left whatever was painted before on screen, so a `git switch` kept the previous
+branch's PR in the footer — linked — until the next successful fetch for the new
+branch. The refresh now repaints from cache the moment the target key changes,
+which also clears the label when the new HEAD is detached or has no cached PR.
+
+## Amendment 4 (post-PR code review)
+
+A reviewer on the finished branch found one dead code path and three narrower
+defects. All are fixed in one wave, with tests that fail without the fix:
+
+1. **The `unavailable` classification was unreachable in production**, so the
+   "disable for the session" path the spec describes never ran. `gh.ts` treated a
+   *thrown* exec as the missing-binary signal, but `pi.exec` never throws — it
+   resolves an unspawnable binary as `{ code: 1, stdout: "", stderr: "" }`
+   (verified against `pi`'s `execCommand`). On a machine with no `gh`, the
+   feature therefore retried forever at the 5-minute error backoff, and
+   `gh.test.mjs` certified the terminal path with a fake runner whose shape
+   production never produces. Exit non-zero with both streams empty is now
+   terminal; the throwing-runner cases stay, since other runners may throw.
+2. **`gh pr view <branch>` resolves its argument as a PR number first**, so a
+   branch named `1234` would display and link PR #1234. Replaced with
+   `gh pr list --head <branch> --state all`, whose branch filter is explicit,
+   and a pure `selectPr()` to choose among a reused branch's PRs.
+3. **A timed-out `gh` call was only caught by accident.** It resolves as
+   `{ code: 0, killed: true }` with a truncated payload, which took the *success*
+   branch and was classified as an error only because `JSON.parse("")` happened
+   to throw. `killed` is now checked explicitly, before any parse.
+4. **The error backoff short-circuited the branch re-read**, reintroducing
+   Amendment 3's symptom for the length of an outage: a `git switch` during a
+   `gh` outage kept the old PR on screen. The gate now sits after the re-read and
+   repaint, which are local git and unaffected by whatever is wrong with `gh`.
+
+Also folded in: the PR orchestration in `index.ts` — where every defect in this
+feature has been found, and previously verified only by hand — now has
+`tests/pr-status.test.mjs`, which drives the extension through a fake `pi` with
+real git and scripted `gh`; `BRANCH_READ_TIMEOUT_MS` moved to `pr.ts` with its
+sibling constants; `stopPrTimers` moved below the state block it operates on;
+and the spec's status, the root `README.md` layout tree and `worktree/README.md`
+brought back in line with the code.

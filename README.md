@@ -27,13 +27,18 @@ extensions/
 ├── tests/              test harness for the collection (jiti, plain node)
 │   ├── package.json
 │   ├── fixtures/       fake servers etc. used by tests
+│   ├── gh.test.mjs
 │   ├── mcp.test.mjs
+│   ├── pr.test.mjs
+│   ├── pr-status.test.mjs
 │   └── worktree.test.mjs
 ├── typecheck.sh        tsc over every extension (no build step otherwise)
 └── worktree/           an extension (loaded via worktree/index.ts)
     ├── index.ts
     ├── config.ts
     ├── focus.ts
+    ├── gh.ts
+    ├── pr.ts
     ├── select.ts
     ├── worktrees.ts
     └── README.md
