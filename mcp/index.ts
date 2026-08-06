@@ -14,7 +14,8 @@
  *  - Tools are registered once per process and dispatch through a mutable
  *    handler map. `session_start` fires again on reload/fork/resume, and
  *    re-registering the same tool name would be at best redundant; instead the
- *    reconnect swaps the handler the existing tool points at.
+ *    reconnect swaps the handler the existing tool points at. That only works
+ *    because a reconnect recomputes the *same* names — see `cycleTaken`.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -54,6 +55,16 @@ export default function mcpExtension(pi: ExtensionAPI) {
 	const registered = new Set<string>();
 	/** Guards against overlapping connect cycles (e.g. reload during startup). */
 	let generation = 0;
+	/**
+	 * pi tool names claimed by the current connect cycle.
+	 *
+	 * Deduplication has to be scoped to the cycle, not to the process. Seeding it
+	 * from `registered` would make a reconnect treat its own previous names as
+	 * taken and rename `foo` to `foo_2`: that registers a second pi tool while the
+	 * first is left with no handler, permanently answering "not connected", and
+	 * every reconnect adds another copy to the tool list.
+	 */
+	let cycleTaken = new Set<string>();
 	/** In-flight connects, awaited once before the first turn of a session. */
 	let connecting: Promise<unknown>[] = [];
 	let startupTimeoutMs = DEFAULT_STARTUP_TIMEOUT_MS;
@@ -83,6 +94,18 @@ export default function mcpExtension(pi: ExtensionAPI) {
 			}),
 		]);
 		if (timer) clearTimeout(timer);
+	}
+
+	/**
+	 * Invalidate the current cycle and start a new one.
+	 *
+	 * Handshakes in flight compare their captured cycle against `generation` and
+	 * bail, so they can neither register tools nor claim names in the new cycle.
+	 */
+	function beginCycle(): number {
+		generation++;
+		cycleTaken = new Set();
+		return generation;
 	}
 
 	function closeAll(): void {
@@ -165,12 +188,11 @@ export default function mcpExtension(pi: ExtensionAPI) {
 		}
 
 		const { selected, unknown } = selectTools(tools, state.config.tools);
-		const taken = new Set(registered);
 		const names: string[] = [];
 
 		for (const tool of selected) {
-			const piName = toolName(state.name, tool.name, taken);
-			taken.add(piName);
+			const piName = toolName(state.name, tool.name, cycleTaken);
+			cycleTaken.add(piName);
 			names.push(piName);
 			handlers.set(piName, {
 				client,
@@ -196,8 +218,7 @@ export default function mcpExtension(pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		// Reload/fork/resume re-fire this. Drop the previous generation first.
-		generation++;
-		const cycle = generation;
+		const cycle = beginCycle();
 		closeAll();
 		servers.clear();
 
@@ -243,7 +264,7 @@ export default function mcpExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", () => {
-		generation++;
+		beginCycle();
 		closeAll();
 	});
 
@@ -251,9 +272,8 @@ export default function mcpExtension(pi: ExtensionAPI) {
 		description: "Show MCP server status, or /mcp restart to reconnect",
 		handler: async (args, ctx) => {
 			if (args.trim() === "restart") {
-				generation++;
+				const cycle = beginCycle();
 				closeAll();
-				const cycle = generation;
 				connecting = [];
 				for (const state of servers.values()) {
 					if (state.status === "disabled") continue;
@@ -265,12 +285,12 @@ export default function mcpExtension(pi: ExtensionAPI) {
 						}),
 					);
 				}
-				ctx.ui.notify("mcp: reconnecting", "info");
+				tell(ctx, "mcp: reconnecting");
 				return;
 			}
 
 			if (servers.size === 0) {
-				ctx.ui.notify("mcp: no servers configured (~/.pi/agent/mcp.json)", "info");
+				tell(ctx, "mcp: no servers configured (~/.pi/agent/mcp.json)");
 				return;
 			}
 
@@ -282,13 +302,31 @@ export default function mcpExtension(pi: ExtensionAPI) {
 				const version = state.client?.info?.version ? ` v${state.client.info.version}` : "";
 				return `${state.name}${version} [${state.status}] ${detail}`;
 			});
-			ctx.ui.notify(`mcp:\n${lines.join("\n")}`, "info");
+			tell(ctx, `mcp:\n${lines.join("\n")}`);
 		},
 	});
 }
 
-/** Notify when there is a UI, otherwise fall back to stderr (headless runs). */
+/**
+ * Emit a one-line message.
+ *
+ * `ctx.ui.notify` is a no-op without a UI, so a headless or print-mode run would
+ * otherwise see nothing at all — including the warnings that explain why a
+ * server never came up.
+ */
+function tell(ctx: ExtensionContext, message: string, level: "info" | "warning" = "info"): void {
+	if (ctx.hasUI) {
+		ctx.ui.notify(message, level);
+		return;
+	}
+	if (level === "warning") {
+		console.error(message);
+		return;
+	}
+	// Only print mode has a stdout a human is reading; JSON modes must stay clean.
+	if (ctx.mode === "print") process.stdout.write(`${message}\n`);
+}
+
 function warn(ctx: ExtensionContext, message: string): void {
-	if (ctx.hasUI) ctx.ui.notify(message, "warning");
-	else console.error(message);
+	tell(ctx, message, "warning");
 }

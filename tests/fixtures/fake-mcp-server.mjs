@@ -9,8 +9,9 @@
  *   - returns a JSON-RPC error for an unknown tool
  *   - sends the client a request, which a client must answer or it hangs
  *   - can hang on demand, to exercise timeouts and cancellation
+ *   - can flood stdout with a newline-free blob, to exercise the read cap
  *
- * Modes via argv: `--no-banner`, `--crash-on-init`.
+ * Modes via argv: `--no-banner`, `--crash-on-init`, `--flood`.
  */
 
 const MODE = new Set(process.argv.slice(2));
@@ -58,6 +59,13 @@ function handle(msg) {
 		if (MODE.has("--crash-on-init")) {
 			process.stderr.write("fake-mcp-server: exploding as requested\n");
 			process.exit(3);
+		}
+		if (MODE.has("--flood")) {
+			// 9 MiB with no newline anywhere: past the client's cap for an
+			// unterminated line. The trailing newline then resynchronises the stream,
+			// so the handshake below must still succeed.
+			process.stdout.write("x".repeat(9 * 1024 * 1024));
+			process.stdout.write("\n");
 		}
 		reply(id, {
 			protocolVersion: "2025-06-18",

@@ -11,7 +11,7 @@
  *   PI_TEST_MCP_COMMAND="gitnexus mcp" node mcp.test.mjs
  */
 
-import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createJiti } from "jiti";
@@ -21,9 +21,27 @@ const PI_ENTRY = process.env.PI_DIST ?? (await resolvePiEntry());
 const FAKE = join(EXT, "tests/fixtures/fake-mcp-server.mjs");
 const REAL_COMMAND = process.env.PI_TEST_MCP_COMMAND;
 
+// The extension entry point imports typebox and pi-ai, which are installed next
+// to pi rather than next to these tests — the same indirection typecheck.sh does
+// for the type checker.
+const PI_PKG = PI_ENTRY.replace(/\/dist\/index\.js$/, "");
 const jiti = createJiti(import.meta.url, {
-	alias: { "@earendil-works/pi-coding-agent": PI_ENTRY },
+	alias: {
+		"@earendil-works/pi-coding-agent": PI_ENTRY,
+		typebox: await nestedEntry("typebox"),
+		"@earendil-works/pi-ai": await nestedEntry("@earendil-works/pi-ai"),
+	},
 });
+
+/** Entry *file* of a package nested inside pi; jiti aliases cannot be directories. */
+async function nestedEntry(name) {
+	const dir = join(PI_PKG, "node_modules", name);
+	const meta = JSON.parse(await readFile(join(dir, "package.json"), "utf8"));
+	const root = meta.exports?.["."];
+	const entry = root?.import ?? root?.default ?? meta.module ?? meta.main;
+	if (!entry) throw new Error(`cannot resolve an entry point for ${name}`);
+	return join(dir, entry);
+}
 const { McpClient } = await jiti.import(`${EXT}/mcp/client.ts`);
 const bridge = await jiti.import(`${EXT}/mcp/bridge.ts`);
 const { loadConfig, enabledServers } = await jiti.import(`${EXT}/mcp/config.ts`);
@@ -139,6 +157,18 @@ const fakeClient = (args = []) =>
 	}
 	ok("client: unspawnable command rejects", error !== undefined, error?.message);
 	ok("client: unspawnable message is actionable", /failed to spawn|ENOENT|exited/.test(error?.message ?? ""), error?.message);
+	client.close();
+}
+
+{
+	// A server that dumps a huge newline-free blob must not grow the read buffer
+	// without bound, and the stream must resynchronise at the next newline.
+	const client = fakeClient(["--flood"]);
+	client.start();
+	await client.initialize();
+	ok("client: resynchronises after a newline-free flood", client.info?.name === "fake", JSON.stringify(client.info));
+	const echo = await client.callTool("echo", { message: "after flood" });
+	ok("client: still usable after the flood", echo.content[0]?.text === "echo: after flood", JSON.stringify(echo));
 	client.close();
 }
 
@@ -282,6 +312,86 @@ const fakeClient = (args = []) =>
 	ok("config: invalid JSON warns instead of throwing", broken.warnings.some((w) => /invalid JSON/.test(w)));
 
 	await rm(root, { recursive: true, force: true });
+}
+
+// ----------------------------------------------------- extension lifecycle ---
+
+{
+	// `session_start` fires again on /new, /reload, fork and resume. The tools are
+	// registered once per process and dispatch through a handler map, so a
+	// reconnect has to recompute the *same* names: a renamed tool would leave the
+	// original with no handler (permanently "not connected") and add a second copy
+	// of every schema to the tool list.
+	const root = await mkdtemp(join(tmpdir(), "pi-mcp-ext-"));
+	const agentDir = join(root, "agent");
+	await mkdir(agentDir, { recursive: true });
+	await writeFile(
+		join(agentDir, "mcp.json"),
+		JSON.stringify({
+			servers: { fake: { command: process.execPath, args: [FAKE], timeoutMs: 5000 } },
+			startupTimeoutMs: 10000,
+		}),
+	);
+
+	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+	process.env.PI_CODING_AGENT_DIR = agentDir;
+	try {
+		const mcpExtension = (await jiti.import(`${EXT}/mcp/index.ts`)).default;
+
+		const events = new Map();
+		const tools = new Map();
+		const registrations = [];
+		const pi = {
+			on: (event, handler) => {
+				if (!events.has(event)) events.set(event, []);
+				events.get(event).push(handler);
+			},
+			registerTool: (spec) => {
+				registrations.push(spec.name);
+				tools.set(spec.name, spec);
+			},
+			registerCommand: () => {},
+		};
+		const ctx = {
+			cwd: root,
+			hasUI: false,
+			mode: "interactive",
+			isProjectTrusted: () => false,
+			ui: { notify: () => {}, setStatus: () => {}, setWidget: () => {} },
+		};
+		const fire = async (event) => {
+			for (const handler of events.get(event) ?? []) await handler({}, ctx);
+		};
+		const call = (name, params) => tools.get(name)?.execute("call-1", params, undefined);
+
+		mcpExtension(pi);
+
+		await fire("session_start");
+		await fire("before_agent_start");
+		const first = [...tools.keys()].sort();
+		ok("ext: registers the server's tools", first.includes("fake_echo"), first.join());
+		const before = await call("fake_echo", { message: "hi" });
+		ok("ext: a registered tool reaches the server", before?.content[0]?.text === "echo: hi", JSON.stringify(before));
+
+		// The reload.
+		await fire("session_start");
+		await fire("before_agent_start");
+		const second = [...tools.keys()].sort();
+		ok("ext: a reload does not rename tools", second.join() === first.join(), `${first.join()} -> ${second.join()}`);
+		ok("ext: a reload registers no duplicate tool", registrations.length === first.length, registrations.join());
+		ok("ext: no tool grew a dedupe suffix", !second.some((name) => /_\d+$/.test(name)), second.join());
+
+		const after = await call("fake_echo", { message: "again" });
+		ok("ext: the reload rebinds the handler", after?.content[0]?.text === "echo: again", JSON.stringify(after));
+
+		await fire("session_shutdown");
+		const dead = await call("fake_echo", { message: "gone" });
+		ok("ext: after shutdown the tool reports a closed server", dead?.details?.connected === false, JSON.stringify(dead));
+	} finally {
+		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+		await rm(root, { recursive: true, force: true });
+	}
 }
 
 // ------------------------------------------------------- real server (opt) ---

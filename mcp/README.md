@@ -65,6 +65,12 @@ Tools are namespaced `<server>_<tool>` and sanitized to `[a-z0-9_]`, because
 names collide across servers in practice ("query", "search"). Collisions after
 sanitizing get a numeric suffix.
 
+The suffix is decided per *connect cycle*, not per process. A reconnect has to
+recompute the same names it computed last time, because rebinding (below) relies
+on the name being stable: a renamed tool leaves the original with no handler,
+permanently answering "not connected", and adds a second copy of every schema to
+the tool list.
+
 ## Context cost
 
 Every exposed tool's full JSON Schema is sent with each request. gitnexus alone
@@ -91,6 +97,9 @@ prompt. This is the strongest practical argument against MCP, so:
 - **Tools are registered once per process** and dispatch through a mutable
   handler map, so `/mcp restart`, `/reload` and forks rebind the existing tools
   instead of registering duplicates.
+- **A closed server's tools answer rather than vanish.** pi has no way to
+  unregister a tool, so a tool whose handler is gone returns "not connected. Run
+  /mcp restart to retry" as ordinary tool output.
 - **Tool failures come back as tool output, not exceptions.** MCP distinguishes
   `isError` (the tool ran and failed — prefixed `MCP tool error:` so the model
   can see it) from a JSON-RPC error (protocol-level). Transport failures such as

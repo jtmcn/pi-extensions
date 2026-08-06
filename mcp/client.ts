@@ -25,6 +25,17 @@ const INITIALIZE_TIMEOUT_MS = 30_000;
 const KILL_GRACE_MS = 2_000;
 /** Stderr lines retained for diagnostics; servers log freely there. */
 const STDERR_TAIL_LINES = 20;
+/**
+ * Cap on the un-terminated stdout tail.
+ *
+ * A server that streams a huge newline-free blob — binary output on the wrong
+ * pipe, a runaway log line — would otherwise grow this buffer until the process
+ * runs out of memory. Nothing that large is a frame we could act on, so the tail
+ * is dropped and the next newline resynchronises the stream. Generous enough
+ * that a legitimate multi-megabyte tool result (an inline image, say) is never
+ * affected.
+ */
+const MAX_PENDING_STDOUT = 8 * 1024 * 1024;
 
 export interface McpServerSpec {
 	command: string;
@@ -304,6 +315,8 @@ export class McpClient {
 			if (line.trim()) this.handleLine(line);
 			index = this.stdout.indexOf("\n");
 		}
+		// Whatever is left is an unterminated line; it must stay bounded.
+		if (this.stdout.length > MAX_PENDING_STDOUT) this.stdout = "";
 	}
 
 	private handleLine(line: string): void {
