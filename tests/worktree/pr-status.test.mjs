@@ -92,18 +92,37 @@ function harness(cwd, { hasUI = true, mode = "interactive" } = {}) {
 		sendMessage() {},
 	};
 
-	const ctx = {
-		cwd,
-		hasUI,
-		mode,
-		isProjectTrusted: () => false,
-		sessionManager: { getBranch: () => [] },
-		ui: {
-			setStatus: (_key, value) => statuses.push(value),
-			setWidget: () => {},
-			notify: () => {},
-		},
+	/**
+	 * A fresh ctx per session, as pi does.
+	 *
+	 * Identity matters: pi's ctx goes stale when its session is replaced, and
+	 * touching a stale one throws and takes down the process. Sharing one ctx
+	 * across sessions here would hide exactly that class of bug — each ctx records
+	 * its own paints so a superseded session's writes are visible.
+	 */
+	const contexts = [];
+	const makeCtx = () => {
+		const own = [];
+		const ctx = {
+			cwd,
+			hasUI,
+			mode,
+			paints: own,
+			isProjectTrusted: () => false,
+			sessionManager: { getBranch: () => [] },
+			ui: {
+				setStatus: (_key, value) => {
+					own.push(value);
+					statuses.push(value);
+				},
+				setWidget: () => {},
+				notify: () => {},
+			},
+		};
+		contexts.push(ctx);
+		return ctx;
 	};
+	let ctx = makeCtx();
 
 	extension(pi);
 
@@ -116,7 +135,13 @@ function harness(cwd, { hasUI = true, mode = "interactive" } = {}) {
 		/** gh calls that looked up a PR (rather than the repo name). */
 		prCalls: () => ghCalls.filter((args) => args[0] === "pr"),
 		last: () => statuses.at(-1),
+		contexts,
+		/** The ctx handed to the most recent session_start. */
+		ctx: () => ctx,
 		fire: async (event, payload = {}) => {
+			// pi builds a new context for a new session; everything else in a session
+			// sees the one it already has.
+			if (event === "session_start") ctx = makeCtx();
 			for (const handler of events.get(event) ?? []) await handler(payload, ctx);
 		},
 	};
@@ -210,8 +235,12 @@ const openPr = (number) => [
 	ok("the first fetch reaches gh", await until(() => repoLookups === 1));
 
 	// Replace the session while that lookup is still in flight, then let it land.
+	const superseded = h.ctx();
 	await h.fire("session_start");
 	ok("the replacement session fetches again", await until(() => repoLookups === 2));
+	// Snapshot before the stale fetch lands, or a paint through the stale ctx would
+	// already be counted and the assertion below could never fail.
+	const paintsAtReplacement = superseded.paints.length;
 	gate.resolve();
 
 	ok("the replacement paints", await until(() => /#7 open/.test(h.last() ?? "")), JSON.stringify(h.statuses));
@@ -219,6 +248,15 @@ const openPr = (number) => [
 		"a superseded lookup cannot write nameWithOwner",
 		h.statuses.every((status) => !(status ?? "").includes("stale/repo")),
 		JSON.stringify(h.statuses),
+	);
+	// The replaced session's ctx is stale: pi throws if an extension touches one,
+	// so a superseded fetch landing must not paint through it. This is what makes
+	// disposing the previous session in session_start load-bearing rather than tidy.
+	await new Promise((resolve) => setTimeout(resolve, 50));
+	ok(
+		"a superseded session never paints through its stale ctx",
+		superseded.paints.length === paintsAtReplacement,
+		`${superseded.paints.length} paints vs ${paintsAtReplacement} at replacement`,
 	);
 	ok(
 		"the in-flight guard is not latched by the superseded fetch",

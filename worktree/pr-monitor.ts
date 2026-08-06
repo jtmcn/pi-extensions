@@ -15,9 +15,9 @@
  *
  *  - **Single flight.** Overlapping triggers must not start two fetches; a
  *    request that arrives mid-fetch is remembered and re-run once, not dropped.
- *  - **Generation guard.** The session can be *replaced* (`/new`, resume) while
- *    a fetch is in flight and this closure outlives it, so every await point
- *    rechecks the generation captured at the start.
+ *  - **Retirement.** The session can be *replaced* (`/new`, resume) while a fetch
+ *    is in flight. One monitor belongs to one session and is disposed with it,
+ *    and every await point rechecks that, so a superseded fetch paints nothing.
  *  - **Re-read the branch before the backoff.** The branch can change inside a
  *    live session, and that read is local git, unaffected by whatever is wrong
  *    with `gh`.
@@ -77,13 +77,12 @@ export interface PrMonitor {
 	onBashCommand: (command: unknown) => void;
 	/** The formatted PR label for the active target, if one is cached. */
 	label: () => string | undefined;
-	/** Cancel pending timers. Idempotent. */
-	stopTimers: () => void;
 	/**
-	 * Drop all state and bump the generation, so fetches in flight for the
-	 * previous session become inert.
+	 * Retire the monitor: cancel its timers and make everything still in flight
+	 * inert. Idempotent, and there is no way back — the session it belonged to is
+	 * gone, so a new session gets a new monitor.
 	 */
-	reset: () => void;
+	dispose: () => void;
 }
 
 export function createPrMonitor(deps: PrMonitorDeps): PrMonitor {
@@ -118,13 +117,15 @@ export function createPrMonitor(deps: PrMonitorDeps): PrMonitor {
 	/** Whether the pending, dropped refresh above was forced. */
 	let pendingForce = false;
 	/**
-	 * Bumped on every reset.
+	 * Set once, by dispose().
 	 *
-	 * A session can be replaced while a fetch is in flight, and this closure
-	 * outlives it. Each fetch captures the generation and rechecks it after every
-	 * await, so a superseded fetch touches no shared state.
+	 * A session can be replaced while a fetch is in flight. Rather than a
+	 * generation counter compared after every await — which only worked because
+	 * this closure was reused across sessions — the monitor belongs to one session
+	 * and is retired with it. Every await point rechecks this, so a superseded
+	 * fetch touches no shared state and paints nothing.
 	 */
-	let generation = 0;
+	let disposed = false;
 
 	const key = (target: PrMonitorTarget) => `${target.cwd}\0${target.branch}`;
 
@@ -136,6 +137,7 @@ export function createPrMonitor(deps: PrMonitorDeps): PrMonitor {
 	};
 
 	const label = (): string | undefined => {
+		if (disposed) return undefined;
 		const target = getTarget();
 		if (!target || !nameWithOwner) return undefined;
 		const entry = cache.get(key(target));
@@ -180,6 +182,7 @@ export function createPrMonitor(deps: PrMonitorDeps): PrMonitor {
 	const refresh = (force = false): void => {
 		// Print, JSON, and headless runs have no footer to paint into; never spawn
 		// gh for output that can never render.
+		if (disposed) return;
 		if (!hasUI()) return;
 		if (!available) return;
 
@@ -190,7 +193,6 @@ export function createPrMonitor(deps: PrMonitorDeps): PrMonitor {
 			return;
 		}
 
-		const captured = generation;
 		fetching = true;
 		void (async () => {
 			try {
@@ -207,7 +209,7 @@ export function createPrMonitor(deps: PrMonitorDeps): PrMonitor {
 						timeout: BRANCH_READ_TIMEOUT_MS,
 					});
 					// The session may have been replaced while that git call ran.
-					if (captured !== generation) return;
+					if (disposed) return;
 					const branch =
 						symbolicRef.code === 0 && symbolicRef.stdout.trim() ? symbolicRef.stdout.trim() : undefined;
 					// The same worktree with a different HEAD is not a focus change: no
@@ -245,7 +247,7 @@ export function createPrMonitor(deps: PrMonitorDeps): PrMonitor {
 					const lookup = await fetchNameWithOwner(runner, target.cwd);
 					// The session may have been replaced — possibly into another repo.
 					// Writing nameWithOwner now would link every later PR to the wrong one.
-					if (captured !== generation) return;
+					if (disposed) return;
 					if (lookup.status === "unavailable") {
 						available = false;
 						return;
@@ -259,7 +261,7 @@ export function createPrMonitor(deps: PrMonitorDeps): PrMonitor {
 				}
 
 				const lookup = await fetchPr(runner, target.branch, target.cwd);
-				if (captured !== generation) return;
+				if (disposed) return;
 				if (lookup.status === "unavailable") {
 					available = false;
 					return;
@@ -278,7 +280,7 @@ export function createPrMonitor(deps: PrMonitorDeps): PrMonitor {
 				const current = getTarget();
 				if (current && key(current) === targetKey) paint();
 			} finally {
-				if (captured === generation) {
+				if (!disposed) {
 					fetching = false;
 					schedulePoll();
 					if (pending) {
@@ -293,6 +295,7 @@ export function createPrMonitor(deps: PrMonitorDeps): PrMonitor {
 	};
 
 	const onInput = () => {
+		if (disposed) return;
 		lastInputAt = now();
 		refresh();
 		if (!timer) schedulePoll();
@@ -305,6 +308,7 @@ export function createPrMonitor(deps: PrMonitorDeps): PrMonitor {
 	 * checks.
 	 */
 	const onBashCommand = (command: unknown) => {
+		if (disposed) return;
 		if (typeof command !== "string" || !matchesPrCommand(command)) return;
 		if (bashTimer) clearTimer(bashTimer);
 		bashTimer = setTimer(() => {
@@ -314,21 +318,13 @@ export function createPrMonitor(deps: PrMonitorDeps): PrMonitor {
 		bashTimer.unref?.();
 	};
 
-	const reset = () => {
-		// A leftover timer must not fire mid-reset: it would run refresh against the
-		// already-bumped generation but the previous session's target.
+	const dispose = () => {
+		// Order does not matter here, which is the point: there is no "reset the
+		// state but forget to cancel the timers" hazard left to get wrong.
+		disposed = true;
 		stopTimers();
 		cache.clear();
-		nameWithOwner = undefined;
-		available = true;
-		errors = 0;
-		lastErrorAt = undefined;
-		fetching = false;
-		pending = false;
-		pendingForce = false;
-		lastInputAt = now();
-		generation += 1;
 	};
 
-	return { refresh, onInput, onBashCommand, label, stopTimers, reset };
+	return { refresh, onInput, onBashCommand, label, dispose };
 }

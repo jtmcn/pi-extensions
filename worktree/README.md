@@ -152,15 +152,26 @@ remote simply means no PR text.
 ## Files
 
 ```
-lib/git.ts             shared git helpers (used by other extensions too)
-worktree/index.ts      command, focus state, footer status, tool
-worktree/config.ts     config loading and path templating
-worktree/focus.ts      tool-input rewriting (pure, heavily tested)
-worktree/select.ts     argument parsing and name matching (pure)
-worktree/worktrees.ts  create / remove / prune
-worktree/pr.ts         PR display formatting and poll cadence (pure)
-worktree/gh.ts         the gh calls behind the PR status display
+lib/git.ts               shared git helpers (used by other extensions too)
+worktree/index.ts        wiring only: event handlers and registration
+worktree/session.ts      per-session state, focus, and the session's monitor
+worktree/pr-monitor.ts   the PR status state machine
+worktree/commands.ts     /worktree and its completions
+worktree/tool.ts         the model-facing tool
+worktree/ui.ts           notifications, reports, status segment
+worktree/config.ts       config loading and path templating
+worktree/focus.ts        tool-input rewriting (pure, heavily tested)
+worktree/select.ts       argument parsing and name matching (pure)
+worktree/worktrees.ts    create / remove / prune
+worktree/pr.ts           PR display formatting and poll cadence (pure)
+worktree/gh.ts           the gh calls behind the PR status display
 ```
+
+The shape to preserve: `index.ts` wires, `session.ts` owns state with a
+lifetime, and everything else is a factory over injected dependencies. A session
+is never *reset* — `session_start` disposes the outgoing one and builds a new
+one, so a field cannot be left behind, and a fetch or timer belonging to a
+replaced session cannot paint through a `ctx` that pi has since made stale.
 
 ## Tests
 
@@ -170,12 +181,20 @@ node tests/run-all.mjs worktree     # this extension only
 npm test                            # the whole collection
 ```
 
-Four files under `tests/worktree/`. `worktree.test.mjs` runs against throwaway
+Seven files under `tests/worktree/`. `worktree.test.mjs` runs against throwaway
 repos in `$TMPDIR`, covering both plain and bare layouts, plus pure-function
 tests for focus rewriting, argument parsing, name matching and config
 precedence. Set `PI_TEST_BARE_REPO` to also check a real bare-layout checkout on
 this machine. `pr.test.mjs` and `gh.test.mjs` cover the PR display and its `gh`
 calls, both pure or fake-runner tests with no network or subprocesses.
-`pr-status.test.mjs` drives `index.ts` itself through a fake `pi`: real git in a
-throwaway repo, scripted `gh`, asserting the generation guard, the branch
-re-read and repaint, the error backoff, and the `hasUI` gate.
+`pr-monitor.test.mjs`, `session.test.mjs`, and `ui.test.mjs` cover the three
+extracted units directly, with injected runners and clocks and no fake `pi` at
+all — single flight, the pending re-run, backoff, idle suspension, disposal,
+focus persistence, and the `hasUI` × print matrix.
+
+`pr-status.test.mjs` remains the integration test: it drives `index.ts` through a
+fake `pi` with real git in a throwaway repo and scripted `gh`, asserting the
+branch re-read and repaint, the error backoff, the `hasUI` gate, and that a
+session replaced mid-fetch never paints through its stale `ctx`. It builds a
+fresh `ctx` per `session_start`, as pi does, because sharing one would hide that
+last class of bug entirely.

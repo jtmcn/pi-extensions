@@ -277,7 +277,7 @@ function setup(options = {}) {
 	ok("a result for a target that moved away does not paint", h.state.paints === paintsBefore);
 }
 
-// ===================================================== reset makes a fetch inert
+// ============================================ disposal makes a fetch inert
 
 {
 	let release;
@@ -294,13 +294,44 @@ function setup(options = {}) {
 	await h.settle();
 	const paintsBefore = h.state.paints;
 
-	// Session replaced mid-fetch.
-	h.monitor.reset();
+	// The session was replaced mid-fetch: this monitor belonged to it and is done.
+	h.monitor.dispose();
 	release();
 	await h.settle();
 	ok("a superseded fetch does not paint", h.state.paints === paintsBefore);
 	ok("a superseded fetch caches nothing", h.monitor.label() === undefined);
-	ok("reset cancels pending timers", h.live().length === 0);
+	ok("disposal cancels pending timers", h.live().length === 0);
+}
+
+{
+	// The difference from a generation counter: a disposed monitor is not a monitor
+	// waiting to be reused. Nothing can restart it — not a caller, not a timer that
+	// already escaped, not the pending re-run of a fetch that was in flight.
+	const h = setup();
+	h.monitor.dispose();
+	h.monitor.refresh(true);
+	h.monitor.onInput();
+	h.monitor.onBashCommand("gh pr create --fill");
+	await h.settle();
+	ok("a disposed monitor runs nothing", h.calls.length === 0, `${h.calls.length} calls`);
+	ok("a disposed monitor arms nothing", h.live().length === 0);
+	ok("a disposed monitor reports no label", h.monitor.label() === undefined);
+}
+
+{
+	// A poll timer that was already armed when the session was replaced: firing it
+	// must not resurrect the monitor.
+	const h = setup();
+	h.monitor.refresh();
+	await h.settle();
+	const armed = h.live()[0];
+	ok("a poll was armed", armed !== undefined);
+
+	const callsBefore = h.calls.length;
+	h.monitor.dispose();
+	armed.fn();
+	await h.settle();
+	ok("an escaped timer cannot revive a disposed monitor", h.calls.length === callsBefore);
 }
 
 // ===================================================== idle suspension
