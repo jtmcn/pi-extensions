@@ -1,6 +1,9 @@
 # Test harness deps
 tests/node_modules/
 
+# The root package.json has no dependencies, but npm still creates this
+/node_modules/
+
 # Extension deps, if an extension ever needs npm packages
 */node_modules/
 

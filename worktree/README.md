@@ -165,18 +165,17 @@ worktree/gh.ts         the gh calls behind the PR status display
 ## Tests
 
 ```bash
-cd ~/Code/pi-extensions/tests
-npm install
-npm test
+cd ~/Code/pi-extensions
+node tests/run-all.mjs worktree     # this extension only
+npm test                            # the whole collection
 ```
 
-Runs `worktree.test.mjs`, `mcp.test.mjs`, `pr.test.mjs`, `gh.test.mjs`, and
-`pr-status.test.mjs`. `worktree.test.mjs` runs against throwaway repos in
-`$TMPDIR`, covering both plain and bare layouts, plus pure-function tests for
-focus rewriting, argument parsing, name matching and config precedence. Set
-`PI_TEST_BARE_REPO` to also check a real bare-layout checkout on this machine.
-`pr.test.mjs` and `gh.test.mjs` cover the PR display and its `gh` calls, both
-pure or fake-runner tests with no network or subprocesses. `pr-status.test.mjs`
-drives `index.ts` itself through a fake `pi`: real git in a throwaway repo,
-scripted `gh`, asserting the generation guard, the branch re-read and repaint,
-the error backoff, and the `hasUI` gate.
+Four files under `tests/worktree/`. `worktree.test.mjs` runs against throwaway
+repos in `$TMPDIR`, covering both plain and bare layouts, plus pure-function
+tests for focus rewriting, argument parsing, name matching and config
+precedence. Set `PI_TEST_BARE_REPO` to also check a real bare-layout checkout on
+this machine. `pr.test.mjs` and `gh.test.mjs` cover the PR display and its `gh`
+calls, both pure or fake-runner tests with no network or subprocesses.
+`pr-status.test.mjs` drives `index.ts` itself through a fake `pi`: real git in a
+throwaway repo, scripted `gh`, asserting the generation guard, the branch
+re-read and repaint, the error backoff, and the `hasUI` gate.

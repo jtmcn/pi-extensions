@@ -1,0 +1,11 @@
+{
+	"name": "pi-extensions",
+	"private": true,
+	"type": "module",
+	"description": "Personal pi extension collection. Not an npm package — pi loads these from a symlink. This file exists only to give the checks one entry point.",
+	"scripts": {
+		"typecheck": "./typecheck.sh",
+		"test": "npm --prefix tests install --silent && node tests/run-all.mjs",
+		"check": "npm run typecheck && npm test"
+	}
+}

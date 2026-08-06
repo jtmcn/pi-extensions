@@ -144,15 +144,14 @@ mechanism pi-ai uses for its own hand-written JSON Schema (`StringEnum`).
 ## Tests
 
 ```bash
-cd ~/Code/pi-extensions/tests
-npm install
-node mcp.test.mjs
+cd ~/Code/pi-extensions
+node tests/run-all.mjs mcp
 
 # also smoke-test a real server
-PI_TEST_MCP_COMMAND="gitnexus mcp" PI_TEST_MCP_CWD=/some/indexed/repo node mcp.test.mjs
+PI_TEST_MCP_COMMAND="gitnexus mcp" PI_TEST_MCP_CWD=/some/indexed/repo node tests/mcp/mcp.test.mjs
 ```
 
-`fixtures/fake-mcp-server.mjs` is deliberately awkward: it logs to stderr,
+`tests/fixtures/fake-mcp-server.mjs` is deliberately awkward: it logs to stderr,
 prints a non-JSON banner, paginates `tools/list`, returns `isError` for one
 tool and a JSON-RPC error for another, sends the client a request, omits
 `inputSchema` on a tool, and can hang or crash on demand.

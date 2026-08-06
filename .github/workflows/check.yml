@@ -1,0 +1,29 @@
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # typecheck.sh resolves pi's types out of the *global* install, and the
+      # tests import pi (plus the typebox and pi-ai copies nested inside it)
+      # through jiti aliases pointing at the same place. Nothing here is an npm
+      # dependency of this repo, so the global install is the dependency step.
+      - name: Install pi globally
+        run: npm install -g @earendil-works/pi-coding-agent
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test

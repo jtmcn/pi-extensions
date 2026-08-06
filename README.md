@@ -16,6 +16,8 @@ pi follows the symlink and loads everything normally.
 
 ```
 extensions/
+├── AGENTS.md           checks, layout rules, and the load-bearing conventions
+├── package.json        private; exists only to give the checks one entry point
 ├── lib/                shared helpers — NOT an extension (no index.ts, never loaded)
 │   └── git.ts          git plumbing: layout detection, worktree listing, dirt checks
 ├── mcp/                an extension (loaded via mcp/index.ts)
@@ -26,12 +28,16 @@ extensions/
 │   └── README.md
 ├── tests/              test harness for the collection (jiti, plain node)
 │   ├── package.json
+│   ├── harness.mjs     assertions, extension loading, fake runners
+│   ├── run-all.mjs     discovers and runs every **/*.test.mjs
 │   ├── fixtures/       fake servers etc. used by tests
-│   ├── gh.test.mjs
-│   ├── mcp.test.mjs
-│   ├── pr.test.mjs
-│   ├── pr-status.test.mjs
-│   └── worktree.test.mjs
+│   ├── mcp/
+│   │   └── mcp.test.mjs
+│   └── worktree/
+│       ├── gh.test.mjs
+│       ├── pr.test.mjs
+│       ├── pr-status.test.mjs
+│       └── worktree.test.mjs
 ├── typecheck.sh        tsc over every extension (no build step otherwise)
 └── worktree/           an extension (loaded via worktree/index.ts)
     ├── index.ts
@@ -45,7 +51,12 @@ extensions/
 ```
 
 Discovery only picks up `*.ts` and `*/index.ts` at the top level, so `lib/` and
-`tests/` are safe as plain support directories.
+`tests/` are safe as plain support directories. The flip side: any new top-level
+directory with an `index.ts` in it *is* an extension, including a scratch or
+template one.
+
+Tests live in `tests/<extension>/` and are discovered by glob, so adding an
+extension means adding a directory and a test file — no script to edit.
 
 ## Extensions
 
@@ -87,24 +98,47 @@ Things worth keeping consistent as this grows:
   should do reversible, additive things (create a worktree); state that changes
   the user's environment (focus) stays behind a slash command.
 
-## Type checking
-
-There is no build step — pi loads TypeScript through jiti — so this is the only
-thing that catches type errors:
+## Checks
 
 ```bash
-./typecheck.sh
+npm run check      # typecheck + tests — run this before committing
+npm run typecheck
+npm test
 ```
 
-It generates a tsconfig pointing at the globally installed pi package (whose
-path differs per machine, which is why the config is not committed) and runs
-`tsc --noEmit --strict` over `lib/` and every extension directory.
+CI runs `npm run check` on every push and pull request
+([.github/workflows/check.yml](.github/workflows/check.yml)); it installs pi
+globally first, because that is where both checks resolve pi from.
 
-## Tests
+### Type checking
+
+There is no build step — pi loads TypeScript through jiti — so `./typecheck.sh`
+is the only thing that catches type errors. It generates a tsconfig pointing at
+the globally installed pi package (whose path differs per machine, which is why
+the config is not committed) and runs `tsc --noEmit --strict` recursively over
+`lib/` and every extension directory.
+
+The glob is recursive deliberately. It was once `*/[!.]*.ts`, and because
+tsconfig glob syntax has no character classes, that pattern matched *nothing* —
+the script reported success while checking a single file.
+
+### Tests
 
 ```bash
-cd tests && npm install && node worktree.test.mjs
-
-# optionally exercise a real bare-layout checkout
-PI_TEST_BARE_REPO=~/Code/hellos node worktree.test.mjs
+npm test                             # everything
+node tests/run-all.mjs worktree      # one extension
+node tests/worktree/pr.test.mjs      # one file
 ```
+
+One failing file does not stop the others. Optional extras:
+
+```bash
+# exercise a real bare-layout checkout
+PI_TEST_BARE_REPO=~/Code/hellos node tests/worktree/worktree.test.mjs
+
+# exercise a real MCP server
+PI_TEST_MCP_COMMAND="gitnexus mcp" node tests/mcp/mcp.test.mjs
+```
+
+New test files import `tests/harness.mjs` for assertions, extension loading, and
+fake runners rather than re-implementing them.
