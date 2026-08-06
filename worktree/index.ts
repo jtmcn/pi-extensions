@@ -42,6 +42,7 @@ import { matchWorktree, parseNewArgs } from "./select.ts";
 import { fetchNameWithOwner, fetchPr, type PrLookup } from "./gh.ts";
 import {
 	BASH_TRIGGER_DELAY_MS,
+	BRANCH_READ_TIMEOUT_MS,
 	formatPr,
 	IDLE_SUSPEND_MS,
 	matchesPrCommand,
@@ -57,14 +58,6 @@ const STATUS_KEY = "worktree";
 const FOCUS_ENTRY_TYPE = "worktree-focus";
 /** Custom message announcing focus to the model. Carries no state. */
 const FOCUS_MESSAGE_TYPE = "worktree-focus-note";
-/**
- * Timeout for the HEAD re-read inside a PR refresh.
- *
- * `git symbolic-ref` only reads a local ref, so it is milliseconds even on a
- * cold repo; the bound exists purely so a wedged git (locked index, stalled
- * network filesystem) cannot latch `prFetching` for the rest of the session.
- */
-const BRANCH_READ_TIMEOUT_MS = 5_000;
 
 const SUBCOMMANDS = [
 	{ value: "list", label: "list", description: "Show worktrees for this repo" },
@@ -122,13 +115,6 @@ export default function (pi: ExtensionAPI) {
 	/** Whether the pending, dropped refresh above was forced. */
 	let prPendingForce = false;
 
-	/** Cancel every pending PR timer. Idempotent. */
-	const stopPrTimers = () => {
-		if (prTimer) clearTimeout(prTimer);
-		if (prBashTimer) clearTimeout(prBashTimer);
-		prTimer = undefined;
-		prBashTimer = undefined;
-	};
 	/**
 	 * Bumped on every session_start.
 	 *
@@ -137,6 +123,14 @@ export default function (pi: ExtensionAPI) {
 	 * it after every await, so a superseded fetch touches no shared state.
 	 */
 	let prGeneration = 0;
+
+	/** Cancel every pending PR timer. Idempotent. */
+	const stopPrTimers = () => {
+		if (prTimer) clearTimeout(prTimer);
+		if (prBashTimer) clearTimeout(prBashTimer);
+		prTimer = undefined;
+		prBashTimer = undefined;
+	};
 
 	/** The worktree whose PR is displayed: the focused one, else the session's. */
 	const prTarget = (): { cwd: string; branch: string } | undefined => resolveTarget(focus, repo);
@@ -169,14 +163,6 @@ export default function (pi: ExtensionAPI) {
 			prPending = true;
 			prPendingForce = prPendingForce || force;
 			return;
-		}
-
-		// During an outage, every submitted message would otherwise spawn another
-		// gh call (up to 10s, serialized). Bypassed by a forced refresh (bash
-		// trigger).
-		if (!force && prErrors > 0 && prLastErrorAt !== undefined) {
-			const backoff = nextPollDelay({ status: "error", consecutiveErrors: prErrors });
-			if (backoff !== undefined && Date.now() - prLastErrorAt < backoff) return;
 		}
 
 		const generation = prGeneration;
@@ -215,6 +201,17 @@ export default function (pi: ExtensionAPI) {
 					// a detached HEAD clears the label instead of stranding it.
 					const moved = prTarget();
 					if ((moved ? prKey(moved) : undefined) !== previousKey && sessionCtx) setStatus(sessionCtx);
+				}
+
+				// During a gh outage, every submitted message would otherwise spawn
+				// another gh call (up to 10s, serialized). Bypassed by a forced refresh
+				// (poll timer, bash trigger). Deliberately *after* the branch re-read
+				// above: that read is local git and unaffected by whatever is wrong with
+				// gh, and gating it would leave a `git switch` showing the old branch's
+				// PR — linked — for the length of the backoff.
+				if (!force && prErrors > 0 && prLastErrorAt !== undefined) {
+					const backoff = nextPollDelay({ status: "error", consecutiveErrors: prErrors });
+					if (backoff !== undefined && Date.now() - prLastErrorAt < backoff) return;
 				}
 
 				const target = prTarget();

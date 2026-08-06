@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node worktree.test.mjs && node mcp.test.mjs && node pr.test.mjs && node gh.test.mjs"
+    "test": "node worktree.test.mjs && node mcp.test.mjs && node pr.test.mjs && node gh.test.mjs && node pr-status.test.mjs"
   },
   "dependencies": {
     "jiti": "^2.4.2"
