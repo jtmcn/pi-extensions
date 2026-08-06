@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Type check every extension against the installed pi package.
 #
+# The include glob is recursive on purpose: it used to be one level deep
+# (*/[!.]*.ts), which silently skipped any file an extension put in a
+# subdirectory.
+#
 # There is no build step (pi loads TypeScript through jiti), so this is the only
 # thing that catches type errors. The tsconfig is generated rather than
 # committed because it has to point at the *globally* installed pi, whose path
@@ -40,7 +44,8 @@ cat >"$config" <<EOF
     },
     "typeRoots": ["$global/@types", "$pi/node_modules/@types"]
   },
-  "include": ["$root/lib/*.ts", "$root/*/[!.]*.ts"]
+  "include": ["$root/**/*.ts"],
+  "exclude": ["$root/**/node_modules/**"]
 }
 EOF
 

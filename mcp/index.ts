@@ -18,7 +18,7 @@
  *    because a reconnect recomputes the *same* names — see `cycleTaken`.
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { inputSchema, selectTools, toAgentContent, toolDescription, toolName } from "./bridge.ts";
 import { McpClient, type McpServerSpec } from "./client.ts";
@@ -31,6 +31,26 @@ import {
 
 /** Tool count above which an allow-list is worth suggesting. */
 const NOISY_TOOL_COUNT = 8;
+
+/**
+ * `details` for a bridged tool call.
+ *
+ * The three outcomes — server down, server replied, transport failed — fill
+ * different subsets of these fields, so everything past `server` is optional.
+ * Without one declared type TypeScript infers a separate shape per return
+ * branch and no single `AgentToolResult<T>` accepts the union.
+ */
+interface BridgedToolDetails {
+	server: string;
+	/** Set only when the call never left pi because the server was not connected. */
+	connected?: boolean;
+	/** The tool's name on the server, once a handler was found. */
+	tool?: string;
+	/** The server replied and flagged the result as an error. */
+	isError?: boolean;
+	/** Transport-level failure: crash, timeout, or abort. */
+	failed?: boolean;
+}
 
 interface Handler {
 	client: McpClient;
@@ -130,7 +150,7 @@ export default function mcpExtension(pi: ExtensionAPI) {
 			// is both sufficient and what pi-ai itself uses for hand-written
 			// JSON Schema (see its StringEnum helper).
 			parameters: Type.Unsafe<Record<string, unknown>>(schema),
-			async execute(_toolCallId, params, signal) {
+			async execute(_toolCallId, params, signal): Promise<AgentToolResult<BridgedToolDetails>> {
 				const handler = handlers.get(piName);
 				if (!handler || !handler.client.running) {
 					return {
