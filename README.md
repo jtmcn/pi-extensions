@@ -18,14 +18,27 @@ pi follows the symlink and loads everything normally.
 extensions/
 ├── lib/                shared helpers — NOT an extension (no index.ts, never loaded)
 │   └── git.ts          git plumbing: layout detection, worktree listing, dirt checks
+├── mcp/                an extension (loaded via mcp/index.ts)
+│   ├── index.ts
+│   ├── client.ts
+│   ├── config.ts
+│   ├── bridge.ts
+│   └── README.md
 ├── tests/              test harness for the collection (jiti, plain node)
 │   ├── package.json
+│   ├── fixtures/       fake servers etc. used by tests
+│   ├── gh.test.mjs
+│   ├── mcp.test.mjs
+│   ├── pr.test.mjs
+│   ├── pr-status.test.mjs
 │   └── worktree.test.mjs
 ├── typecheck.sh        tsc over every extension (no build step otherwise)
 └── worktree/           an extension (loaded via worktree/index.ts)
     ├── index.ts
     ├── config.ts
     ├── focus.ts
+    ├── gh.ts
+    ├── pr.ts
     ├── select.ts
     ├── worktrees.ts
     └── README.md
@@ -38,7 +51,8 @@ Discovery only picks up `*.ts` and `*/index.ts` at the top level, so `lib/` and
 
 | Name | What it does |
 |---|---|
-| [`worktree`](worktree/README.md) | Manage git worktrees; optionally redirect the agent's tool calls into one without restarting the session. |
+| [`mcp`](mcp/README.md) | MCP client: spawn stdio MCP servers and expose their tools as native pi tools. |
+| [`worktree`](worktree/README.md) | Manage git worktrees; optionally redirect the agent's tool calls into one without restarting the session. Shows the branch's PR in the status bar. |
 
 ## Conventions
 

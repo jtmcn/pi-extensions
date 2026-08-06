@@ -12,7 +12,7 @@
  */
 
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -322,6 +322,70 @@ await worktrees.removeWorktree(runner, {
 });
 ok("remove: gone from list", !(await git.listWorktrees(runner, repo)).some((w) => w.path === merged.path));
 ok("remove: merged branch deleted", !(await git.branchExists(runner, "joel/mergeable", repo)));
+
+// A read-only subtree is what pants leaves behind: tool digests under
+// `pants.d/tmp/immutable_inputs*/` are materialized mode 555, and unlinking a
+// file needs the write bit on its *parent*, so git's recursive delete stops
+// with EACCES after having already deregistered the worktree.
+const readOnly = await worktrees.createWorktree(runner, {
+	name: "readonly",
+	branch: "joel/readonly",
+	config: { ...cfg, postCreate: undefined },
+	projectRoot: repo,
+	sourceWorktree: repo,
+});
+const digest = join(readOnly.path, "pants.d", "tmp", "immutable_inputs", "digest");
+await mkdir(join(digest, "bin"), { recursive: true });
+await writeFile(join(digest, "bin", "protoc"), "binary");
+await chmod(join(digest, "bin", "protoc"), 0o555);
+await chmod(join(digest, "bin"), 0o555);
+await chmod(digest, 0o555);
+
+const readOnlyEntry = (await git.listWorktrees(runner, repo)).find((w) => w.path === readOnly.path);
+let readOnlyError;
+try {
+	await worktrees.removeWorktree(runner, {
+		worktree: readOnlyEntry,
+		projectRoot: repo,
+		force: true,
+		deleteBranch: true,
+	});
+} catch (err) {
+	readOnlyError = err;
+}
+ok("remove: read-only subtree does not fail", !readOnlyError, readOnlyError?.message);
+ok("remove: read-only directory actually deleted", !(await exists(readOnly.path)));
+ok(
+	"remove: read-only worktree deregistered",
+	!(await git.listWorktrees(runner, repo)).some((w) => w.path === readOnly.path),
+);
+ok("remove: branch deleted after recovery", !(await git.branchExists(runner, "joel/readonly", repo)));
+// Restore write bits when the fix regressed, so the $TMPDIR cleanup below can
+// still delete the tree instead of failing with the very error under test.
+if (await exists(readOnly.path)) await pexec("chmod", ["-R", "u+w", readOnly.path]);
+
+// A refusal must never be mistaken for a partial delete: git rejects a dirty
+// worktree *before* touching anything, so recovery must not delete the files.
+const refused = await worktrees.createWorktree(runner, {
+	name: "refused",
+	branch: "joel/refused",
+	config: { ...cfg, postCreate: undefined },
+	projectRoot: repo,
+	sourceWorktree: repo,
+});
+await writeFile(join(refused.path, "precious.txt"), "do not delete");
+const refusedEntry = (await git.listWorktrees(runner, repo)).find((w) => w.path === refused.path);
+await rejects(
+	"remove: dirty refusal still rejects",
+	() => worktrees.removeWorktree(runner, { worktree: refusedEntry, projectRoot: repo, force: false }),
+	/contains modified|untracked/,
+);
+ok("remove: refusal leaves the worktree intact", await exists(join(refused.path, "precious.txt")));
+ok(
+	"remove: refusal leaves the worktree registered",
+	(await git.listWorktrees(runner, repo)).some((w) => w.path === refused.path),
+);
+await worktrees.removeWorktree(runner, { worktree: refusedEntry, projectRoot: repo, force: true });
 
 // ============================================= integration: bare layout
 

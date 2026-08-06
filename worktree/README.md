@@ -55,9 +55,14 @@ When focused, the footer shows `⑂ <name> (<branch>)`.
 ## Tool
 
 The model gets a `worktree` tool with `action: "list" | "create"`. It can spin
-up an isolated worktree for a parallel experiment. It deliberately **cannot**
-change focus — that stays a user decision. Creating a worktree does not move
-the model; it gets the path back and must use it explicitly.
+up an isolated worktree for a parallel experiment.
+
+`create` focuses the new worktree when `autoFocus` is on (the default), so the
+model keeps working where it just landed instead of threading an absolute path
+through every later call. The footer shows the focus and `/worktree focus off`
+undoes it. Set `"autoFocus": false` for the old behaviour, where the tool only
+returns the path. The tool still cannot focus an *existing* worktree — switching
+between worktrees stays a user decision.
 
 Note that `create` runs the configured `postCreate` command, so a model tool
 call can execute the project's setup command. `postCreate` therefore only comes
@@ -102,7 +107,8 @@ Later files win:
   // including when the model creates a worktree through the tool.
   "postCreate": "npm install",
 
-  // Focus a newly created worktree automatically.
+  // Focus a newly created worktree automatically — both `/worktree new` and the
+  // model's `worktree` tool.
   "autoFocus": true,
 
   // Remap absolute paths under the session worktree while focused.
@@ -113,6 +119,36 @@ Later files win:
 }
 ```
 
+## PR in the status bar
+
+When the current branch has a pull request, the status segment shows it:
+
+```
+⑂ main (joel/ont-mount-constant) #26904 open ●    ← worktree focused
+#26904 open ●                                     ← no focus
+```
+
+The PR text is an OSC 8 hyperlink to the Graphite PR page
+(`app.graphite.com/github/pr/<owner>/<repo>/<number>`); cmd-click it in a
+terminal that supports hyperlinks. The glyph is the CI rollup: `✓` all passed,
+`✗` something failed, `●` still running, absent when there are no checks. The
+state word is `open`, `draft`, `merged`, or `closed`.
+
+Unfocused sessions show the PR alone, because pi's own footer line already
+reads `<pwd> (<branch>)`.
+
+Data comes from `gh pr list --head <branch> --state all`, refreshed every 60s
+while the PR is open, every 5 min when the branch has no PR, and never once it is
+merged or closed. (`gh pr view <branch>` would be shorter, but its argument is
+parsed as a PR number first, so a branch named `1234` would show PR #1234.) When
+a reused branch has several PRs, the open one wins, else the newest.
+Polling suspends after 15 minutes without input and resumes on the next one. A
+`gt submit`, `gh pr create`, or `git push` schedules a refresh 8s later so a new
+PR appears promptly.
+
+Everything fails silently: no `gh`, not logged in, no network, or a non-GitHub
+remote simply means no PR text.
+
 ## Files
 
 ```
@@ -122,6 +158,8 @@ worktree/config.ts     config loading and path templating
 worktree/focus.ts      tool-input rewriting (pure, heavily tested)
 worktree/select.ts     argument parsing and name matching (pure)
 worktree/worktrees.ts  create / remove / prune
+worktree/pr.ts         PR display formatting and poll cadence (pure)
+worktree/gh.ts         the gh calls behind the PR status display
 ```
 
 ## Tests
@@ -129,10 +167,16 @@ worktree/worktrees.ts  create / remove / prune
 ```bash
 cd ~/Code/pi-extensions/tests
 npm install
-node worktree.test.mjs
+npm test
 ```
 
-Runs against throwaway repos in `$TMPDIR`, covering both plain and bare
-layouts, plus pure-function tests for focus rewriting, argument parsing, name
-matching and config precedence. Set `PI_TEST_BARE_REPO` to also check a real
-bare-layout checkout on this machine.
+Runs `worktree.test.mjs`, `mcp.test.mjs`, `pr.test.mjs`, `gh.test.mjs`, and
+`pr-status.test.mjs`. `worktree.test.mjs` runs against throwaway repos in
+`$TMPDIR`, covering both plain and bare layouts, plus pure-function tests for
+focus rewriting, argument parsing, name matching and config precedence. Set
+`PI_TEST_BARE_REPO` to also check a real bare-layout checkout on this machine.
+`pr.test.mjs` and `gh.test.mjs` cover the PR display and its `gh` calls, both
+pure or fake-runner tests with no network or subprocesses. `pr-status.test.mjs`
+drives `index.ts` itself through a fake `pi`: real git in a throwaway repo,
+scripted `gh`, asserting the generation guard, the branch re-read and repaint,
+the error backoff, and the `hasUI` gate.

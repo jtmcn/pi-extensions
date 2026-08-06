@@ -7,3 +7,6 @@ tests/node_modules/
 # Editor / OS noise
 .DS_Store
 *.log
+
+# Subagent-driven-development scratch (ledger, briefs, review packages)
+.superpowers/
