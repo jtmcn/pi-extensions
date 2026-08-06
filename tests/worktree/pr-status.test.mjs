@@ -1,7 +1,7 @@
 /**
  * Tests for the PR status orchestration in worktree/index.ts.
  *
- *   cd ~/.pi/agent/extensions/tests && npm install && node pr-status.test.mjs
+ *   cd tests && npm install && node worktree/pr-status.test.mjs
  *
  * `pr.ts` and `gh.ts` are unit tested elsewhere; this file covers the wiring
  * between them, which is where every defect in the feature has been found: the
@@ -13,37 +13,13 @@
  * network half is scripted.
  */
 
-import { execFile } from "node:child_process";
-import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { promisify } from "node:util";
-import { createJiti } from "jiti";
+import { assertions, loadExt, pexec } from "../harness.mjs";
 
-const pexec = promisify(execFile);
-const EXT = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
-const PI_ENTRY = process.env.PI_DIST ?? (await resolvePiEntry());
-// The extension entry point imports typebox and pi-ai, which are installed next
-// to pi rather than next to these tests.
-const PI_PKG = PI_ENTRY.replace(/\/dist\/index\.js$/, "");
-
-const jiti = createJiti(import.meta.url, {
-	alias: {
-		"@earendil-works/pi-coding-agent": PI_ENTRY,
-		typebox: await nestedEntry("typebox"),
-		"@earendil-works/pi-ai": await nestedEntry("@earendil-works/pi-ai"),
-	},
-});
-const extension = (await jiti.import(`${EXT}/worktree/index.ts`)).default;
-
-let fails = 0;
-const ok = (name, cond, extra = "") => {
-	if (cond) console.log(`ok    ${name}`);
-	else {
-		fails++;
-		console.log(`FAIL  ${name}${extra ? `  -> ${extra}` : ""}`);
-	}
-};
+const { ok, done } = assertions();
+const extension = (await loadExt("worktree/index.ts")).default;
 
 /** Wait until `predicate` holds. Refreshes are fire-and-forget, so nothing to await. */
 const until = async (predicate, timeoutMs = 10_000) => {
@@ -338,21 +314,4 @@ const openPr = (number) => [
 	await rm(dir, { recursive: true, force: true });
 }
 
-console.log(fails === 0 ? "\nALL PASS" : `\n${fails} FAILURE(S)`);
-process.exit(fails ? 1 : 0);
-
-async function resolvePiEntry() {
-	const { execSync } = await import("node:child_process");
-	const root = execSync("npm root -g", { encoding: "utf8" }).trim();
-	return join(root, "@earendil-works/pi-coding-agent/dist/index.js");
-}
-
-/** Entry *file* of a package nested inside pi; jiti aliases cannot be directories. */
-async function nestedEntry(name) {
-	const dir = join(PI_PKG, "node_modules", name);
-	const meta = JSON.parse(await readFile(join(dir, "package.json"), "utf8"));
-	const root = meta.exports?.["."];
-	const entry = root?.import ?? root?.default ?? meta.module ?? meta.main;
-	if (!entry) throw new Error(`cannot resolve an entry point for ${name}`);
-	return join(dir, entry);
-}
+done();

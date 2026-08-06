@@ -1,44 +1,17 @@
 /**
  * Tests for the gh calls behind the PR status display (worktree/gh.ts).
  *
- *   cd ~/.pi/agent/extensions/tests && npm install && node gh.test.mjs
+ *   cd tests && npm install && node worktree/gh.test.mjs
  *
  * No subprocesses: a scripted fake runner returns canned stdout/stderr/exit
  * codes, including the real error strings gh produces.
  */
 
-import { join } from "node:path";
-import { createJiti } from "jiti";
+import { assertions, fakeRunner, loadExt } from "../harness.mjs";
 
-const EXT = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
-const PI_ENTRY = process.env.PI_DIST ?? (await resolvePiEntry());
-
-const jiti = createJiti(import.meta.url, {
-	alias: { "@earendil-works/pi-coding-agent": PI_ENTRY },
-});
-const gh = await jiti.import(`${EXT}/worktree/gh.ts`);
-const pr = await jiti.import(`${EXT}/worktree/pr.ts`);
-
-let fails = 0;
-const ok = (name, cond, extra = "") => {
-	if (cond) console.log(`ok    ${name}`);
-	else {
-		fails++;
-		console.log(`FAIL  ${name}${extra ? `  -> ${extra}` : ""}`);
-	}
-};
-
-/** A runner that returns a canned result and records the call. */
-const fakeRunner = (result) => {
-	const calls = [];
-	return {
-		calls,
-		async exec(command, args, options = {}) {
-			calls.push({ command, args, options });
-			return { stdout: "", stderr: "", code: 0, killed: false, ...result };
-		},
-	};
-};
+const { ok, done } = assertions();
+const gh = await loadExt("worktree/gh.ts");
+const pr = await loadExt("worktree/pr.ts");
 
 const PR_JSON = JSON.stringify([
 	{
@@ -235,11 +208,4 @@ const PR_JSON = JSON.stringify([
 	);
 }
 
-console.log(fails === 0 ? "\nALL PASS" : `\n${fails} FAILURE(S)`);
-process.exit(fails ? 1 : 0);
-
-async function resolvePiEntry() {
-	const { execSync } = await import("node:child_process");
-	const root = execSync("npm root -g", { encoding: "utf8" }).trim();
-	return join(root, "@earendil-works/pi-coding-agent/dist/index.js");
-}
+done();

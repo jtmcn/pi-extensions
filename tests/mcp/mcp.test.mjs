@@ -1,7 +1,7 @@
 /**
  * Tests for the mcp extension.
  *
- *   cd ~/.pi/agent/extensions/tests && npm install && node mcp.test.mjs
+ *   cd tests && npm install && node mcp/mcp.test.mjs
  *
  * Covers the stdio client against a deliberately awkward fake server
  * (fixtures/fake-mcp-server.mjs), the pure bridge mappings, and config
@@ -11,49 +11,18 @@
  *   PI_TEST_MCP_COMMAND="gitnexus mcp" node mcp.test.mjs
  */
 
-import { mkdtemp, readFile, rm, writeFile, mkdir } from "node:fs/promises";
+import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createJiti } from "jiti";
+import { assertions, EXT_ROOT, loadExt } from "../harness.mjs";
 
-const EXT = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
-const PI_ENTRY = process.env.PI_DIST ?? (await resolvePiEntry());
-const FAKE = join(EXT, "tests/fixtures/fake-mcp-server.mjs");
+const FAKE = join(EXT_ROOT, "tests/fixtures/fake-mcp-server.mjs");
 const REAL_COMMAND = process.env.PI_TEST_MCP_COMMAND;
 
-// The extension entry point imports typebox and pi-ai, which are installed next
-// to pi rather than next to these tests — the same indirection typecheck.sh does
-// for the type checker.
-const PI_PKG = PI_ENTRY.replace(/\/dist\/index\.js$/, "");
-const jiti = createJiti(import.meta.url, {
-	alias: {
-		"@earendil-works/pi-coding-agent": PI_ENTRY,
-		typebox: await nestedEntry("typebox"),
-		"@earendil-works/pi-ai": await nestedEntry("@earendil-works/pi-ai"),
-	},
-});
-
-/** Entry *file* of a package nested inside pi; jiti aliases cannot be directories. */
-async function nestedEntry(name) {
-	const dir = join(PI_PKG, "node_modules", name);
-	const meta = JSON.parse(await readFile(join(dir, "package.json"), "utf8"));
-	const root = meta.exports?.["."];
-	const entry = root?.import ?? root?.default ?? meta.module ?? meta.main;
-	if (!entry) throw new Error(`cannot resolve an entry point for ${name}`);
-	return join(dir, entry);
-}
-const { McpClient } = await jiti.import(`${EXT}/mcp/client.ts`);
-const bridge = await jiti.import(`${EXT}/mcp/bridge.ts`);
-const { loadConfig, enabledServers } = await jiti.import(`${EXT}/mcp/config.ts`);
-
-let fails = 0;
-const ok = (name, cond, extra = "") => {
-	if (cond) console.log(`ok    ${name}`);
-	else {
-		fails++;
-		console.log(`FAIL  ${name}${extra ? `  -> ${extra}` : ""}`);
-	}
-};
+const { ok, skip, done } = assertions();
+const { McpClient } = await loadExt("mcp/client.ts");
+const bridge = await loadExt("mcp/bridge.ts");
+const { loadConfig, enabledServers } = await loadExt("mcp/config.ts");
 
 const fakeClient = (args = []) =>
 	new McpClient("fake", { command: process.execPath, args: [FAKE, ...args] }, { timeoutMs: 5000 });
@@ -336,7 +305,7 @@ const fakeClient = (args = []) =>
 	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 	process.env.PI_CODING_AGENT_DIR = agentDir;
 	try {
-		const mcpExtension = (await jiti.import(`${EXT}/mcp/index.ts`)).default;
+		const mcpExtension = (await loadExt("mcp/index.ts")).default;
 
 		const events = new Map();
 		const tools = new Map();
@@ -414,14 +383,7 @@ if (REAL_COMMAND) {
 	);
 	client.close();
 } else {
-	console.log("skip  real server checks (set PI_TEST_MCP_COMMAND to enable)");
+	skip("real server checks (set PI_TEST_MCP_COMMAND to enable)");
 }
 
-console.log(fails === 0 ? "\nALL PASS" : `\n${fails} FAILURE(S)`);
-process.exit(fails ? 1 : 0);
-
-async function resolvePiEntry() {
-	const { execSync } = await import("node:child_process");
-	const root = execSync("npm root -g", { encoding: "utf8" }).trim();
-	return join(root, "@earendil-works/pi-coding-agent/dist/index.js");
-}
+done();

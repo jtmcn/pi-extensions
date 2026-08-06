@@ -1,7 +1,7 @@
 /**
  * Tests for the worktree extension.
  *
- *   cd ~/.pi/agent/extensions/tests && npm install && node worktree.test.mjs
+ *   cd tests && npm install && node worktree/worktree.test.mjs
  *
  * Covers layout detection (plain / bare), porcelain parsing, path slugging,
  * focus-mode rewriting, argument parsing / worktree matching, create/remove/
@@ -11,52 +11,22 @@
  * runs only when $PI_TEST_BARE_REPO points at a bare-layout checkout.
  */
 
-import { execFile } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { promisify } from "node:util";
-import { createJiti } from "jiti";
+import { assertions, execRunner, loadExt, pexec } from "../harness.mjs";
 
-const pexec = promisify(execFile);
-const EXT = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
-const PI_ENTRY = process.env.PI_DIST ?? (await resolvePiEntry());
 const OPTIONAL_BARE_REPO = process.env.PI_TEST_BARE_REPO;
 
-const jiti = createJiti(import.meta.url, {
-	alias: { "@earendil-works/pi-coding-agent": PI_ENTRY },
-});
-const git = await jiti.import(`${EXT}/lib/git.ts`);
-const focus = await jiti.import(`${EXT}/worktree/focus.ts`);
-const config = await jiti.import(`${EXT}/worktree/config.ts`);
-const worktrees = await jiti.import(`${EXT}/worktree/worktrees.ts`);
-const select = await jiti.import(`${EXT}/worktree/select.ts`);
+const { ok, skip, done } = assertions();
+const git = await loadExt("lib/git.ts");
+const focus = await loadExt("worktree/focus.ts");
+const config = await loadExt("worktree/config.ts");
+const worktrees = await loadExt("worktree/worktrees.ts");
+const select = await loadExt("worktree/select.ts");
 
 /** Minimal GitRunner: same shape pi's `pi.exec` provides. */
-const runner = {
-	async exec(cmd, args, opts = {}) {
-		try {
-			const { stdout, stderr } = await pexec(cmd, args, { cwd: opts.cwd });
-			return { stdout, stderr, code: 0, killed: false };
-		} catch (err) {
-			return {
-				stdout: err.stdout ?? "",
-				stderr: err.stderr ?? String(err),
-				code: typeof err.code === "number" ? err.code : 1,
-				killed: false,
-			};
-		}
-	},
-};
-
-let fails = 0;
-const ok = (name, cond, extra = "") => {
-	if (cond) console.log(`ok    ${name}`);
-	else {
-		fails++;
-		console.log(`FAIL  ${name}${extra ? `  -> ${extra}` : ""}`);
-	}
-};
+const runner = execRunner();
 const exists = async (p) => {
 	try {
 		await stat(p);
@@ -473,15 +443,8 @@ if (OPTIONAL_BARE_REPO && (await exists(join(OPTIONAL_BARE_REPO, ".bare")))) {
 		JSON.stringify(list.map((w) => w.branch)),
 	);
 } else {
-	console.log("skip  local bare-layout repo checks (set PI_TEST_BARE_REPO to enable)");
+	skip("local bare-layout repo checks (set PI_TEST_BARE_REPO to enable)");
 }
 
 await rm(root, { recursive: true, force: true });
-console.log(fails === 0 ? "\nALL PASS" : `\n${fails} FAILURE(S)`);
-process.exit(fails ? 1 : 0);
-
-async function resolvePiEntry() {
-	const { execSync } = await import("node:child_process");
-	const root = execSync("npm root -g", { encoding: "utf8" }).trim();
-	return join(root, "@earendil-works/pi-coding-agent/dist/index.js");
-}
+done();

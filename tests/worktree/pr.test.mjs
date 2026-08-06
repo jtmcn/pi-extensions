@@ -1,7 +1,7 @@
 /**
  * Tests for the PR status display (worktree/pr.ts).
  *
- *   cd ~/.pi/agent/extensions/tests && npm install && node pr.test.mjs
+ *   cd tests && npm install && node worktree/pr.test.mjs
  *
  * Pure functions only: formatting, CI rollup, poll cadence, command matching,
  * and target resolution (focused worktree vs. session worktree). The rollup
@@ -9,25 +9,10 @@
  * mixed array of CheckRun and StatusContext objects.
  */
 
-import { join } from "node:path";
-import { createJiti } from "jiti";
+import { assertions, loadExt } from "../harness.mjs";
 
-const EXT = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
-const PI_ENTRY = process.env.PI_DIST ?? (await resolvePiEntry());
-
-const jiti = createJiti(import.meta.url, {
-	alias: { "@earendil-works/pi-coding-agent": PI_ENTRY },
-});
-const pr = await jiti.import(`${EXT}/worktree/pr.ts`);
-
-let fails = 0;
-const ok = (name, cond, extra = "") => {
-	if (cond) console.log(`ok    ${name}`);
-	else {
-		fails++;
-		console.log(`FAIL  ${name}${extra ? `  -> ${extra}` : ""}`);
-	}
-};
+const { ok, done } = assertions();
+const pr = await loadExt("worktree/pr.ts");
 
 // ============================================================ state labels
 
@@ -170,17 +155,9 @@ ok(
 );
 ok("target: neither focused nor in a repo is undefined", pr.resolveTarget(undefined, undefined) === undefined);
 
-console.log(fails === 0 ? "\nALL PASS" : `\n${fails} FAILURE(S)`);
-process.exit(fails ? 1 : 0);
+done();
 
 /** Strip OSC 8 sequences so assertions can read the visible text. */
 function stripAnsi(text) {
-	// biome-ignore lint/suspicious/noControlCharactersInRegex: matching terminal escapes is the point
 	return text.replace(/\x1b\]8;;[^\x07]*\x07/g, "");
-}
-
-async function resolvePiEntry() {
-	const { execSync } = await import("node:child_process");
-	const root = execSync("npm root -g", { encoding: "utf8" }).trim();
-	return join(root, "@earendil-works/pi-coding-agent/dist/index.js");
 }
