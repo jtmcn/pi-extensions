@@ -7,11 +7,23 @@
  * run a command".
  */
 
+import type { ExecResult } from "@earendil-works/pi-coding-agent";
 import type { GitRunner } from "../lib/git.ts";
-import type { PullRequest } from "./pr.ts";
+import { type PullRequest, selectPr } from "./pr.ts";
 
 /** Cap on a single gh call. Measured cost is ~0.5s; this is a stuck-network guard. */
 export const GH_TIMEOUT_MS = 10_000;
+
+/** The `--json` fields the display reads. */
+const PR_FIELDS = "number,state,isDraft,url,statusCheckRollup";
+
+/**
+ * How many of a branch's PRs to fetch.
+ *
+ * A reused branch accumulates closed PRs; the display only needs enough of them
+ * to pick the right one (see `selectPr`), not the whole history.
+ */
+const PR_LIST_LIMIT = 10;
 
 /**
  * Outcome of a PR lookup.
@@ -50,13 +62,10 @@ const UNAVAILABLE_PATTERNS = [
  */
 export async function fetchNameWithOwner(runner: GitRunner, cwd: string): Promise<RepoLookup> {
 	const result = await run(runner, ["repo", "view", "--json", "nameWithOwner"], cwd);
+	// Only a runner that throws yields undefined; pi's own exec never does.
 	if (!result) return { status: "unavailable" };
-
-	if (result.code !== 0) {
-		const stderr = result.stderr.toLowerCase();
-		if (UNAVAILABLE_PATTERNS.some((pattern) => stderr.includes(pattern))) return { status: "unavailable" };
-		return { status: "error" };
-	}
+	const failure = classifyFailure(result);
+	if (failure) return failure;
 
 	try {
 		const parsed = JSON.parse(result.stdout) as { nameWithOwner?: string };
@@ -66,35 +75,63 @@ export async function fetchNameWithOwner(runner: GitRunner, cwd: string): Promis
 	}
 }
 
-/** Look up the PR for `branch`, classifying every failure mode. */
+/**
+ * Look up the PR for `branch`, classifying every failure mode.
+ *
+ * `pr list --head` rather than `pr view <branch>`: `pr view`'s argument is
+ * `<number> | <url> | <branch>`, resolved number-first, so a branch literally
+ * named `1234` would display and link PR #1234 instead. `--state all` is
+ * needed for merged and closed PRs to appear at all, and makes "no PR" an
+ * empty array with exit 0 rather than a stderr message.
+ */
 export async function fetchPr(runner: GitRunner, branch: string, cwd: string): Promise<PrLookup> {
 	const result = await run(
 		runner,
-		["pr", "view", branch, "--json", "number,state,isDraft,url,statusCheckRollup"],
+		["pr", "list", "--head", branch, "--state", "all", "--limit", String(PR_LIST_LIMIT), "--json", PR_FIELDS],
 		cwd,
 	);
-	// A throw from exec means the binary is missing or unspawnable.
 	if (!result) return { status: "unavailable" };
-
-	if (result.code !== 0) {
-		const stderr = result.stderr.toLowerCase();
-		// gh uses exit 1 for both "no PR" and real errors, so the message decides.
-		if (stderr.includes("no pull requests found")) return { status: "none" };
-		if (UNAVAILABLE_PATTERNS.some((pattern) => stderr.includes(pattern))) return { status: "unavailable" };
-		return { status: "error" };
-	}
+	const failure = classifyFailure(result);
+	if (failure) return failure;
 
 	try {
-		const pr = JSON.parse(result.stdout) as PullRequest;
-		if (typeof pr?.number !== "number") return { status: "error" };
+		const parsed = JSON.parse(result.stdout) as unknown;
+		if (!Array.isArray(parsed)) return { status: "error" };
+		const pr = selectPr(parsed as PullRequest[]);
+		// A non-empty list that yielded nothing usable is a malformed payload, not
+		// an answer: retry rather than report "no PR".
+		if (!pr) return parsed.length === 0 ? { status: "none" } : { status: "error" };
 		return { status: "pr", pr };
 	} catch {
 		return { status: "error" };
 	}
 }
 
+/**
+ * Classify a failed gh call, or `undefined` when the call succeeded and its
+ * `stdout` is worth parsing. Shared by both lookups, which fail identically.
+ */
+function classifyFailure(result: ExecResult): { status: "error" | "unavailable" } | undefined {
+	// A timed-out or aborted call resolves as exit 0 with whatever had been
+	// flushed so far. A truncated payload usually fails to parse, but "usually"
+	// is not a classification — reject it explicitly.
+	if (result.killed) return { status: "error" };
+
+	if (result.code !== 0) {
+		const stderr = result.stderr.toLowerCase();
+		if (UNAVAILABLE_PATTERNS.some((pattern) => stderr.includes(pattern))) return { status: "unavailable" };
+		// pi's exec resolves an unspawnable binary as exit 1 with both streams
+		// empty rather than throwing, so this — not a caught throw — is how a
+		// missing gh actually arrives. A gh that ran always says something.
+		if (!result.stderr.trim() && !result.stdout.trim()) return { status: "unavailable" };
+		return { status: "error" };
+	}
+
+	return undefined;
+}
+
 /** Run gh, converting a spawn throw into `undefined`. */
-async function run(runner: GitRunner, args: string[], cwd: string) {
+async function run(runner: GitRunner, args: string[], cwd: string): Promise<ExecResult | undefined> {
 	try {
 		return await runner.exec("gh", args, { cwd, timeout: GH_TIMEOUT_MS });
 	} catch {

@@ -57,6 +57,37 @@ export function prState(pr: PullRequest): PrState {
 	return "open";
 }
 
+/** True while the PR is still being worked on, draft or not. */
+function isOpen(pr: PullRequest): boolean {
+	return pr.state?.toUpperCase() === "OPEN";
+}
+
+/**
+ * Pick the PR to display from every PR that shares a head branch.
+ *
+ * `gh pr list --state all` is the only way merged and closed PRs appear at all,
+ * but it also returns a reused branch's history. An open PR is what the user is
+ * working on, so it wins; otherwise the newest does. Entries with no usable
+ * number are dropped — the caller treats "had entries, selected none" as a
+ * malformed payload rather than as "no PR".
+ */
+export function selectPr(prs: PullRequest[]): PullRequest | undefined {
+	let best: PullRequest | undefined;
+	for (const pr of prs) {
+		if (typeof pr?.number !== "number") continue;
+		if (!best) {
+			best = pr;
+			continue;
+		}
+		if (isOpen(pr) !== isOpen(best)) {
+			if (isOpen(pr)) best = pr;
+			continue;
+		}
+		if (pr.number > best.number) best = pr;
+	}
+	return best;
+}
+
 /**
  * Reduce a mixed check array to one glyph.
  *
@@ -139,6 +170,15 @@ export const IDLE_SUSPEND_MS = 900_000;
 export const BASH_TRIGGER_DELAY_MS = 8_000;
 /** A cached entry older than this is repainted, then refreshed in background. */
 export const STALE_MS = 60_000;
+/**
+ * Timeout for the HEAD re-read inside a PR refresh.
+ *
+ * `git symbolic-ref` only reads a local ref, so it is milliseconds even on a
+ * cold repo; the bound exists purely so a wedged git (locked index, stalled
+ * network filesystem) cannot latch the in-flight guard for the rest of the
+ * session.
+ */
+export const BRANCH_READ_TIMEOUT_MS = 5_000;
 
 export type PollStatus = "pr" | "none" | "error";
 
