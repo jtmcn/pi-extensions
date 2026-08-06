@@ -9,9 +9,12 @@ remembering to run two commands that nothing enforces.
 
 Concretely, before this change:
 
-- `typecheck.sh` included `$root/*/[!.]*.ts` — one level deep. A file at
-  `mcp/sub/bad.ts` containing `export const x: number = "not a number"` passed
-  `./typecheck.sh` with `typecheck: ok`. Verified, not theorized.
+- `typecheck.sh` included `$root/*/[!.]*.ts`, which looked one level deep and
+  turned out to be worse. tsconfig glob syntax has no character classes, so the
+  pattern matched *nothing*: `tsc --listFiles` showed exactly one repo file
+  being checked, `lib/git.ts`. Every extension file — all of `mcp/` and
+  `worktree/` — had never been typechecked, and the script reported
+  `typecheck: ok` throughout. One real error was hiding behind it (see below).
 - `tests/package.json` chained five test files with `&&`, so the first failure
   aborted the rest and every new extension required editing the string.
 - `resolvePiEntry()` and the `ok()` assertion helper were byte-identical in all
@@ -39,11 +42,17 @@ Concretely, before this change:
 
 ### 1. Recursive typecheck
 
-`typecheck.sh` includes `$root/**/*.ts` and excludes `**/node_modules/**`.
-Nested extension files are checked instead of silently skipped.
+`typecheck.sh` includes `$root/**/*.ts` and excludes `**/node_modules/**`, so
+every extension file is checked, subdirectories included.
 
-Verification is a red-green cycle on the known failing case: `mcp/sub/bad.ts`
-must make `./typecheck.sh` exit non-zero, and removing it must restore `ok`.
+This exposes one genuine pre-existing error, fixed here: the bridged MCP tool in
+`mcp/index.ts` returns three different `details` shapes (server down, server
+replied, transport failed), and TypeScript infers a separate type per branch, so
+no single `AgentToolResult<T>` accepted the union. Fixed by declaring one
+`BridgedToolDetails` interface and annotating `execute`'s return type.
+
+Verification is a red-green cycle: a nested `mcp/sub/bad.ts` must make
+`./typecheck.sh` exit non-zero, and removing it must restore `ok`.
 
 ### 2. `tests/harness.mjs`
 
