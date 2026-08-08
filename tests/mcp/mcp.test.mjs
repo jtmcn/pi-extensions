@@ -363,6 +363,93 @@ const fakeClient = (args = []) =>
 	}
 }
 
+// ------------------------------------------------- teardown vs real failure ---
+
+/**
+ * Drive the extension against one server spec, capturing what it told the user.
+ *
+ * Separate from the lifecycle harness above because these cases must *not* await
+ * the connections: the whole point is what happens when a handshake is still in
+ * flight.
+ */
+async function lifecycle(server) {
+	const root = await mkdtemp(join(tmpdir(), "pi-mcp-teardown-"));
+	const agentDir = join(root, "agent");
+	await mkdir(agentDir, { recursive: true });
+	await writeFile(join(agentDir, "mcp.json"), JSON.stringify({ servers: { probe: server }, startupTimeoutMs: 10000 }));
+
+	const previous = process.env.PI_CODING_AGENT_DIR;
+	process.env.PI_CODING_AGENT_DIR = agentDir;
+	const notices = [];
+	const events = new Map();
+	const pi = {
+		on: (event, handler) => {
+			if (!events.has(event)) events.set(event, []);
+			events.get(event).push(handler);
+		},
+		registerTool: () => {},
+		registerCommand: () => {},
+	};
+	const ctx = {
+		cwd: root,
+		hasUI: true,
+		mode: "interactive",
+		isProjectTrusted: () => false,
+		ui: { notify: (message, level) => notices.push({ message, level }), setStatus: () => {}, setWidget: () => {} },
+	};
+
+	const extension = (await loadExt("mcp/index.ts")).default;
+	extension(pi);
+	const fire = async (event) => {
+		for (const handler of events.get(event) ?? []) await handler({}, ctx);
+	};
+
+	return {
+		notices,
+		fire,
+		settle: (ms = 150) => new Promise((resolve) => setTimeout(resolve, ms)),
+		cleanup: async () => {
+			if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+			else process.env.PI_CODING_AGENT_DIR = previous;
+			await rm(root, { recursive: true, force: true });
+		},
+	};
+}
+
+{
+	// A server that spawns and then never answers `initialize`. Shutting the session
+	// down closes the client, which rejects that pending handshake — but a close we
+	// asked for is teardown, not a server failure, and reporting it means every
+	// `pi -p` run ends with a scary line about a server that was fine.
+	const h = await lifecycle({ command: process.execPath, args: ["-e", "setInterval(() => {}, 1e9)"], timeoutMs: 30000 });
+	await h.fire("session_start");
+	await h.fire("session_shutdown");
+	await h.settle();
+
+	ok(
+		"teardown: closing a handshake in flight reports no failure",
+		!h.notices.some((n) => /failed/.test(n.message)),
+		JSON.stringify(h.notices),
+	);
+	await h.cleanup();
+}
+
+{
+	// The other half: a server that genuinely cannot start must still be reported,
+	// or the fix above has just hidden every real problem.
+	const h = await lifecycle({ command: join(tmpdir(), "definitely-not-a-real-binary-xyz"), args: [], timeoutMs: 5000 });
+	await h.fire("session_start");
+	await h.settle();
+
+	ok(
+		"a server that cannot start is still reported",
+		h.notices.some((n) => /probe failed/.test(n.message)),
+		JSON.stringify(h.notices),
+	);
+	await h.fire("session_shutdown");
+	await h.cleanup();
+}
+
 // ------------------------------------------------------- real server (opt) ---
 
 if (REAL_COMMAND) {

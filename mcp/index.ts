@@ -267,6 +267,13 @@ export default function mcpExtension(pi: ExtensionAPI) {
 			if (!state) continue;
 			connecting.push(
 				connect(state, ctx, cycle).catch((error: Error) => {
+					// A close *we* initiated rejects whatever handshake was in flight.
+					// Both close paths (session_shutdown, /mcp restart) bump the cycle
+					// first, so a stale cycle here means teardown rather than a server
+					// problem. Reporting it anyway ended every `pi -p` run with a warning
+					// about a server that was working, and did it through a `ctx` that
+					// shutdown had already made stale.
+					if (cycle !== generation) return;
 					state.status = "failed";
 					state.error = error.message;
 					state.client?.close();
@@ -300,6 +307,10 @@ export default function mcpExtension(pi: ExtensionAPI) {
 					state.status = "connecting";
 					connecting.push(
 						connect(state, ctx, cycle).catch((error: Error) => {
+							// Same guard: a restart or shutdown that superseded this attempt
+							// closed it, and the state object it would write to has been
+							// replaced.
+							if (cycle !== generation) return;
 							state.status = "failed";
 							state.error = error.message;
 						}),
