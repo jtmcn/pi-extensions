@@ -1,0 +1,391 @@
+/**
+ * Tests for the /worktree command layer (worktree/commands.ts).
+ *
+ *   cd tests && npm install && node worktree/commands.test.mjs
+ *
+ * The reason this file exists is `doRemove`. Removing a worktree destroys
+ * uncommitted work, and the guards against doing that by accident are plain
+ * conditionals with no test:
+ *
+ *  - never remove the session's own worktree
+ *  - never remove a dirty worktree without a confirmation
+ *  - never remove *anything* non-interactively on a fuzzy name match
+ *  - branch deletion is a separate question from worktree removal
+ *
+ * `resolveWorktree`'s `exactOnly: !ctx.hasUI` is the same class of guard: with no
+ * prompt to disambiguate, "wt" must not silently resolve to whichever worktree
+ * happened to sort first.
+ *
+ * Real git in a throwaway repo, since dirtiness and removal are filesystem
+ * facts. `ui` and the interactive prompts are fakes so the answers can be
+ * scripted, including "the user said no".
+ */
+
+import { mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { assertions, execRunner, loadExt, pexec } from "../harness.mjs";
+
+const { ok, done } = assertions();
+const { createCommands } = await loadExt("worktree/commands.ts");
+const { DEFAULT_CONFIG } = await loadExt("worktree/config.ts");
+const { getRepoInfo } = await loadExt("lib/git.ts");
+
+const exists = async (path) => {
+	try {
+		await stat(path);
+		return true;
+	} catch {
+		return false;
+	}
+};
+
+/** A repo on `main` plus linked worktrees for each requested branch. */
+async function makeRepo(branches = ["exp"]) {
+	const dir = await realpath(await mkdtemp(join(tmpdir(), "pi-commands-")));
+	await pexec("git", ["init", "-q", "-b", "main"], { cwd: dir });
+	await pexec("git", ["config", "user.email", "test@example.com"], { cwd: dir });
+	await pexec("git", ["config", "user.name", "Test"], { cwd: dir });
+	await writeFile(join(dir, "file.txt"), "hi\n");
+	await pexec("git", ["add", "."], { cwd: dir });
+	await pexec("git", ["commit", "-q", "-m", "init"], { cwd: dir });
+	const paths = {};
+	for (const branch of branches) {
+		paths[branch] = join(dir, "wt", branch);
+		await pexec("git", ["worktree", "add", "-q", "-b", branch, paths[branch]], { cwd: dir });
+	}
+	return { dir, paths };
+}
+
+/**
+ * Commands wired to fakes.
+ *
+ * `confirm` is a queue of answers, so a test can say yes to removal and no to
+ * the branch, which is the combination the code treats as two decisions.
+ */
+function setup({ hasUI = true, confirms = [], select, input, config = {} } = {}) {
+	const said = [];
+	const reported = [];
+	const focusCalls = [];
+	const answers = [...confirms];
+	const prompts = { confirm: [], select: [], input: [] };
+	let focus;
+
+	const ui = {
+		say: (_ctx, message, level = "info") => said.push({ message, level }),
+		report: (_ctx, title, lines) => reported.push({ title, lines }),
+		clearReport: () => {},
+		clearAll: () => {},
+		setStatus: () => {},
+	};
+
+	const commands = createCommands({
+		runner: execRunner(),
+		ui,
+		getConfig: () => ({ ...DEFAULT_CONFIG, ...config }),
+		getConfigSources: () => [],
+		getFocus: () => focus,
+		setFocus: (_ctx, target) => {
+			focus = target;
+			focusCalls.push(target);
+		},
+	});
+
+	const ctx = {
+		hasUI,
+		mode: hasUI ? "interactive" : "print",
+		ui: {
+			confirm: async (question, detail) => {
+				prompts.confirm.push({ question, detail });
+				return answers.length ? answers.shift() : false;
+			},
+			select: async (prompt, labels) => {
+				prompts.select.push({ prompt, labels });
+				return select ? select(labels) : undefined;
+			},
+			input: async (prompt) => {
+				prompts.input.push({ prompt });
+				return input;
+			},
+		},
+	};
+
+	return {
+		commands,
+		ctx,
+		said,
+		reported,
+		prompts,
+		focusCalls,
+		setFocus: (target) => {
+			focus = target;
+		},
+		messages: () => said.map((s) => s.message),
+		errors: () => said.filter((s) => s.level === "error").map((s) => s.message),
+	};
+}
+
+// ============================================ remove: the session's own worktree
+
+{
+	const { dir } = await makeRepo();
+	const info = await getRepoInfo(execRunner(), dir);
+	const h = setup({ confirms: [true, true] });
+
+	await h.commands.dispatch(info, h.ctx, `remove ${basename(dir)}`);
+	ok(
+		"refuses to remove the session's own worktree",
+		h.errors().some((m) => m.includes("refusing to remove the session's own worktree")),
+		JSON.stringify(h.said),
+	);
+	ok("and it is still there", await exists(join(dir, "file.txt")));
+	ok("and it never asked for confirmation", h.prompts.confirm.length === 0);
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+// ============================================ remove: dirty worktrees
+
+{
+	const { dir, paths } = await makeRepo();
+	await writeFile(join(paths.exp, "uncommitted.txt"), "precious\n");
+
+	const h = setup({ hasUI: false });
+	const info = await getRepoInfo(execRunner(), dir);
+	await h.commands.dispatch(info, h.ctx, "remove exp");
+
+	ok(
+		"refuses to remove a dirty worktree with no way to confirm",
+		h.errors().some((m) => m.includes("refusing to remove a dirty worktree")),
+		JSON.stringify(h.said),
+	);
+	ok("the uncommitted file survives", await exists(join(paths.exp, "uncommitted.txt")));
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	const { dir, paths } = await makeRepo();
+	await writeFile(join(paths.exp, "uncommitted.txt"), "precious\n");
+
+	// Interactive, and the user declines.
+	const h = setup({ confirms: [false] });
+	const info = await getRepoInfo(execRunner(), dir);
+	await h.commands.dispatch(info, h.ctx, "remove exp");
+
+	ok("declining the confirmation removes nothing", await exists(join(paths.exp, "uncommitted.txt")));
+	ok("the prompt says what will be lost", h.prompts.confirm[0]?.detail.includes("uncommitted file(s) will be lost"), JSON.stringify(h.prompts.confirm));
+	ok("and no branch question is asked after declining", h.prompts.confirm.length === 1);
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	const { dir, paths } = await makeRepo();
+	await writeFile(join(paths.exp, "uncommitted.txt"), "gone\n");
+
+	// Confirm the removal, decline the branch deletion: two decisions.
+	const h = setup({ confirms: [true, false] });
+	const info = await getRepoInfo(execRunner(), dir);
+	await h.commands.dispatch(info, h.ctx, "remove exp");
+
+	ok("confirming removes the worktree", !(await exists(paths.exp)));
+	ok("the branch is a separate question", h.prompts.confirm.length === 2 && h.prompts.confirm[1].question.includes("delete branch"));
+	const branches = await pexec("git", ["branch", "--list", "exp"], { cwd: dir });
+	ok("declining keeps the branch", branches.stdout.includes("exp"), JSON.stringify(branches.stdout));
+	ok("removal is reported", h.messages().some((m) => m.includes("removed exp")), JSON.stringify(h.said));
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	const { dir, paths } = await makeRepo();
+	const h = setup({ confirms: [true, true] });
+	const info = await getRepoInfo(execRunner(), dir);
+	await h.commands.dispatch(info, h.ctx, "remove exp");
+
+	ok("confirming both removes the worktree", !(await exists(paths.exp)));
+	const branches = await pexec("git", ["branch", "--list", "exp"], { cwd: dir });
+	ok("and deletes the merged branch", !branches.stdout.includes("exp"), JSON.stringify(branches.stdout));
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// Removing the focused worktree must drop focus, or every later tool call is
+	// redirected into a directory that no longer exists.
+	const { dir, paths } = await makeRepo();
+	const h = setup({ confirms: [true, false] });
+	h.setFocus({ path: paths.exp, branch: "exp" });
+	const info = await getRepoInfo(execRunner(), dir);
+	await h.commands.dispatch(info, h.ctx, "remove exp");
+
+	ok("removing the focused worktree clears focus", h.focusCalls.at(-1) === undefined && h.focusCalls.length === 1);
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+// ============================================ resolving names
+
+{
+	// The dangerous case for exactOnly is a prefix matching exactly ONE worktree:
+	// a fuzzy match would resolve, and with no UI there is no confirmation step
+	// left to catch it, so "remove feat" would delete feature-a outright. Two
+	// matches are merely ambiguous and refused either way, which is why asserting
+	// on that case cannot tell the two behaviours apart.
+	const { dir } = await makeRepo(["feature-a"]);
+	const info = await getRepoInfo(execRunner(), dir);
+	const h = setup({ hasUI: false });
+
+	await h.commands.dispatch(info, h.ctx, "remove feat");
+	ok(
+		"a single fuzzy match is refused with no UI",
+		h.errors().some((m) => m.includes('no worktree matching "feat"')),
+		JSON.stringify(h.said),
+	);
+	ok("the worktree survives", await exists(join(dir, "wt", "feature-a")));
+
+	// An exact name still works without a UI: the guard is against guessing, not
+	// against non-interactive use.
+	await h.commands.dispatch(info, h.ctx, "remove feature-a");
+	ok("an exact name is accepted with no UI", !(await exists(join(dir, "wt", "feature-a"))), JSON.stringify(h.said));
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	const { dir } = await makeRepo(["feature-a", "feature-b"]);
+	const info = await getRepoInfo(execRunner(), dir);
+	const h = setup({ hasUI: false });
+	await h.commands.dispatch(info, h.ctx, "remove feature");
+	ok("an ambiguous prefix removes nothing", await exists(join(dir, "wt", "feature-a")));
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	const { dir } = await makeRepo(["feature-a", "feature-b"]);
+	const info = await getRepoInfo(execRunner(), dir);
+	const h = setup({ confirms: [] });
+	await h.commands.dispatch(info, h.ctx, "remove feature");
+	ok(
+		"an ambiguous match is reported interactively too",
+		h.errors().some((m) => m.includes("ambiguous")),
+		JSON.stringify(h.said),
+	);
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	const { dir } = await makeRepo();
+	const info = await getRepoInfo(execRunner(), dir);
+	const h = setup({ hasUI: false });
+	await h.commands.dispatch(info, h.ctx, "remove");
+	ok(
+		"a missing name is an error, not a prompt, with no UI",
+		h.errors().some((m) => m.includes("required in non-interactive mode")),
+		JSON.stringify(h.said),
+	);
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	const { dir } = await makeRepo();
+	const info = await getRepoInfo(execRunner(), dir);
+	const h = setup({ confirms: [false], select: (labels) => labels[0] });
+	await h.commands.dispatch(info, h.ctx, "remove");
+	ok("with a UI it offers a picker", h.prompts.select.length === 1, JSON.stringify(h.prompts.select));
+	ok("the picker lists the worktrees", h.prompts.select[0]?.labels.length >= 1);
+	await rm(dir, { recursive: true, force: true });
+}
+
+// ============================================ focus and list
+
+{
+	const { dir, paths } = await makeRepo();
+	const info = await getRepoInfo(execRunner(), dir);
+	const h = setup();
+
+	await h.commands.dispatch(info, h.ctx, "focus exp");
+	ok("focus resolves a name", h.focusCalls.at(-1)?.path === paths.exp, JSON.stringify(h.focusCalls));
+
+	await h.commands.dispatch(info, h.ctx, "focus off");
+	ok("focus off clears", h.focusCalls.at(-1) === undefined);
+
+	// Focusing the session's own worktree is not a redirect, it is a no-op, and
+	// pretending otherwise would rewrite every path for nothing.
+	await h.commands.dispatch(info, h.ctx, `focus ${basename(dir)}`);
+	ok("focusing the session worktree clears instead", h.focusCalls.at(-1) === undefined);
+	ok("and says so", h.messages().some((m) => m.includes("that is the session worktree")), JSON.stringify(h.said));
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	const { dir, paths } = await makeRepo();
+	await writeFile(join(paths.exp, "dirty.txt"), "x\n");
+	const info = await getRepoInfo(execRunner(), dir);
+	const h = setup();
+	h.setFocus({ path: paths.exp, branch: "exp" });
+
+	await h.commands.dispatch(info, h.ctx, "list");
+	const lines = h.reported[0]?.lines.join("\n") ?? "";
+	ok("list marks the session worktree", /session/.test(lines), lines);
+	ok("list marks the focused worktree", /focused/.test(lines), lines);
+	ok("list counts dirty files", /1 dirty/.test(lines), lines);
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+// ============================================ dispatch
+
+{
+	const { dir } = await makeRepo();
+	const info = await getRepoInfo(execRunner(), dir);
+	const h = setup();
+	await h.commands.dispatch(info, h.ctx, "bogus");
+	ok("an unknown subcommand is an error", h.errors().some((m) => m.includes('unknown subcommand "bogus"')), JSON.stringify(h.said));
+
+	await h.commands.dispatch(info, h.ctx, "config");
+	ok("config reports", h.reported.at(-1)?.title === "worktree config");
+
+	// Aliases exist because muscle memory does.
+	await h.commands.dispatch(info, h.ctx, "rm");
+	ok("rm is an alias for remove", h.prompts.select.length === 1, JSON.stringify(h.prompts.select));
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	const { dir } = await makeRepo();
+	const info = await getRepoInfo(execRunner(), dir);
+	// No arguments and no UI lists rather than prompting into the void.
+	const h = setup({ hasUI: false });
+	await h.commands.dispatch(info, h.ctx, "");
+	ok("bare /worktree with no UI lists", h.reported.length === 1, JSON.stringify(h.reported));
+	await rm(dir, { recursive: true, force: true });
+}
+
+// ============================================ completions
+
+{
+	const { dir } = await makeRepo(["feature-a", "feature-b"]);
+	const info = await getRepoInfo(execRunner(), dir);
+	const h = setup();
+	await h.commands.dispatch(info, h.ctx, "list");
+
+	ok("completes subcommands", (h.commands.getArgumentCompletions("re") ?? []).some((i) => i.value === "remove"));
+	ok("offers nothing for an unknown prefix", h.commands.getArgumentCompletions("zzz") === null);
+
+	const focusItems = h.commands.getArgumentCompletions("focus feature") ?? [];
+	ok("completes worktree names for focus", focusItems.length === 2, JSON.stringify(focusItems));
+	ok("offers 'off' for focus", (h.commands.getArgumentCompletions("focus o") ?? []).some((i) => i.value === "focus off"));
+	ok("offers no names for subcommands that take none", h.commands.getArgumentCompletions("list x") === null);
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+done();
+
+function basename(p) {
+	return p.split("/").filter(Boolean).pop();
+}

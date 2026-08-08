@@ -34,91 +34,91 @@ export function createWorktreeTool(deps: ToolDeps) {
 	const { runner, getRepo, getConfig, getSessionCtx, setFocus, setKnown } = deps;
 
 	return {
-	name: "worktree",
-	label: "Worktree",
-	description:
-		"List or create git worktrees for the current repository. Use this to run an experiment " +
-		"on a separate branch without disturbing the user's working tree. Unless auto-focus is " +
-		"disabled, creating a worktree moves you into it: relative paths and bash commands then " +
-		"resolve there. The tool result says which happened. Creating one may run the project's " +
-		"configured postCreate setup command inside it.",
-	promptSnippet: "List or create git worktrees for isolated parallel work",
-	parameters: Type.Object({
-		action: StringEnum(["list", "create"] as const, {
-			description: "list existing worktrees, or create a new one",
+		name: "worktree",
+		label: "Worktree",
+		description:
+			"List or create git worktrees for the current repository. Use this to run an experiment " +
+			"on a separate branch without disturbing the user's working tree. Unless auto-focus is " +
+			"disabled, creating a worktree moves you into it: relative paths and bash commands then " +
+			"resolve there. The tool result says which happened. Creating one may run the project's " +
+			"configured postCreate setup command inside it.",
+		promptSnippet: "List or create git worktrees for isolated parallel work",
+		parameters: Type.Object({
+			action: StringEnum(["list", "create"] as const, {
+				description: "list existing worktrees, or create a new one",
+			}),
+			name: Type.Optional(Type.String({ description: "Directory name for the new worktree (create only)" })),
+			base: Type.Optional(Type.String({ description: "Start point for the new branch (create only)" })),
 		}),
-		name: Type.Optional(Type.String({ description: "Directory name for the new worktree (create only)" })),
-		base: Type.Optional(Type.String({ description: "Start point for the new branch (create only)" })),
-	}),
-	async execute(
-		_toolCallId: string,
-		params: { action: "list" | "create"; name?: string; base?: string },
-		signal: AbortSignal | undefined,
-	): Promise<{
-		content: { type: "text"; text: string }[];
-		isError?: boolean;
-		details: Record<string, unknown>;
-	}> {
-		const repo = getRepo();
-	if (!repo) {
-			return { content: [{ type: "text", text: "Not inside a git repository." }], isError: true, details: {} };
-		}
-
-		if (params.action === "list") {
-			const worktrees = (await listWorktrees(runner, repo.projectRoot)).filter((wt) => !wt.bare);
-			const text = worktrees
-				.map((wt) => `${wt.path}  [${wt.branch ?? (wt.detached ? "detached" : "unknown")}]`)
-				.join("\n");
-			return { content: [{ type: "text", text: text || "(none)" }], details: { worktrees } };
-		}
-
-		if (!params.name) {
-			return { content: [{ type: "text", text: "`name` is required to create a worktree." }], isError: true, details: {} };
-		}
-
-		try {
-			const slug = slugify(params.name);
-			const result = await createWorktree(runner, {
-				name: slug,
-				branch: `${getConfig().branchPrefix}${slug}`,
-				base: params.base,
-				config: getConfig(),
-				projectRoot: repo.projectRoot,
-				sourceWorktree: repo.worktreeRoot,
-				signal,
-			});
-			setKnown((await listWorktrees(runner, repo.projectRoot)).filter((wt) => !wt.bare));
-
-			// Move the model into the new worktree, same as `/worktree new`. Without
-			// a context there is no status line to update, so focus would be invisible
-			// to the user — leave it alone in that case.
-			const focused =
-				getConfig().autoFocus && getSessionCtx() !== undefined && result.path !== repo.worktreeRoot;
-			if (focused) {
-				setFocus(getSessionCtx() as ExtensionContext, { path: result.path, branch: result.branch }, false);
+		async execute(
+			_toolCallId: string,
+			params: { action: "list" | "create"; name?: string; base?: string },
+			signal: AbortSignal | undefined,
+		): Promise<{
+			content: { type: "text"; text: string }[];
+			isError?: boolean;
+			details: Record<string, unknown>;
+		}> {
+			const repo = getRepo();
+		if (!repo) {
+				return { content: [{ type: "text", text: "Not inside a git repository." }], isError: true, details: {} };
 			}
 
-			const notes = [
-				`Created worktree at ${result.path}`,
-				`Branch: ${result.branch}${result.base ? ` (from ${result.base})` : ""}`,
-				result.copied.length ? `Copied: ${result.copied.join(", ")}` : undefined,
-				...result.warnings.map((warning) => `Warning: ${warning}`),
-				result.postCreate
-					? `postCreate exit ${result.postCreate.code}: ${result.postCreate.output.slice(0, 500)}`
-					: undefined,
-				focused
-					? "You are now working in this worktree: relative paths and bash commands resolve there. " +
-						"Absolute paths outside it are unchanged. The user can undo this with `/worktree focus off`."
-					: "Your working directory is unchanged. Use absolute paths under the new worktree to work in it.",
-			].filter(Boolean);
-			return { content: [{ type: "text", text: notes.join("\n") }], details: { ...result } };
-		} catch (error) {
-			return {
-				content: [{ type: "text", text: `Failed to create worktree: ${(error as Error).message}` }],
-				isError: true,
-				details: {},
-			};
-		}
-	},
-};
+			if (params.action === "list") {
+				const worktrees = (await listWorktrees(runner, repo.projectRoot)).filter((wt) => !wt.bare);
+				const text = worktrees
+					.map((wt) => `${wt.path}  [${wt.branch ?? (wt.detached ? "detached" : "unknown")}]`)
+					.join("\n");
+				return { content: [{ type: "text", text: text || "(none)" }], details: { worktrees } };
+			}
+
+			if (!params.name) {
+				return { content: [{ type: "text", text: "`name` is required to create a worktree." }], isError: true, details: {} };
+			}
+
+			try {
+				const slug = slugify(params.name);
+				const result = await createWorktree(runner, {
+					name: slug,
+					branch: `${getConfig().branchPrefix}${slug}`,
+					base: params.base,
+					config: getConfig(),
+					projectRoot: repo.projectRoot,
+					sourceWorktree: repo.worktreeRoot,
+					signal,
+				});
+				setKnown((await listWorktrees(runner, repo.projectRoot)).filter((wt) => !wt.bare));
+
+				// Move the model into the new worktree, same as `/worktree new`. Without
+				// a context there is no status line to update, so focus would be invisible
+				// to the user — leave it alone in that case.
+				const focused =
+					getConfig().autoFocus && getSessionCtx() !== undefined && result.path !== repo.worktreeRoot;
+				if (focused) {
+					setFocus(getSessionCtx() as ExtensionContext, { path: result.path, branch: result.branch }, false);
+				}
+
+				const notes = [
+					`Created worktree at ${result.path}`,
+					`Branch: ${result.branch}${result.base ? ` (from ${result.base})` : ""}`,
+					result.copied.length ? `Copied: ${result.copied.join(", ")}` : undefined,
+					...result.warnings.map((warning) => `Warning: ${warning}`),
+					result.postCreate
+						? `postCreate exit ${result.postCreate.code}: ${result.postCreate.output.slice(0, 500)}`
+						: undefined,
+					focused
+						? "You are now working in this worktree: relative paths and bash commands resolve there. " +
+							"Absolute paths outside it are unchanged. The user can undo this with `/worktree focus off`."
+						: "Your working directory is unchanged. Use absolute paths under the new worktree to work in it.",
+				].filter(Boolean);
+				return { content: [{ type: "text", text: notes.join("\n") }], details: { ...result } };
+			} catch (error) {
+				return {
+					content: [{ type: "text", text: `Failed to create worktree: ${(error as Error).message}` }],
+					isError: true,
+					details: {},
+				};
+			}
+		},
+	};
 }
