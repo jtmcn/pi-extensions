@@ -21,8 +21,14 @@ if [[ ! -d "$pi" ]]; then
 	exit 1
 fi
 
-config="$(mktemp -t pi-extensions-tsconfig).json"
-trap 'rm -f "$config"' EXIT
+# `mktemp -d` rather than `mktemp -t <prefix>`: BSD/macOS appends the random part
+# to a bare prefix, GNU coreutils requires an explicit XXXXXX and errors without
+# one, so the -t form worked locally and failed in CI. A directory also lets the
+# config keep a real .json name — appending the extension to a mktemp'd path
+# meant writing to a file mktemp had not created, leaking the one it had.
+workdir="$(mktemp -d)"
+trap 'rm -rf "$workdir"' EXIT
+config="$workdir/tsconfig.json"
 
 cat >"$config" <<EOF
 {
