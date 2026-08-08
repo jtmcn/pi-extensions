@@ -27,6 +27,12 @@ re-checked: if it was removed by another session, focus is cleared with a
 warning rather than turning every `bash` call into `cd '<gone>' || exit 1`.
 Focus is *not* inherited by a new session (`/new`).
 
+All of that is covered by `tests/worktree/restore.test.mjs`. Note that a
+slash-command-only `pi -p` run persists no transcript at all, so restore cannot
+be observed by running `pi -p` twice — which looks exactly like the feature being
+broken. Matching is also by exact path string: paths come from git and are
+already resolved, but a hand-written `/var` vs `/private/var` will not match.
+
 ## Commands
 
 ```
@@ -191,6 +197,10 @@ calls, both pure or fake-runner tests with no network or subprocesses.
 extracted units directly, with injected runners and clocks and no fake `pi` at
 all — single flight, the pending re-run, backoff, idle suspension, disposal,
 focus persistence, and the `hasUI` × print matrix.
+
+`restore.test.mjs` covers restoring focus from the transcript through a fake
+`pi` with real git: the last entry winning, a cleared entry meaning unfocused,
+and a worktree removed by another session being dropped with a warning.
 
 `pr-status.test.mjs` remains the integration test: it drives `index.ts` through a
 fake `pi` with real git in a throwaway repo and scripted `gh`, asserting the
