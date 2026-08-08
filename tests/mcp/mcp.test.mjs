@@ -14,6 +14,7 @@
 import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createFakePi } from "../fake-pi.mjs";
 import { assertions, EXT_ROOT, loadExt } from "../harness.mjs";
 
 const FAKE = join(EXT_ROOT, "tests/fixtures/fake-mcp-server.mjs");
@@ -323,11 +324,15 @@ const fakeClient = (args = []) =>
 /**
  * Drive the extension against a server map, capturing everything it does.
  *
- * One harness for every extension-level test in this file: tools it registers,
- * commands it registers, and what it told the user. Deliberately does *not* await
- * connections — several cases are about what happens while a handshake is still
- * in flight — so tests call `fire("before_agent_start")` or `settle()` when they
- * want them resolved.
+ * One harness for every extension-level test in this file. Deliberately does
+ * *not* await connections — several cases are about what happens while a
+ * handshake is still in flight — so tests call `fire("before_agent_start")` or
+ * `settle()` when they want them resolved.
+ *
+ * The fake pi hands out a fresh context per session_start, as pi does, which is
+ * what makes "a superseded connect must not warn through a stale ctx"
+ * observable. This extension does not use `pi.exec` at all: McpClient spawns the
+ * server processes itself.
  */
 async function extHarness(servers, { hasUI = true, startupTimeoutMs = 10_000 } = {}) {
 	const root = await mkdtemp(join(tmpdir(), "pi-mcp-ext-"));
@@ -338,47 +343,15 @@ async function extHarness(servers, { hasUI = true, startupTimeoutMs = 10_000 } =
 	const previous = process.env.PI_CODING_AGENT_DIR;
 	process.env.PI_CODING_AGENT_DIR = agentDir;
 
-	const notices = [];
-	const events = new Map();
-	const tools = new Map();
-	const registrations = [];
-	const commands = new Map();
-	const pi = {
-		on: (event, handler) => {
-			if (!events.has(event)) events.set(event, []);
-			events.get(event).push(handler);
-		},
-		registerTool: (spec) => {
-			registrations.push(spec.name);
-			tools.set(spec.name, spec);
-		},
-		registerCommand: (name, spec) => commands.set(name, spec),
-	};
-	const ctx = {
-		cwd: root,
-		hasUI,
-		mode: "interactive",
-		isProjectTrusted: () => false,
-		ui: { notify: (message, level) => notices.push({ message, level }), setStatus: () => {}, setWidget: () => {} },
-	};
-
+	const h = createFakePi({ cwd: root, hasUI });
 	const extension = (await loadExt("mcp/index.ts")).default;
-	extension(pi);
+	extension(h.pi);
 
 	return {
+		...h,
 		root,
-		notices,
-		tools,
-		registrations,
-		messages: () => notices.map((n) => n.message),
-		names: () => [...tools.keys()].sort(),
-		fire: async (event) => {
-			for (const handler of events.get(event) ?? []) await handler({}, ctx);
-		},
-		call: (name, params) => tools.get(name)?.execute("call-1", params, undefined),
 		/** Invoke `/mcp <args>`. */
-		command: (args = "") => commands.get("mcp")?.handler(args, ctx),
-		settle: (ms = 150) => new Promise((resolve) => setTimeout(resolve, ms)),
+		command: (args = "") => h.command("mcp", args),
 		cleanup: async () => {
 			if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
 			else process.env.PI_CODING_AGENT_DIR = previous;
@@ -386,6 +359,8 @@ async function extHarness(servers, { hasUI = true, startupTimeoutMs = 10_000 } =
 		},
 	};
 }
+
+// ------------------------------------------------- teardown vs real failure ---
 
 {
 	// A server that spawns and then never answers `initialize`. Shutting the session
@@ -417,6 +392,31 @@ async function extHarness(servers, { hasUI = true, startupTimeoutMs = 10_000 } =
 		h.notices.some((n) => /probe failed/.test(n.message)),
 		JSON.stringify(h.notices),
 	);
+	await h.fire("session_shutdown");
+	await h.cleanup();
+}
+
+{
+	// Same guard, the other trigger: a *replaced* session (not a shutdown) also
+	// closes the previous clients, and the catch that would report it closed over
+	// the previous session's ctx — which pi has already made stale. Touching a
+	// stale ctx throws and takes the process down, so the failure mode here is
+	// worse than a spurious warning.
+	const h = await extHarness({ probe: { command: process.execPath, args: ["-e", "setInterval(() => {}, 1e9)"], timeoutMs: 30_000 } });
+	await h.fire("session_start");
+	const first = h.ctx();
+	await h.settle(50);
+
+	await h.fire("session_start");
+	ok("replacement: gets its own context", h.ctx() !== first);
+	await h.settle();
+
+	ok(
+		"replacement: the superseded connect never warns through its stale ctx",
+		!first.own.notices.some((n) => /failed/.test(n.message)),
+		JSON.stringify(first.own.notices),
+	);
+
 	await h.fire("session_shutdown");
 	await h.cleanup();
 }

@@ -17,6 +17,7 @@
 import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createFakePi } from "../fake-pi.mjs";
 import { assertions, loadExt, pexec } from "../harness.mjs";
 
 const { ok, done } = assertions();
@@ -44,59 +45,13 @@ async function makeRepo() {
  * about restore, and a real gh would make it slow and machine-dependent.
  */
 function harness(cwd, entries) {
-	const events = new Map();
-	const statuses = [];
-	const notices = [];
-	const appended = [];
-
-	const pi = {
-		on(event, handler) {
-			if (!events.has(event)) events.set(event, []);
-			events.get(event).push(handler);
-		},
-		async exec(command, args, options = {}) {
-			if (command === "gh") return { stdout: "", stderr: "", code: 1, killed: false };
-			try {
-				const { stdout, stderr } = await pexec(command, args, { cwd: options.cwd });
-				return { stdout, stderr, code: 0, killed: false };
-			} catch (error) {
-				return {
-					stdout: error.stdout ?? "",
-					stderr: error.stderr ?? String(error),
-					code: typeof error.code === "number" ? error.code : 1,
-					killed: false,
-				};
-			}
-		},
-		registerCommand() {},
-		registerTool() {},
-		appendEntry: (customType, data) => appended.push({ customType, data }),
-		sendMessage() {},
-	};
-
-	const ctx = {
+	const h = createFakePi({
 		cwd,
-		hasUI: true,
-		mode: "interactive",
-		isProjectTrusted: () => false,
-		sessionManager: { getBranch: () => entries },
-		ui: {
-			setStatus: (_key, value) => statuses.push(value),
-			setWidget: () => {},
-			notify: (message, level) => notices.push({ message, level }),
-		},
-	};
-
-	extension(pi);
-	return {
-		statuses,
-		notices,
-		appended,
-		status: () => statuses.at(-1),
-		fire: async (event, payload = {}) => {
-			for (const handler of events.get(event) ?? []) await handler(payload, ctx);
-		},
-	};
+		entries: () => entries,
+		exec: (command) => (command === "gh" ? { stdout: "", stderr: "", code: 1, killed: false } : undefined),
+	});
+	extension(h.pi);
+	return h;
 }
 
 /** A transcript entry as `pi.appendEntry("worktree-focus", …)` writes it. */
@@ -190,6 +145,34 @@ const focusEntry = (data) => ({
 		h.appended.some((entry) => entry.customType === "worktree-focus" && !entry.data?.path),
 		JSON.stringify(h.appended),
 	);
+
+	await h.fire("session_shutdown");
+	await rm(dir, { recursive: true, force: true });
+}
+
+// ============================================ replacing a session
+
+{
+	// `/new` and resume replace the session under a live extension closure, and the
+	// context the old one held is stale from that moment: pi throws if an extension
+	// touches one. Restoring focus into a replaced session must therefore paint
+	// through the *new* context only.
+	const { dir, worktree } = await makeRepo();
+	const h = harness(dir, [focusEntry({ path: worktree, branch: "exp" })]);
+
+	await h.fire("session_start");
+	const first = h.ctx();
+	ok("the first session painted", first.own.statuses.length > 0);
+
+	await h.fire("session_start");
+	ok("the replacement gets its own context", h.ctx() !== first);
+	ok("the replacement restores focus and paints", /⑂ exp/.test(h.ctx().own.statuses.at(-1) ?? ""), JSON.stringify(h.ctx().own.statuses));
+
+	// Deliberately not asserting here that the superseded context is never written
+	// to again. gh is stubbed unavailable in this file, so the PR monitor switches
+	// itself off and there is no in-flight work left to land on the old context —
+	// the assertion would pass no matter what the code did. It lives in
+	// pr-status.test.mjs, where a gated gh call makes it observable.
 
 	await h.fire("session_shutdown");
 	await rm(dir, { recursive: true, force: true });

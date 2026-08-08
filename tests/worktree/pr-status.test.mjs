@@ -16,6 +16,7 @@
 import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createFakePi } from "../fake-pi.mjs";
 import { assertions, loadExt, pexec } from "../harness.mjs";
 
 const { ok, done } = assertions();
@@ -57,93 +58,35 @@ async function makeRepo() {
  * Load the extension against a fake pi.
  *
  * `gh` is answered by the current script; everything else (git) really runs.
+ * The fake pi mints a fresh context per session_start, as pi does — see
+ * tests/fake-pi.mjs. That is what makes the generation-guard case below
+ * observable at all.
  */
 function harness(cwd, { hasUI = true, mode = "interactive" } = {}) {
-	const events = new Map();
 	const ghCalls = [];
-	const statuses = [];
 	let script = async () => ({ ...gitOk, stdout: "[]" });
 
-	const pi = {
-		on(event, handler) {
-			if (!events.has(event)) events.set(event, []);
-			events.get(event).push(handler);
+	const h = createFakePi({
+		cwd,
+		hasUI,
+		mode,
+		exec: async (command, args, options) => {
+			if (command !== "gh") return undefined;
+			ghCalls.push(args);
+			return await script(args, options);
 		},
-		async exec(command, args, options = {}) {
-			if (command === "gh") {
-				ghCalls.push(args);
-				return await script(args, options);
-			}
-			try {
-				const { stdout, stderr } = await pexec(command, args, { cwd: options.cwd });
-				return { stdout, stderr, code: 0, killed: false };
-			} catch (error) {
-				return {
-					stdout: error.stdout ?? "",
-					stderr: error.stderr ?? String(error),
-					code: typeof error.code === "number" ? error.code : 1,
-					killed: false,
-				};
-			}
-		},
-		registerCommand() {},
-		registerTool() {},
-		appendEntry() {},
-		sendMessage() {},
-	};
-
-	/**
-	 * A fresh ctx per session, as pi does.
-	 *
-	 * Identity matters: pi's ctx goes stale when its session is replaced, and
-	 * touching a stale one throws and takes down the process. Sharing one ctx
-	 * across sessions here would hide exactly that class of bug — each ctx records
-	 * its own paints so a superseded session's writes are visible.
-	 */
-	const contexts = [];
-	const makeCtx = () => {
-		const own = [];
-		const ctx = {
-			cwd,
-			hasUI,
-			mode,
-			paints: own,
-			isProjectTrusted: () => false,
-			sessionManager: { getBranch: () => [] },
-			ui: {
-				setStatus: (_key, value) => {
-					own.push(value);
-					statuses.push(value);
-				},
-				setWidget: () => {},
-				notify: () => {},
-			},
-		};
-		contexts.push(ctx);
-		return ctx;
-	};
-	let ctx = makeCtx();
-
-	extension(pi);
+	});
+	extension(h.pi);
 
 	return {
+		...h,
 		ghCalls,
-		statuses,
 		setScript: (fn) => {
 			script = fn;
 		},
 		/** gh calls that looked up a PR (rather than the repo name). */
 		prCalls: () => ghCalls.filter((args) => args[0] === "pr"),
-		last: () => statuses.at(-1),
-		contexts,
-		/** The ctx handed to the most recent session_start. */
-		ctx: () => ctx,
-		fire: async (event, payload = {}) => {
-			// pi builds a new context for a new session; everything else in a session
-			// sees the one it already has.
-			if (event === "session_start") ctx = makeCtx();
-			for (const handler of events.get(event) ?? []) await handler(payload, ctx);
-		},
+		last: () => h.statuses.at(-1),
 	};
 }
 

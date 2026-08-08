@@ -28,7 +28,7 @@ types out of the *globally installed* pi, so pi must be installed globally.
 ```
 lib/            shared helpers — NOT an extension (no index.ts, never loaded)
 <name>/         an extension, loaded via <name>/index.ts
-tests/          harness.mjs, run-all.mjs, and tests/<extension>/*.test.mjs
+tests/          harness.mjs, fake-pi.mjs, run-all.mjs, tests/<extension>/*.test.mjs
 docs/superpowers/{specs,plans}/
 ```
 
@@ -74,5 +74,14 @@ that have actually caused bugs here:
   `fakeRunner()`, and `pexec`. Import them rather than re-implementing.
 - Prefer real behaviour over mocks where it is cheap: the tests run real git in
   throwaway repos and only script the network half.
-- To test `index.ts` wiring, build a fake `pi` object and fire events at it.
-  `tests/worktree/pr-status.test.mjs` is the working example.
+- To test `index.ts` wiring, use `tests/fake-pi.mjs`: `createFakePi()` returns a
+  `pi` to hand the factory plus `fire()`, `call()`, `command()`, and recorders
+  for everything it paints, says, or persists. **`fire("session_start")` mints a
+  fresh `ctx`, as pi does** — so a superseded session writing through its stale
+  `ctx` is detectable. A harness that reuses one `ctx` silently cannot catch
+  that, which is the most common real bug in this repo.
+- Prefer injected dependencies to a fake `pi` where you can: `commands.ts`,
+  `session.ts`, `pr-monitor.ts`, and `ui.ts` are all tested without one.
+- **Break a new test on purpose before trusting it.** Six tests in this repo's
+  history passed for the wrong reason and were only caught by mutating the code
+  under them. If the mutation still passes, the test is decoration.

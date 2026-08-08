@@ -29,6 +29,7 @@ extensions/
 ├── tests/              test harness for the collection (jiti, plain node)
 │   ├── package.json
 │   ├── harness.mjs     assertions, extension loading, fake runners
+│   ├── fake-pi.mjs     a fake `pi` for testing index.ts wiring
 │   ├── run-all.mjs     discovers and runs every **/*.test.mjs
 │   ├── fixtures/       fake servers etc. used by tests
 │   ├── mcp/
@@ -141,4 +142,5 @@ PI_TEST_MCP_COMMAND="gitnexus mcp" node tests/mcp/mcp.test.mjs
 ```
 
 New test files import `tests/harness.mjs` for assertions, extension loading, and
-fake runners rather than re-implementing them.
+fake runners rather than re-implementing them, and `tests/fake-pi.mjs` when they
+need to drive an `index.ts` through real events.
