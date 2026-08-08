@@ -151,6 +151,12 @@ node tests/run-all.mjs mcp
 PI_TEST_MCP_COMMAND="gitnexus mcp" PI_TEST_MCP_CWD=/some/indexed/repo node tests/mcp/mcp.test.mjs
 ```
 
+`tests/mcp/mcp.test.mjs` drives the extension through a fake `pi` (one
+`extHarness` for every lifecycle case): reload without renaming tools, `/mcp
+restart`, the `before_agent_start` startup gate and its timeout budget, the
+allow-list warnings, `/mcp` status, and the difference between our own teardown
+and a server that genuinely failed.
+
 `tests/fixtures/fake-mcp-server.mjs` is deliberately awkward: it logs to stderr,
 prints a non-JSON banner, paginates `tools/list`, returns `isError` for one
 tool and a JSON-RPC error for another, sends the client a request, omits

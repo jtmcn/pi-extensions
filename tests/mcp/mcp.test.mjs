@@ -291,108 +291,72 @@ const fakeClient = (args = []) =>
 	// reconnect has to recompute the *same* names: a renamed tool would leave the
 	// original with no handler (permanently "not connected") and add a second copy
 	// of every schema to the tool list.
-	const root = await mkdtemp(join(tmpdir(), "pi-mcp-ext-"));
-	const agentDir = join(root, "agent");
-	await mkdir(agentDir, { recursive: true });
-	await writeFile(
-		join(agentDir, "mcp.json"),
-		JSON.stringify({
-			servers: { fake: { command: process.execPath, args: [FAKE], timeoutMs: 5000 } },
-			startupTimeoutMs: 10000,
-		}),
-	);
+	const h = await extHarness({ fake: { command: process.execPath, args: [FAKE], timeoutMs: 5000 } });
 
-	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
-	process.env.PI_CODING_AGENT_DIR = agentDir;
-	try {
-		const mcpExtension = (await loadExt("mcp/index.ts")).default;
+	await h.fire("session_start");
+	await h.fire("before_agent_start");
+	const first = h.names();
+	ok("ext: registers the server's tools", first.includes("fake_echo"), first.join());
+	const before = await h.call("fake_echo", { message: "hi" });
+	ok("ext: a registered tool reaches the server", before?.content[0]?.text === "echo: hi", JSON.stringify(before));
 
-		const events = new Map();
-		const tools = new Map();
-		const registrations = [];
-		const pi = {
-			on: (event, handler) => {
-				if (!events.has(event)) events.set(event, []);
-				events.get(event).push(handler);
-			},
-			registerTool: (spec) => {
-				registrations.push(spec.name);
-				tools.set(spec.name, spec);
-			},
-			registerCommand: () => {},
-		};
-		const ctx = {
-			cwd: root,
-			hasUI: false,
-			mode: "interactive",
-			isProjectTrusted: () => false,
-			ui: { notify: () => {}, setStatus: () => {}, setWidget: () => {} },
-		};
-		const fire = async (event) => {
-			for (const handler of events.get(event) ?? []) await handler({}, ctx);
-		};
-		const call = (name, params) => tools.get(name)?.execute("call-1", params, undefined);
+	// The reload.
+	await h.fire("session_start");
+	await h.fire("before_agent_start");
+	const second = h.names();
+	ok("ext: a reload does not rename tools", second.join() === first.join(), `${first.join()} -> ${second.join()}`);
+	ok("ext: a reload registers no duplicate tool", h.registrations.length === first.length, h.registrations.join());
+	ok("ext: no tool grew a dedupe suffix", !second.some((name) => /_\d+$/.test(name)), second.join());
 
-		mcpExtension(pi);
+	const after = await h.call("fake_echo", { message: "again" });
+	ok("ext: the reload rebinds the handler", after?.content[0]?.text === "echo: again", JSON.stringify(after));
 
-		await fire("session_start");
-		await fire("before_agent_start");
-		const first = [...tools.keys()].sort();
-		ok("ext: registers the server's tools", first.includes("fake_echo"), first.join());
-		const before = await call("fake_echo", { message: "hi" });
-		ok("ext: a registered tool reaches the server", before?.content[0]?.text === "echo: hi", JSON.stringify(before));
+	await h.fire("session_shutdown");
+	const dead = await h.call("fake_echo", { message: "gone" });
+	ok("ext: after shutdown the tool reports a closed server", dead?.details?.connected === false, JSON.stringify(dead));
 
-		// The reload.
-		await fire("session_start");
-		await fire("before_agent_start");
-		const second = [...tools.keys()].sort();
-		ok("ext: a reload does not rename tools", second.join() === first.join(), `${first.join()} -> ${second.join()}`);
-		ok("ext: a reload registers no duplicate tool", registrations.length === first.length, registrations.join());
-		ok("ext: no tool grew a dedupe suffix", !second.some((name) => /_\d+$/.test(name)), second.join());
-
-		const after = await call("fake_echo", { message: "again" });
-		ok("ext: the reload rebinds the handler", after?.content[0]?.text === "echo: again", JSON.stringify(after));
-
-		await fire("session_shutdown");
-		const dead = await call("fake_echo", { message: "gone" });
-		ok("ext: after shutdown the tool reports a closed server", dead?.details?.connected === false, JSON.stringify(dead));
-	} finally {
-		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-		await rm(root, { recursive: true, force: true });
-	}
+	await h.cleanup();
 }
 
 // ------------------------------------------------- teardown vs real failure ---
 
 /**
- * Drive the extension against one server spec, capturing what it told the user.
+ * Drive the extension against a server map, capturing everything it does.
  *
- * Separate from the lifecycle harness above because these cases must *not* await
- * the connections: the whole point is what happens when a handshake is still in
- * flight.
+ * One harness for every extension-level test in this file: tools it registers,
+ * commands it registers, and what it told the user. Deliberately does *not* await
+ * connections — several cases are about what happens while a handshake is still
+ * in flight — so tests call `fire("before_agent_start")` or `settle()` when they
+ * want them resolved.
  */
-async function lifecycle(server) {
-	const root = await mkdtemp(join(tmpdir(), "pi-mcp-teardown-"));
+async function extHarness(servers, { hasUI = true, startupTimeoutMs = 10_000 } = {}) {
+	const root = await mkdtemp(join(tmpdir(), "pi-mcp-ext-"));
 	const agentDir = join(root, "agent");
 	await mkdir(agentDir, { recursive: true });
-	await writeFile(join(agentDir, "mcp.json"), JSON.stringify({ servers: { probe: server }, startupTimeoutMs: 10000 }));
+	await writeFile(join(agentDir, "mcp.json"), JSON.stringify({ servers, startupTimeoutMs }));
 
 	const previous = process.env.PI_CODING_AGENT_DIR;
 	process.env.PI_CODING_AGENT_DIR = agentDir;
+
 	const notices = [];
 	const events = new Map();
+	const tools = new Map();
+	const registrations = [];
+	const commands = new Map();
 	const pi = {
 		on: (event, handler) => {
 			if (!events.has(event)) events.set(event, []);
 			events.get(event).push(handler);
 		},
-		registerTool: () => {},
-		registerCommand: () => {},
+		registerTool: (spec) => {
+			registrations.push(spec.name);
+			tools.set(spec.name, spec);
+		},
+		registerCommand: (name, spec) => commands.set(name, spec),
 	};
 	const ctx = {
 		cwd: root,
-		hasUI: true,
+		hasUI,
 		mode: "interactive",
 		isProjectTrusted: () => false,
 		ui: { notify: (message, level) => notices.push({ message, level }), setStatus: () => {}, setWidget: () => {} },
@@ -400,13 +364,20 @@ async function lifecycle(server) {
 
 	const extension = (await loadExt("mcp/index.ts")).default;
 	extension(pi);
-	const fire = async (event) => {
-		for (const handler of events.get(event) ?? []) await handler({}, ctx);
-	};
 
 	return {
+		root,
 		notices,
-		fire,
+		tools,
+		registrations,
+		messages: () => notices.map((n) => n.message),
+		names: () => [...tools.keys()].sort(),
+		fire: async (event) => {
+			for (const handler of events.get(event) ?? []) await handler({}, ctx);
+		},
+		call: (name, params) => tools.get(name)?.execute("call-1", params, undefined),
+		/** Invoke `/mcp <args>`. */
+		command: (args = "") => commands.get("mcp")?.handler(args, ctx),
 		settle: (ms = 150) => new Promise((resolve) => setTimeout(resolve, ms)),
 		cleanup: async () => {
 			if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
@@ -421,7 +392,7 @@ async function lifecycle(server) {
 	// down closes the client, which rejects that pending handshake — but a close we
 	// asked for is teardown, not a server failure, and reporting it means every
 	// `pi -p` run ends with a scary line about a server that was fine.
-	const h = await lifecycle({ command: process.execPath, args: ["-e", "setInterval(() => {}, 1e9)"], timeoutMs: 30000 });
+	const h = await extHarness({ probe: { command: process.execPath, args: ["-e", "setInterval(() => {}, 1e9)"], timeoutMs: 30000 } });
 	await h.fire("session_start");
 	await h.fire("session_shutdown");
 	await h.settle();
@@ -437,7 +408,7 @@ async function lifecycle(server) {
 {
 	// The other half: a server that genuinely cannot start must still be reported,
 	// or the fix above has just hidden every real problem.
-	const h = await lifecycle({ command: join(tmpdir(), "definitely-not-a-real-binary-xyz"), args: [], timeoutMs: 5000 });
+	const h = await extHarness({ probe: { command: join(tmpdir(), "definitely-not-a-real-binary-xyz"), args: [], timeoutMs: 5000 } });
 	await h.fire("session_start");
 	await h.settle();
 
@@ -446,6 +417,171 @@ async function lifecycle(server) {
 		h.notices.some((n) => /probe failed/.test(n.message)),
 		JSON.stringify(h.notices),
 	);
+	await h.fire("session_shutdown");
+	await h.cleanup();
+}
+
+// --------------------------------------------------------------- restart ---
+
+{
+	// `/mcp restart` closes every client and reconnects. It is the same hazard as a
+	// reload — names must stay stable and handlers must rebind — plus a cycle guard
+	// that must not swallow a genuine restart failure.
+	const h = await extHarness({ fake: { command: process.execPath, args: [FAKE], timeoutMs: 5000 } });
+	await h.fire("session_start");
+	await h.fire("before_agent_start");
+	const before = h.names();
+	const registrationsBefore = h.registrations.length;
+
+	await h.command("restart");
+	ok("restart: says so", h.messages().some((m) => /reconnecting/.test(m)), JSON.stringify(h.notices));
+	await h.fire("before_agent_start");
+
+	ok("restart: tool names are unchanged", h.names().join() === before.join(), `${before.join()} -> ${h.names().join()}`);
+	ok("restart: registers no duplicate tool", h.registrations.length === registrationsBefore, h.registrations.join());
+	const echoed = await h.call("fake_echo", { message: "after restart" });
+	ok("restart: the handler is rebound to the new client", echoed?.content[0]?.text === "echo: after restart", JSON.stringify(echoed));
+
+	const status = await statusText(h);
+	ok("restart: status reports ready again", /fake v9\.9\.9 \[ready\]/.test(status), status);
+
+	await h.fire("session_shutdown");
+	await h.cleanup();
+}
+
+{
+	// A restart whose server has become unstartable must show up in the status, or
+	// the cycle guard added to that catch has hidden a real failure.
+	const h = await extHarness({ probe: { command: join(tmpdir(), "gone-binary-xyz"), args: [], timeoutMs: 3000 } });
+	await h.fire("session_start");
+	await h.settle();
+	await h.command("restart");
+	await h.settle();
+
+	const status = await statusText(h);
+	ok("restart: a failing server is still reported as failed", /probe \[failed\]/.test(status), status);
+
+	await h.fire("session_shutdown");
+	await h.cleanup();
+}
+
+// ---------------------------------------------------------- startup gate ---
+
+{
+	// Tools are advertised as part of the request, so a tool registered mid-turn is
+	// invisible until the next one. `before_agent_start` exists to stop a fast first
+	// prompt racing the handshake.
+	const h = await extHarness({ fake: { command: process.execPath, args: [FAKE], timeoutMs: 5000 } });
+	await h.fire("session_start");
+	ok("gate: tools are not ready the instant the session starts", h.names().length === 0, h.names().join());
+
+	await h.fire("before_agent_start");
+	ok("gate: the first turn waits for the handshake", h.names().includes("fake_echo"), h.names().join());
+
+	await h.fire("session_shutdown");
+	await h.cleanup();
+}
+
+{
+	// ...but one hung server must not hold the session hostage: the wait is bounded
+	// by startupTimeoutMs.
+	const h = await extHarness(
+		{ slow: { command: process.execPath, args: ["-e", "setInterval(() => {}, 1e9)"], timeoutMs: 30_000 } },
+		{ startupTimeoutMs: 300 },
+	);
+	await h.fire("session_start");
+	const started = Date.now();
+	await h.fire("before_agent_start");
+	const waited = Date.now() - started;
+
+	ok("gate: a hung server does not block the turn forever", waited < 5_000, `waited ${waited}ms`);
+	ok("gate: and the wait respects the configured budget", waited >= 250, `waited ${waited}ms`);
+
+	await h.fire("session_shutdown");
+	await h.cleanup();
+}
+
+// -------------------------------------------------------------- warnings ---
+
+{
+	// An allow-list naming a tool the server does not have is almost always a typo,
+	// and the tool would otherwise just silently not appear.
+	const h = await extHarness({ fake: { command: process.execPath, args: [FAKE], tools: ["echo", "nope"], timeoutMs: 5000 } });
+	await h.fire("session_start");
+	await h.fire("before_agent_start");
+
+	ok(
+		"warns about a tool the server does not have",
+		h.messages().some((m) => /has no tool named "nope"/.test(m)),
+		JSON.stringify(h.notices),
+	);
+	ok("and still registers the ones it does have", h.names().includes("fake_echo"), h.names().join());
+	ok("while honouring the allow-list", !h.names().includes("fake_boom"), h.names().join());
+
+	await h.fire("session_shutdown");
+	await h.cleanup();
+}
+
+{
+	// Every exposed tool's schema is spent from the system prompt budget, so a
+	// server offering a lot of them without an allow-list is worth a nudge.
+	process.env.FAKE_EXTRA_TOOLS = "10";
+	const h = await extHarness({ fake: { command: process.execPath, args: [FAKE], timeoutMs: 5000 } });
+	await h.fire("session_start");
+	await h.fire("before_agent_start");
+	ok(
+		"suggests an allow-list for a noisy server",
+		h.messages().some((m) => /consider a "tools" allow-list/.test(m)),
+		JSON.stringify(h.notices),
+	);
+	await h.fire("session_shutdown");
+	await h.cleanup();
+	delete process.env.FAKE_EXTRA_TOOLS;
+}
+
+{
+	process.env.FAKE_EXTRA_TOOLS = "10";
+	const h = await extHarness({ fake: { command: process.execPath, args: [FAKE], tools: ["echo"], timeoutMs: 5000 } });
+	await h.fire("session_start");
+	await h.fire("before_agent_start");
+	ok(
+		"no nudge when an allow-list is already set",
+		!h.messages().some((m) => /allow-list/.test(m)),
+		JSON.stringify(h.notices),
+	);
+	await h.fire("session_shutdown");
+	await h.cleanup();
+	delete process.env.FAKE_EXTRA_TOOLS;
+}
+
+// ---------------------------------------------------------- /mcp status ---
+
+{
+	const h = await extHarness({});
+	await h.fire("session_start");
+	await h.command();
+	ok(
+		"status: says when nothing is configured",
+		h.messages().some((m) => /no servers configured/.test(m)),
+		JSON.stringify(h.notices),
+	);
+	await h.cleanup();
+}
+
+{
+	const h = await extHarness({
+		fake: { command: process.execPath, args: [FAKE], timeoutMs: 5000 },
+		off: { command: "never-run", args: [], disabled: true },
+	});
+	await h.fire("session_start");
+	await h.fire("before_agent_start");
+	const status = await statusText(h);
+
+	ok("status: lists a ready server with its version and tools", /fake v9\.9\.9 \[ready\] \d+ tools: /.test(status), status);
+	ok("status: names the tools it registered", /fake_echo/.test(status), status);
+	ok("status: shows a disabled server as disabled", /off \[disabled\]/.test(status), status);
+	ok("status: never connects a disabled server", !h.names().some((n) => n.startsWith("off_")), h.names().join());
+
 	await h.fire("session_shutdown");
 	await h.cleanup();
 }
@@ -474,3 +610,13 @@ if (REAL_COMMAND) {
 }
 
 done();
+
+/** Run `/mcp` and return the status block it emitted. */
+async function statusText(h) {
+	const before = h.notices.length;
+	await h.command();
+	return h.notices
+		.slice(before)
+		.map((n) => n.message)
+		.join("\n");
+}

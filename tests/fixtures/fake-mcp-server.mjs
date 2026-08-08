@@ -40,6 +40,13 @@ const TOOLS = [
 	{ name: "no-schema" },
 ];
 
+// Pad the list on demand, so a test can cross the "this server is noisy, consider
+// an allow-list" threshold without inventing a second fixture.
+const extra = Number(process.env.FAKE_EXTRA_TOOLS ?? 0);
+for (let i = 0; i < extra; i++) {
+	TOOLS.push({ name: `filler${i}`, description: "Padding", inputSchema: { type: "object", properties: {} } });
+}
+
 let buffer = "";
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => {
