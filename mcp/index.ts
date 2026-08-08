@@ -320,6 +320,13 @@ export default function mcpExtension(pi: ExtensionAPI) {
 				return;
 			}
 
+			// Asking for status before the first turn used to report every server as
+			// "connecting" and never resolve, which is the only thing a `pi -p "/mcp"`
+			// run could ever print. Wait for the handshakes the same way the first turn
+			// does — bounded by the same budget, so a server that never answers costs a
+			// pause and is then reported honestly as still connecting.
+			await awaitConnections();
+
 			if (servers.size === 0) {
 				tell(ctx, "mcp: no servers configured (~/.pi/agent/mcp.json)");
 				return;

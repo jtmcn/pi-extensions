@@ -59,6 +59,11 @@ feed both pi and Claude Code:
 /mcp restart    tear down every server and reconnect
 ```
 
+`/mcp` waits for any handshake still in flight before reporting, bounded by
+`startupTimeoutMs`, so it describes what is actually running rather than a
+snapshot of "connecting". A server that never answers is reported as still
+connecting once that budget is spent.
+
 ## Tool naming
 
 Tools are namespaced `<server>_<tool>` and sanitized to `[a-z0-9_]`, because

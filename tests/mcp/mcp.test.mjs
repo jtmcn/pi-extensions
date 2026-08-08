@@ -586,6 +586,40 @@ async function extHarness(servers, { hasUI = true, startupTimeoutMs = 10_000 } =
 	await h.cleanup();
 }
 
+{
+	// `/mcp` before the first turn used to report every server as [connecting] and
+	// never resolve, which is all a `pi -p "/mcp"` run could ever print — the status
+	// command ran before the startup gate that waits for the handshakes.
+	const h = await extHarness({ fake: { command: process.execPath, args: [FAKE], timeoutMs: 5000 } });
+	await h.fire("session_start");
+	const status = await statusText(h);
+
+	ok("status: resolves the handshake before reporting", /fake v9\.9\.9 \[ready\]/.test(status), status);
+	ok("status: does not report a working server as connecting", !/\[connecting\]/.test(status), status);
+
+	await h.fire("session_shutdown");
+	await h.cleanup();
+}
+
+{
+	// Bounded, though: asking for status must not hang on a server that never
+	// answers. It reports what it knows once the budget is spent.
+	const h = await extHarness(
+		{ slow: { command: process.execPath, args: ["-e", "setInterval(() => {}, 1e9)"], timeoutMs: 30_000 } },
+		{ startupTimeoutMs: 300 },
+	);
+	await h.fire("session_start");
+	const started = Date.now();
+	const status = await statusText(h);
+	const waited = Date.now() - started;
+
+	ok("status: does not hang on a server that never answers", waited < 5_000, `waited ${waited}ms`);
+	ok("status: reports the unresolved server honestly", /slow \[connecting\]/.test(status), status);
+
+	await h.fire("session_shutdown");
+	await h.cleanup();
+}
+
 // ------------------------------------------------------- real server (opt) ---
 
 if (REAL_COMMAND) {
