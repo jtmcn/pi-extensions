@@ -72,6 +72,9 @@ export function createCommands(deps: CommandDeps): Commands {
 	const suggest = async (info: RepoInfo, ctx: ExtensionContext): Promise<string> => {
 		const worktrees = await refresh(info);
 		const prefix = getConfig().branchPrefix;
+		// `taken` catches worktree directory names and currently checked-out branches.
+		// It cannot see a stray non-worktree directory at the target path, or a branch
+		// that exists but is checked out nowhere — both fall back to createWorktree's error.
 		const taken = new Set<string>();
 		for (const wt of worktrees) {
 			taken.add(basename(wt.path));
@@ -149,7 +152,9 @@ export function createCommands(deps: CommandDeps): Commands {
 				// no-op this path used to be.
 				name = suggestion;
 			} else {
-				name = ((await ctx.ui.editor("Worktree name:", suggestion)) ?? "").split("\n")[0];
+				// Trim before splitting: a leading blank line is not a cancel. The split is
+				// load-bearing: Shift+Enter and external editors can insert newlines.
+				name = ((await ctx.ui.editor("Worktree name:", suggestion)) ?? "").trim().split("\n")[0];
 				if (!name.trim()) return;
 			}
 		}

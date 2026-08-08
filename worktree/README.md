@@ -57,12 +57,14 @@ creates `my-feature`. The second token is the base ref, so an unquoted
 multi-word name is an error rather than a mystery branch.
 
 With no name, the prompt is prefilled with a suggestion: the newest thing you
-asked for, reduced to three content words (`fix-parser-bug`), or an
-adjective–noun pair (`brave-otter`) when the conversation has nothing to go on.
-Press Enter to take it, or type over it. Short acknowledgements are skipped, so
-approving a plan and then running `/worktree new` still names the work rather
-than the approval. A suggestion that collides with an existing worktree or
-branch is offered as `-2`; a name you type yourself is never adjusted, it fails.
+asked for, reduced to up to three content words (`fix-parser-bug`), trimmed
+to fit a 24-character cap, or an adjective–noun pair (`brave-otter`) when the
+conversation has nothing to go on. Press Enter to take it, or type over it.
+Short acknowledgements are skipped, so approving a plan and then running
+`/worktree new` still names the work rather than the approval. A suggestion that
+collides with an existing worktree or a branch checked out in one is offered as
+`-2`; a branch that exists but is checked out nowhere is deliberately reused.
+A name you type yourself is never adjusted, it fails.
 Non-interactively (`pi -p`) the suggestion is used without asking, where the
 command previously did nothing at all.
 
@@ -198,7 +200,7 @@ node tests/run-all.mjs worktree     # this extension only
 npm test                            # the whole collection
 ```
 
-Eight files under `tests/worktree/`. `worktree.test.mjs` runs against throwaway
+Ten files under `tests/worktree/`. `worktree.test.mjs` runs against throwaway
 repos in `$TMPDIR`, covering both plain and bare layouts, plus pure-function
 tests for focus rewriting, argument parsing, name matching and config
 precedence. Set `PI_TEST_BARE_REPO` to also check a real bare-layout checkout on

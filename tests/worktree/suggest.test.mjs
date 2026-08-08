@@ -83,6 +83,8 @@ const assistant = (text) => ({
 		long.split("-").every((word) => words.includes(word)),
 		String(long),
 	);
+	// Pin the exact result so changes to cap() are deliberate.
+	ok("the long message yields a specific result", long === "reorganise", String(long));
 }
 
 // ============================================ randomName / suggestName
@@ -109,7 +111,11 @@ const assistant = (text) => ({
 	);
 	const exhausted = uniqueName("parser-fix", () => true, () => 0);
 	ok("everything taken falls back to a random pair", exhausted === randomName(() => 0), exhausted);
-	ok("the suffix respects the cap", uniqueName("abcdefghij-abcdefghij-abc", (n) => n === "abcdefghij-abcdefghij-abc").length <= 24);
+	// A 24-character taken base must still get a suffix, not degrade to random.
+	const maxBase = "abcdefghij-abcdefghij-abc"; // exactly 24 chars
+	const suffixed = uniqueName(maxBase, (n) => n === maxBase);
+	ok("a max-length taken base is suffixed", suffixed.endsWith("-2"), suffixed);
+	ok("and still respects the cap", suffixed.length <= 24, suffixed);
 }
 
 done();

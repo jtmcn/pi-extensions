@@ -467,6 +467,41 @@ const userEntry = (content) => ({ type: "message", message: { role: "user", cont
 {
 	const { dir } = await makeRepo([]);
 	const info = await getRepoInfo(execRunner(), dir);
+	// Embedded newlines: only the first line is used.
+	const h = setup({
+		entries: [userEntry("fix the parser bug")],
+		editor: async () => "foo\nbar",
+		config: { path: "wt", branchPrefix: "" },
+	});
+
+	await h.commands.dispatch(info, h.ctx, "new");
+
+	ok("a multiline name uses the first line only", await exists(join(dir, "wt", "foo")), JSON.stringify(h.said));
+	ok("and does not slugify across the newline", !(await exists(join(dir, "wt", "foo-bar"))), JSON.stringify(h.said));
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	const { dir } = await makeRepo([]);
+	const info = await getRepoInfo(execRunner(), dir);
+	// A leading blank line is trimmed, not treated as a cancel.
+	const h = setup({
+		entries: [userEntry("fix the parser bug")],
+		editor: async () => "\nfoo",
+		config: { path: "wt", branchPrefix: "" },
+	});
+
+	await h.commands.dispatch(info, h.ctx, "new");
+
+	ok("a leading newline is trimmed", await exists(join(dir, "wt", "foo")), JSON.stringify(h.said));
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	const { dir } = await makeRepo([]);
+	const info = await getRepoInfo(execRunner(), dir);
 	// The suggested name is already taken: offer the suffixed one.
 	await pexec("git", ["worktree", "add", "-q", "-b", "fix-parser-bug", join(dir, "wt", "fix-parser-bug")], { cwd: dir });
 	const h = setup({ entries: [userEntry("fix the parser bug")], config: { path: "wt", branchPrefix: "" } });
@@ -501,8 +536,9 @@ const userEntry = (content) => ({ type: "message", message: { role: "user", cont
 
 	await h.commands.dispatch(info, h.ctx, "new");
 
-	const created = h.messages().join(" ");
-	ok("an empty transcript still names something", /[a-z]+-[a-z]+/.test(created), JSON.stringify(h.said));
+	// Extract the created name from messages like "created <name> on <branch>".
+	const createdMsg = h.messages().find((m) => m.startsWith("created "));
+	ok("an empty transcript still names something", createdMsg && /^created [a-z]+-[a-z]+ on /.test(createdMsg), JSON.stringify(h.said));
 	ok("and creates it", (await pexec("git", ["worktree", "list"], { cwd: dir })).stdout.split("\n").length > 2, JSON.stringify(h.said));
 
 	await rm(dir, { recursive: true, force: true });

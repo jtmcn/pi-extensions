@@ -139,8 +139,24 @@ export function uniqueName(
 ): string {
 	if (!taken(base)) return base;
 	for (let suffix = 2; suffix <= 9; suffix++) {
-		const candidate = cap(`${base}-${suffix}`);
-		if (!taken(candidate)) return candidate;
+		// Reserve room for the suffix so it survives the cap. We cap the base to
+		// fit within (MAX_LENGTH - "-N"), ensuring the final suffixed name fits.
+		const suffixStr = String(suffix);
+		const reserved = suffixStr.length + 1; // "-N"
+		const maxBaseLength = MAX_LENGTH - reserved;
+		if (base.length > maxBaseLength) {
+			// cap() uses MAX_LENGTH, but we need maxBaseLength. Slice again after
+			// cap() to ensure the result fits, preserving the dash-boundary rule.
+			const capped = cap(base.slice(0, maxBaseLength + 1));
+			const reCapped = capped.length > maxBaseLength
+				? capped.slice(0, capped.lastIndexOf("-", maxBaseLength) || maxBaseLength).replace(/-+$/, "")
+				: capped;
+			const candidate = `${reCapped}-${suffix}`;
+			if (!taken(candidate)) return candidate;
+		} else {
+			const candidate = `${base}-${suffix}`;
+			if (!taken(candidate)) return candidate;
+		}
 	}
 	return randomName(random);
 }
