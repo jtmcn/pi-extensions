@@ -56,6 +56,16 @@ Names are slugified, and quoting works, so `/worktree new "My Feature!"`
 creates `my-feature`. The second token is the base ref, so an unquoted
 multi-word name is an error rather than a mystery branch.
 
+With no name, the prompt is prefilled with a suggestion: the newest thing you
+asked for, reduced to three content words (`fix-parser-bug`), or an
+adjective–noun pair (`brave-otter`) when the conversation has nothing to go on.
+Press Enter to take it, or type over it. Short acknowledgements are skipped, so
+approving a plan and then running `/worktree new` still names the work rather
+than the approval. A suggestion that collides with an existing worktree or
+branch is offered as `-2`; a name you type yourself is never adjusted, it fails.
+Non-interactively (`pi -p`) the suggestion is used without asking, where the
+command previously did nothing at all.
+
 When focused, the footer shows `⑂ <name> (<branch>)`.
 
 ## Tool
@@ -168,6 +178,7 @@ worktree/ui.ts           notifications, reports, status segment
 worktree/config.ts       config loading and path templating
 worktree/focus.ts        tool-input rewriting (pure, heavily tested)
 worktree/select.ts       argument parsing and name matching (pure)
+worktree/suggest.ts      the generated name offered by `new` (pure)
 worktree/worktrees.ts    create / remove / prune
 worktree/pr.ts           PR display formatting and poll cadence (pure)
 worktree/gh.ts           the gh calls behind the PR status display
@@ -187,12 +198,13 @@ node tests/run-all.mjs worktree     # this extension only
 npm test                            # the whole collection
 ```
 
-Seven files under `tests/worktree/`. `worktree.test.mjs` runs against throwaway
+Eight files under `tests/worktree/`. `worktree.test.mjs` runs against throwaway
 repos in `$TMPDIR`, covering both plain and bare layouts, plus pure-function
 tests for focus rewriting, argument parsing, name matching and config
 precedence. Set `PI_TEST_BARE_REPO` to also check a real bare-layout checkout on
-this machine. `pr.test.mjs` and `gh.test.mjs` cover the PR display and its `gh`
-calls, both pure or fake-runner tests with no network or subprocesses.
+this machine. `pr.test.mjs`, `gh.test.mjs`, and `suggest.test.mjs` cover the PR
+display and its `gh` calls, and name suggestion; all pure or fake-runner tests
+with no network or subprocesses.
 `pr-monitor.test.mjs`, `session.test.mjs`, and `ui.test.mjs` cover the three
 extracted units directly, with injected runners and clocks and no fake `pi` at
 all — single flight, the pending re-run, backoff, idle suspension, disposal,

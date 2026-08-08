@@ -63,12 +63,20 @@ async function makeRepo(branches = ["exp"]) {
  * `confirm` is a queue of answers, so a test can say yes to removal and no to
  * the branch, which is the combination the code treats as two decisions.
  */
-function setup({ hasUI = true, confirms = [], select, input, config = {} } = {}) {
+function setup({
+	hasUI = true,
+	confirms = [],
+	select,
+	input,
+	editor = async (_prompt, prefill) => prefill,
+	entries = [],
+	config = {},
+} = {}) {
 	const said = [];
 	const reported = [];
 	const focusCalls = [];
 	const answers = [...confirms];
-	const prompts = { confirm: [], select: [], input: [] };
+	const prompts = { confirm: [], select: [], input: [], editor: [] };
 	let focus;
 
 	const ui = {
@@ -107,7 +115,12 @@ function setup({ hasUI = true, confirms = [], select, input, config = {} } = {})
 				prompts.input.push({ prompt });
 				return input;
 			},
+			editor: async (prompt, prefill) => {
+				prompts.editor.push({ prompt, prefill });
+				return editor(prompt, prefill);
+			},
 		},
+		sessionManager: { getBranch: () => entries, getEntries: () => entries },
 	};
 
 	return {
@@ -380,6 +393,117 @@ function setup({ hasUI = true, confirms = [], select, input, config = {} } = {})
 	ok("completes worktree names for focus", focusItems.length === 2, JSON.stringify(focusItems));
 	ok("offers 'off' for focus", (h.commands.getArgumentCompletions("focus o") ?? []).some((i) => i.value === "focus off"));
 	ok("offers no names for subcommands that take none", h.commands.getArgumentCompletions("list x") === null);
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+// ============================================ new: the suggested name
+
+/** A user message entry, as `sessionManager.getBranch()` returns it. */
+const userEntry = (content) => ({ type: "message", message: { role: "user", content } });
+
+{
+	const { dir } = await makeRepo([]);
+	const info = await getRepoInfo(execRunner(), dir);
+	// Accepting the suggestion: the default fake editor returns its prefill.
+	const h = setup({
+		entries: [userEntry("fix the parser bug"), userEntry("yes, do it")],
+		config: { path: "wt", branchPrefix: "" },
+	});
+
+	await h.commands.dispatch(info, h.ctx, "new");
+
+	ok("the prompt is prefilled with a suggestion", h.prompts.editor[0]?.prefill === "fix-parser-bug", JSON.stringify(h.prompts.editor));
+	ok("and no bare input prompt is used", h.prompts.input.length === 0);
+	ok("accepting it creates that worktree", await exists(join(dir, "wt", "fix-parser-bug")), JSON.stringify(h.said));
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	const { dir } = await makeRepo([]);
+	const info = await getRepoInfo(execRunner(), dir);
+	// Typing over the suggestion wins, and a stray newline is not part of the name.
+	const h = setup({
+		entries: [userEntry("fix the parser bug")],
+		editor: async () => "my-own-name\n",
+		config: { path: "wt", branchPrefix: "" },
+	});
+
+	await h.commands.dispatch(info, h.ctx, "new");
+
+	ok("the typed name wins", await exists(join(dir, "wt", "my-own-name")), JSON.stringify(h.said));
+	ok("and the suggestion is not created", !(await exists(join(dir, "wt", "fix-parser-bug"))));
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	const { dir } = await makeRepo([]);
+	const info = await getRepoInfo(execRunner(), dir);
+	// Clearing the field cancels, as an empty submit always has.
+	const h = setup({ entries: [userEntry("fix the parser bug")], editor: async () => "  ", config: { path: "wt", branchPrefix: "" } });
+
+	await h.commands.dispatch(info, h.ctx, "new");
+
+	ok("an empty submit creates nothing", !(await exists(join(dir, "wt"))), JSON.stringify(h.said));
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	const { dir } = await makeRepo([]);
+	const info = await getRepoInfo(execRunner(), dir);
+	// Esc is the same as an empty submit.
+	const h = setup({ entries: [userEntry("fix the parser bug")], editor: async () => undefined, config: { path: "wt", branchPrefix: "" } });
+
+	await h.commands.dispatch(info, h.ctx, "new");
+
+	ok("a cancelled editor creates nothing", !(await exists(join(dir, "wt"))), JSON.stringify(h.said));
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	const { dir } = await makeRepo([]);
+	const info = await getRepoInfo(execRunner(), dir);
+	// The suggested name is already taken: offer the suffixed one.
+	await pexec("git", ["worktree", "add", "-q", "-b", "fix-parser-bug", join(dir, "wt", "fix-parser-bug")], { cwd: dir });
+	const h = setup({ entries: [userEntry("fix the parser bug")], config: { path: "wt", branchPrefix: "" } });
+
+	await h.commands.dispatch(info, h.ctx, "new");
+
+	ok("a taken suggestion is suffixed", h.prompts.editor[0]?.prefill === "fix-parser-bug-2", JSON.stringify(h.prompts.editor));
+	ok("and that is what gets created", await exists(join(dir, "wt", "fix-parser-bug-2")), JSON.stringify(h.said));
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	const { dir } = await makeRepo([]);
+	const info = await getRepoInfo(execRunner(), dir);
+	// Non-interactive: no prompt to fall back on, so use the suggestion.
+	const h = setup({ hasUI: false, entries: [userEntry("fix the parser bug")], config: { path: "wt", branchPrefix: "" } });
+
+	await h.commands.dispatch(info, h.ctx, "new");
+
+	ok("non-interactive creates the suggested worktree", await exists(join(dir, "wt", "fix-parser-bug")), JSON.stringify(h.said));
+	ok("and says which name it chose", h.messages().some((m) => m.includes("fix-parser-bug")), JSON.stringify(h.said));
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	const { dir } = await makeRepo([]);
+	const info = await getRepoInfo(execRunner(), dir);
+	// No transcript at all: still a name, and still a worktree.
+	const h = setup({ hasUI: false, entries: [], config: { path: "wt", branchPrefix: "" } });
+
+	await h.commands.dispatch(info, h.ctx, "new");
+
+	const created = h.messages().join(" ");
+	ok("an empty transcript still names something", /[a-z]+-[a-z]+/.test(created), JSON.stringify(h.said));
+	ok("and creates it", (await pexec("git", ["worktree", "list"], { cwd: dir })).stdout.split("\n").length > 2, JSON.stringify(h.said));
 
 	await rm(dir, { recursive: true, force: true });
 }

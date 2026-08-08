@@ -17,6 +17,7 @@ import { countDirty, describeWorktree, listWorktrees, type RepoInfo, slugify, ty
 import { type WorktreeConfig, worktreePath } from "./config.ts";
 import type { FocusTarget } from "./focus.ts";
 import { matchWorktree, parseNewArgs } from "./select.ts";
+import { messageTexts, suggestName, uniqueName } from "./suggest.ts";
 import type { Ui } from "./ui.ts";
 import { type CommandRunner, createWorktree, pruneWorktrees, removeWorktree } from "./worktrees.ts";
 
@@ -59,6 +60,24 @@ export function createCommands(deps: CommandDeps): Commands {
 	const refresh = async (info: RepoInfo): Promise<Worktree[]> => {
 		known = (await listWorktrees(runner, info.projectRoot)).filter((wt) => !wt.bare);
 		return known;
+	};
+
+	/**
+	 * A name to offer for a new worktree, unique against what already exists.
+	 *
+	 * Uniqueness is applied only here, to generated names: a name the user typed
+	 * must keep failing loudly in `createWorktree` rather than quietly becoming
+	 * something else.
+	 */
+	const suggest = async (info: RepoInfo, ctx: ExtensionContext): Promise<string> => {
+		const worktrees = await refresh(info);
+		const prefix = getConfig().branchPrefix;
+		const taken = new Set<string>();
+		for (const wt of worktrees) {
+			taken.add(basename(wt.path));
+			if (wt.branch) taken.add(wt.branch.startsWith(prefix) ? wt.branch.slice(prefix.length) : wt.branch);
+		}
+		return uniqueName(suggestName(messageTexts(ctx.sessionManager.getBranch())), (name) => taken.has(name));
 	};
 
 	const resolveWorktree = async (
@@ -121,9 +140,18 @@ export function createCommands(deps: CommandDeps): Commands {
 		const rawBase = parsed.base;
 		let name = parsed.name;
 		if (!name) {
-			if (!ctx.hasUI) return;
-			name = (await ctx.ui.input("Worktree name:", "feature-name")) ?? "";
-			if (!name.trim()) return;
+			// A suggestion rather than an empty box: pi's `input` placeholder is never
+			// rendered, so the old hint was invisible. `editor` does prefill, which
+			// makes the name editable instead of merely proposed.
+			const suggestion = await suggest(info, ctx);
+			if (!ctx.hasUI) {
+				// No prompt to fall back on. Using the suggestion beats the silent
+				// no-op this path used to be.
+				name = suggestion;
+			} else {
+				name = ((await ctx.ui.editor("Worktree name:", suggestion)) ?? "").split("\n")[0];
+				if (!name.trim()) return;
+			}
 		}
 		const slug = slugify(name);
 		const branch = `${getConfig().branchPrefix}${slug}`;
