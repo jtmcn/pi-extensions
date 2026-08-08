@@ -88,6 +88,9 @@ One new module, one wiring change.
 `worktree/suggest.ts` — pure, no I/O, no `pi`:
 
 ```ts
+/** User message texts from session entries, oldest first. Narrows structurally. */
+export function messageTexts(entries: readonly unknown[]): string[];
+
 /** Content words from one message text, stopwords and slash commands dropped. */
 export function contentWords(text: string): string[];
 
@@ -108,19 +111,23 @@ export function uniqueName(
 ): string;
 ```
 
-`texts` is a plain `string[]`, oldest first, so the module never touches session
-entry types. Extracting them from `getBranch()` is a small reader in
-`commands.ts`, which already holds the interactive plumbing:
+`messageTexts` narrows entries structurally — `type === "message"`,
+`message.role === "user"`, string content or text blocks — rather than importing
+session entry types, so the module stays pure and its tests pass plain objects.
 
-- `doNew`, when `parsed.name` is empty, builds `texts`, calls `suggestName`,
-  passes it through `uniqueName` against names taken by the refreshed worktree
-  list, then either prefills `ctx.ui.editor` (interactive) or uses it directly
+`commands.ts` needs no new dependency: `ExtensionCommandContext` extends
+`ExtensionContext`, so `doNew` already has `ctx.sessionManager.getBranch()`,
+which `index.ts` uses the same way for focus restore.
+
+- `doNew`, when `parsed.name` is empty, calls
+  `suggestName(messageTexts(ctx.sessionManager.getBranch()))`, passes the result
+  through `uniqueName` against names taken by the refreshed worktree list, then
+  either prefills `ctx.ui.editor` (interactive) or uses it directly
   (non-interactive, with the existing `say`).
-- `CommandDeps` gains `getEntryTexts: () => string[]`, supplied by `index.ts`
-  from the live `ctx`, keeping `commands.ts` free of a session-manager
-  dependency and keeping the seam injectable in tests.
 - Editor input is normalised: first line, trimmed, before the existing
   `slugify`.
+- The existing fake ctx in `tests/worktree/commands.test.mjs` gains `editor` and
+  `sessionManager.getBranch`.
 
 ## Tests
 
