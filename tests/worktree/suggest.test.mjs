@@ -67,9 +67,12 @@ const assistant = (text) => ({
 	ok("an empty transcript is undefined", nameFromMessages([]) === undefined);
 	ok("one content word is not enough", nameFromMessages(["parser"]) === undefined);
 
-	const blob = `paste this ${"x".repeat(5000)} ${Array.from({ length: 400 }, (_, i) => `word${i}`).join(" ")}`;
-	const fromBlob = nameFromMessages([blob]);
-	ok("a pasted blob cannot produce a long name", (fromBlob ?? "").length <= 24 && (fromBlob ?? "").length > 0, String(fromBlob));
+	const stopwordBlob = "the and or ".repeat(20) + "laterword1 laterword2";
+	ok(
+		"truncation ignores content beyond 200 chars",
+		nameFromMessages([stopwordBlob]) === undefined,
+		String(nameFromMessages([stopwordBlob])),
+	);
 
 	const long = nameFromMessages(["reorganise the authentication middleware configuration"]);
 	const words = ["reorganise", "authentication", "middleware", "configuration"];
