@@ -39,6 +39,7 @@ already resolved, but a hand-written `/var` vs `/private/var` will not match.
 /worktree                 interactive menu
 /worktree list            worktrees for this repo, with dirty counts
 /worktree new <name> [base]   create worktree + branch, then focus it
+/worktree checkout <branch> [name]  worktree for an existing branch
 /worktree focus <name>    redirect tool calls into a worktree
 /worktree focus off       stop redirecting
 /worktree remove <name>   remove a worktree (prompts about dirt and the branch)
@@ -70,6 +71,35 @@ command previously did nothing at all.
 
 When focused, the footer shows `⑂ <name> (<branch>)`.
 
+## An existing branch
+
+`/worktree checkout <branch> [name]` is the counterpart to `new`: `new` makes a
+branch, `checkout` takes one that exists. The argument is a local branch, a
+fully qualified remote ref (`origin/alice/hotfix`), or a branch name that is
+unambiguous across remotes. With no argument you get a picker; non-interactively
+a branch name is required, as for `focus` and `remove`.
+
+Resolution is local-first, and that is load-bearing: a local branch may hold
+commits the remote does not, so `checkout origin/foo` with a local `foo` checks
+out your `foo` untouched and says so, rather than resetting anything.
+
+The network is touched only on a miss — one `git fetch` of the relevant remote,
+then one retry. So the common case costs nothing and a branch pushed a minute
+ago is still found. A stale remote-tracking ref is the accepted gap: it matches
+immediately, so the worktree can start a few commits behind. A fetch that fails
+is a warning, not an error.
+
+The directory name drops the remote and `branchPrefix`, so with
+`"branchPrefix": "joel/"`, `origin/joel/fix-parser` becomes `fix-parser` and
+`origin/alice/hotfix` becomes `alice-hotfix`. A derived name that collides gets
+`-2`; a name you pass yourself is never adjusted and fails instead. `autoFocus`
+applies exactly as it does for `new`.
+
+The model's `worktree` tool deliberately does not expose this. With auto-focus
+on, checking out an existing branch could put the model to work directly on a
+shared branch instead of a scratch one, so it stays a user decision — like
+`focus` and `remove`.
+
 ## Tool
 
 The model gets a `worktree` tool with `action: "list" | "create"`. It can spin
@@ -79,8 +109,9 @@ up an isolated worktree for a parallel experiment.
 model keeps working where it just landed instead of threading an absolute path
 through every later call. The footer shows the focus and `/worktree focus off`
 undoes it. Set `"autoFocus": false` for the old behaviour, where the tool only
-returns the path. The tool still cannot focus an *existing* worktree — switching
-between worktrees stays a user decision.
+returns the path. The tool still cannot focus an *existing* worktree or check
+out an *existing* branch — switching between worktrees, and starting work on a
+branch that already exists, stay user decisions.
 
 Note that `create` runs the configured `postCreate` command, so a model tool
 call can execute the project's setup command. `postCreate` therefore only comes
@@ -178,6 +209,7 @@ worktree/commands.ts     /worktree and its completions
 worktree/tool.ts         the model-facing tool
 worktree/ui.ts           notifications, reports, status segment
 worktree/config.ts       config loading and path templating
+worktree/branches.ts     branch listing, resolution and naming (pure + two git calls)
 worktree/focus.ts        tool-input rewriting (pure, heavily tested)
 worktree/select.ts       argument parsing and name matching (pure)
 worktree/suggest.ts      the generated name offered by `new` (pure)
@@ -200,13 +232,17 @@ node tests/run-all.mjs worktree     # this extension only
 npm test                            # the whole collection
 ```
 
-Ten files under `tests/worktree/`. `worktree.test.mjs` runs against throwaway
+Eleven files under `tests/worktree/`. `worktree.test.mjs` runs against throwaway
 repos in `$TMPDIR`, covering both plain and bare layouts, plus pure-function
 tests for focus rewriting, argument parsing, name matching and config
 precedence. Set `PI_TEST_BARE_REPO` to also check a real bare-layout checkout on
-this machine. `pr.test.mjs`, `gh.test.mjs`, and `suggest.test.mjs` cover the PR
-display and its `gh` calls, and name suggestion; all pure or fake-runner tests
-with no network or subprocesses.
+this machine. `branches.test.mjs` covers resolution and naming as pure
+functions — local-wins, multi-remote ambiguity, a slash-containing remote
+name — plus `listBranches` and `fetchRemote` against a real clone, including a
+branch pushed after the clone that only a fetch can reveal. `pr.test.mjs`,
+`gh.test.mjs`, and `suggest.test.mjs` cover the PR display and its `gh` calls,
+and name suggestion; all pure or fake-runner tests with no network or
+subprocesses.
 `pr-monitor.test.mjs`, `session.test.mjs`, and `ui.test.mjs` cover the three
 extracted units directly, with injected runners and clocks and no fake `pi` at
 all — single flight, the pending re-run, backoff, idle suspension, disposal,
