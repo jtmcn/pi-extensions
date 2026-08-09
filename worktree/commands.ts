@@ -459,8 +459,17 @@ export function createCommands(deps: CommandDeps): Commands {
 			return items.length ? items : null;
 		}
 		const [sub, ...rest] = parts;
-		if (sub !== "focus" && sub !== "remove") return null;
 		const needle = rest.join(" ");
+
+		if (sub === "checkout" || sub === "co") {
+			const values = [...knownBranches.local, ...knownBranches.remote.map((branch) => branch.full)];
+			const items = values
+				.filter((value) => value.startsWith(needle))
+				.map((value) => ({ value: `${sub} ${value}`, label: `${sub} ${value}` }));
+			return items.length ? items : null;
+		}
+
+		if (sub !== "focus" && sub !== "remove") return null;
 		const names = known.filter((wt) => !wt.bare).map((wt) => basename(wt.path));
 		if (sub === "focus") names.unshift("off");
 		const items = names

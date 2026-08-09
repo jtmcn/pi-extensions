@@ -671,6 +671,27 @@ const userEntry = (content) => ({ type: "message", message: { role: "user", cont
 	ok("checkout: extra arguments rejected", t.errors().at(-1)?.includes("unexpected extra arguments"), String(t.errors().at(-1)));
 	await rm(dir, { recursive: true, force: true });
 }
+// ==================================================== completions
+
+{
+	const t = setup();
+	t.commands.setKnownBranches({
+		local: ["main", "joel/fix-parser"],
+		remote: [{ remote: "origin", name: "alice/hotfix", full: "origin/alice/hotfix" }],
+		remotes: ["origin"],
+	});
+	const all = t.commands.getArgumentCompletions("checkout ");
+	ok("completions: locals offered", all?.some((i) => i.value === "checkout main"), JSON.stringify(all));
+	ok("completions: remotes offered by full ref", all?.some((i) => i.value === "checkout origin/alice/hotfix"), JSON.stringify(all));
+	const filtered = t.commands.getArgumentCompletions("checkout joel/");
+	ok("completions: filtered by prefix", filtered?.length === 1 && filtered[0].value === "checkout joel/fix-parser", JSON.stringify(filtered));
+	ok("completions: no match yields null", t.commands.getArgumentCompletions("checkout zzz") === null);
+	ok("completions: subcommand itself still completes", t.commands.getArgumentCompletions("che")?.some((i) => i.value === "checkout"), JSON.stringify(t.commands.getArgumentCompletions("che")));
+	ok("completions: unrelated subcommand unaffected", t.commands.getArgumentCompletions("prune x") === null);
+
+	t.commands.setKnownBranches({ local: [], remote: [], remotes: [] });
+	ok("completions: cleared cache offers nothing", t.commands.getArgumentCompletions("checkout ") === null);
+}
 done();
 
 function basename(p) {
