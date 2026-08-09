@@ -676,7 +676,7 @@ const userEntry = (content) => ({ type: "message", message: { role: "user", cont
 {
 	const t = setup();
 	t.commands.setKnownBranches({
-		local: ["main", "joel/fix-parser"],
+		local: ["main", "joel/fix-parser", "feature/joel/cleanup"],
 		remote: [{ remote: "origin", name: "alice/hotfix", full: "origin/alice/hotfix" }],
 		remotes: ["origin"],
 	});
