@@ -687,6 +687,25 @@ const userEntry = (content) => ({ type: "message", message: { role: "user", cont
 	ok("checkout: extra arguments rejected", t.errors().at(-1)?.includes("unexpected extra arguments"), String(t.errors().at(-1)));
 	await rm(dir, { recursive: true, force: true });
 }
+
+{
+	// The branch cache is refreshed after a create, so `checkout <tab>` offers a
+	// branch `/worktree new` just made without waiting for the next session.
+	const { dir } = await makeRepo([]);
+	const info = await getRepoInfo(execRunner(), dir);
+	const t = setup({ config: { branchPrefix: "joel/" } });
+	ok("completions: nothing is cached before anything runs", t.commands.getArgumentCompletions("checkout ") === null);
+
+	await t.commands.dispatch(info, t.ctx, "new fresh-thing");
+	const items = t.commands.getArgumentCompletions("checkout ");
+	ok(
+		"completions: a branch /worktree new just created is offered",
+		items?.some((i) => i.value === "checkout joel/fresh-thing"),
+		JSON.stringify(items),
+	);
+	await rm(dir, { recursive: true, force: true });
+}
+
 // ==================================================== completions
 
 {

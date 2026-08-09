@@ -215,6 +215,8 @@ export function createCommands(deps: CommandDeps): Commands {
 				sourceWorktree: info.worktreeRoot,
 			});
 			await refresh(info);
+			// The new branch exists now: `checkout <tab>` should offer it.
+			await refreshBranches(info);
 
 			reportCreated(ctx, result, result.base ? [`from ${result.base}`] : []);
 
@@ -379,6 +381,9 @@ export function createCommands(deps: CommandDeps): Commands {
 			});
 			if (getFocus()?.path === target.path) setFocus(ctx, undefined);
 			await refresh(info);
+			// The branch may have gone with the worktree: completing a dead branch
+			// costs a pointless fetch when it is accepted.
+			await refreshBranches(info);
 			say(ctx, `removed ${basename(target.path)}`, "info");
 		} catch (error) {
 			say(ctx, (error as Error).message, "error");

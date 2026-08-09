@@ -216,6 +216,7 @@ export default function (pi: ExtensionAPI) {
 			getSessionCtx: () => session?.ctx,
 			setFocus,
 			setKnown: commands.setKnown,
+			setKnownBranches: commands.setKnownBranches,
 		}),
 	);
 }
