@@ -648,7 +648,11 @@ const userEntry = (content) => ({ type: "message", message: { role: "user", cont
 	const labels = t.prompts.select.at(-1)?.labels ?? [];
 	ok("checkout: picker lists branches", labels.some((l) => l.startsWith("exp")), JSON.stringify(labels));
 	ok("checkout: checked-out branches are marked", labels.find((l) => l.startsWith("exp"))?.includes("checked out"), JSON.stringify(labels));
-	ok("checkout: picking the session's own branch is refused", t.errors().at(-1)?.includes("already checked out"), String(t.errors().at(-1)));
+	ok(
+		"checkout: picking the session's own branch is refused with focus hint",
+		t.errors().at(-1)?.includes("/worktree focus"),
+		String(t.errors().at(-1)),
+	);
 	await rm(dir, { recursive: true, force: true });
 }
 
