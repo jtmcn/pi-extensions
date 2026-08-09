@@ -762,7 +762,7 @@ Then add this section before the final `done();`:
 	await t.commands.dispatch(info, t.ctx, "checkout joel/local-work");
 	const created = join(dir, ".claude/worktrees/local-work");
 	ok("checkout: local branch checked out", await exists(created), t.messages().join(" | "));
-	ok("checkout: branchPrefix stripped from the directory", (await exists(created)) === true);
+	ok("checkout: branchPrefix stripped from the directory", !(await exists(join(dir, ".claude/worktrees/joel-local-work"))), t.messages().join(" | "));
 	ok("checkout: focused", t.focusCalls.at(-1)?.path === created, JSON.stringify(t.focusCalls.at(-1)));
 	ok("checkout: no fetch when it resolved locally", !t.gitCalls.some((c) => c.startsWith("fetch")), JSON.stringify(t.gitCalls));
 
