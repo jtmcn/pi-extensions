@@ -10,7 +10,7 @@
  * command has no business performing.
  */
 
-import { slugify } from "../lib/git.ts";
+import { git, type GitRunner, gitOrThrow, slugify } from "../lib/git.ts";
 
 export interface RemoteBranch {
 	/** Remote name, e.g. `origin`. May itself contain slashes. */
@@ -136,4 +136,37 @@ export function branchOptions(branches: BranchList, checkedOut: Set<string>): { 
 		});
 	}
 	return options;
+}
+
+/** All local and remote-tracking branches, plus the configured remote names. */
+export async function listBranches(pi: GitRunner, projectRoot: string, signal?: AbortSignal): Promise<BranchList> {
+	const remotes = (await gitOrThrow(pi, ["remote"], projectRoot, { signal }))
+		.split("\n")
+		.map((line) => line.trim())
+		.filter(Boolean);
+	const refs = await gitOrThrow(
+		pi,
+		["for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes"],
+		projectRoot,
+		{ signal },
+	);
+	return parseBranchRefs(refs, remotes);
+}
+
+/**
+ * Fetch one remote. Returns an error message, or undefined on success.
+ *
+ * Non-throwing by construction: the caller resolves branches without the
+ * network in the common case, so a fetch failure degrades to "not found" rather
+ * than taking the command down.
+ */
+export async function fetchRemote(
+	pi: GitRunner,
+	projectRoot: string,
+	remote: string,
+	signal?: AbortSignal,
+): Promise<string | undefined> {
+	const result = await git(pi, ["fetch", remote], projectRoot, { signal });
+	if (result.code === 0) return undefined;
+	return (result.stderr || result.stdout).trim() || `git fetch ${remote} failed (exit ${result.code})`;
 }

@@ -9,7 +9,10 @@
  * shadows a remote one — which must win, because it may hold unpushed commits.
  */
 
-import { assertions, loadExt } from "../harness.mjs";
+import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { assertions, loadExt, execRunner, pexec } from "../harness.mjs";
 
 const { ok, done } = assertions();
 const { parseBranchRefs, resolveBranch, checkoutName, defaultRemote, branchOptions, EMPTY_BRANCHES } =
@@ -116,5 +119,52 @@ ok("remote: longest match wins", defaultRemote({ ...EMPTY_BRANCHES, remotes: ["a
 	ok("options: values are unique", new Set(values).size === values.length);
 	ok("options: empty list", branchOptions(EMPTY_BRANCHES, new Set()).length === 0);
 }
+
+// ====================================== integration: real git, two repos
+
+const { listBranches, fetchRemote } = await loadExt("worktree/branches.ts");
+const runner = execRunner();
+
+const root = await realpath(await mkdtemp(join(tmpdir(), "pi-branches-")));
+const up = join(root, "up");
+await pexec("git", ["init", "-q", "-b", "main", up]);
+await pexec("git", ["config", "user.email", "test@example.com"], { cwd: up });
+await pexec("git", ["config", "user.name", "Test"], { cwd: up });
+await writeFile(join(up, "a.txt"), "hi\n");
+await pexec("git", ["add", "-A"], { cwd: up });
+await pexec("git", ["commit", "-qm", "init"], { cwd: up });
+await pexec("git", ["branch", "alice/hotfix"], { cwd: up });
+
+const down = join(root, "down");
+await pexec("git", ["clone", "-q", up, down]);
+
+{
+	const list = await listBranches(runner, down);
+	ok("list: local branch", list.local.includes("main"), JSON.stringify(list.local));
+	ok("list: remote branch with a slash", list.remote.some((r) => r.full === "origin/alice/hotfix"), JSON.stringify(list.remote));
+	ok("list: origin/HEAD is not a branch", !list.remote.some((r) => r.name === "HEAD"));
+	ok("list: remotes", JSON.stringify(list.remotes) === JSON.stringify(["origin"]));
+}
+
+// A branch pushed after the clone: invisible until something fetches.
+await pexec("git", ["branch", "later"], { cwd: up });
+{
+	const before = await listBranches(runner, down);
+	ok("fetch: new branch invisible before fetching", !before.remote.some((r) => r.name === "later"));
+	const error = await fetchRemote(runner, down, "origin");
+	ok("fetch: succeeds quietly", error === undefined, String(error));
+	const after = await listBranches(runner, down);
+	ok("fetch: new branch visible after fetching", after.remote.some((r) => r.full === "origin/later"), JSON.stringify(after.remote));
+}
+
+{
+	// An unreachable remote must produce a message, not a rejection.
+	await pexec("git", ["remote", "add", "broken", join(root, "does-not-exist")], { cwd: down });
+	const error = await fetchRemote(runner, down, "broken");
+	ok("fetch: failure is reported, not thrown", typeof error === "string" && error.length > 0, String(error));
+	ok("fetch: unknown remote is also just a message", typeof (await fetchRemote(runner, down, "nope")) === "string");
+}
+
+await rm(root, { recursive: true, force: true });
 
 done();
