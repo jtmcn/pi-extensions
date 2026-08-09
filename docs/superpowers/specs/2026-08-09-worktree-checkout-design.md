@@ -38,8 +38,14 @@ the need appears.
 ## Resolving the branch
 
 A query resolves against a cached list of local branches and remote-tracking
-branches, from one `git for-each-ref refs/heads refs/remotes`. `origin/HEAD` is
-dropped — it is a symref to a branch already in the list.
+branches, from one `git for-each-ref refs/heads refs/remotes` plus one
+`git remote`. `origin/HEAD` is dropped — it is a symref to a branch already in
+the list.
+
+`git remote` is not redundant. Remote names may contain slashes (`git remote add
+a/b` is accepted), so `refs/remotes/a/b/main` is remote `a/b`, branch `main`, and
+splitting on the first segment would silently mis-parse it. The remote is the
+longest configured remote name that prefixes the ref.
 
 | query | resolution |
 |---|---|
@@ -95,13 +101,17 @@ a one-line answer.
 
 ## Naming the directory
 
-`checkoutName(branch, branchPrefix)`: strip the remote, then strip
-`branchPrefix` when present, then `slugify`.
+`checkoutName(branch, branchPrefix)`: strip `branchPrefix` when present, then
+`slugify`.
 
-| branch | `branchPrefix` | directory |
+Resolution has already stripped the remote — it reports the *local* branch name
+to create or check out — so `checkoutName` takes that name and strips only
+`branchPrefix`, then slugifies.
+
+| resolved branch | `branchPrefix` | directory |
 |---|---|---|
-| `origin/joel/fix-parser` | `joel/` | `fix-parser` |
-| `origin/alice/hotfix` | `joel/` | `alice-hotfix` |
+| `joel/fix-parser` (from `origin/joel/fix-parser`) | `joel/` | `fix-parser` |
+| `alice/hotfix` (from `origin/alice/hotfix`) | `joel/` | `alice-hotfix` |
 | `renovate/lockfile` | `joel/` | `renovate-lockfile` |
 
 Your own branches read short; everyone else's stay attributed. This is not a new
@@ -143,8 +153,9 @@ moves.
 ## Testing
 
 `tests/worktree/branches.test.mjs`, new: `resolveBranch` across all five rows of
-the resolution table including local-wins and multi-remote ambiguity, and
-`checkoutName` across the naming table.
+the resolution table including local-wins and multi-remote ambiguity,
+`checkoutName` across the naming table, and ref parsing including a
+slash-containing remote and a dropped `HEAD` symref.
 
 `tests/worktree/worktree.test.mjs`, extended, with real git in throwaway repos —
 a second repo cloned so `origin/…` refs are real:
