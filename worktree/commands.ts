@@ -452,9 +452,10 @@ export function createCommands(deps: CommandDeps): Commands {
 	};
 
 	/**
-	 * Complete subcommands, then worktree names for the two that take one.
+	 * Complete subcommands, then their arguments: branch names for `checkout`,
+	 * worktree names for `focus` and `remove` (plus `off` for `focus`).
 	 *
-	 * Uses the cached list rather than shelling out: completions run on every
+	 * Uses the cached lists rather than shelling out: completions run on every
 	 * keystroke.
 	 */
 	const getArgumentCompletions = (prefix: string) => {

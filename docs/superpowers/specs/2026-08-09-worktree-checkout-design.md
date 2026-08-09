@@ -127,8 +127,11 @@ through `uniqueName` and becomes `fix-parser-2`. A name passed explicitly as
 
 `/worktree checkout` with no argument and `ctx.hasUI` shows `ctx.ui.select` over
 the branch list: locals first, then remotes, with branches already checked out
-marked and not selectable. With no argument and no UI it is an error, matching
-`focus` and `remove` — there is no prompt to fall back on.
+marked `(checked out)`. `ctx.ui.select` has no disabled rows, so they stay
+selectable; picking one gets the same refusal an explicit argument would, naming
+the worktree that holds it and the `/worktree focus` that goes there. With no
+argument and no UI it is an error, matching `focus` and `remove` — there is no
+prompt to fall back on.
 
 Completion after `checkout ` offers branch names from a `knownBranches` cache,
 seeded beside the existing worktree cache at `session_start` and refreshed after

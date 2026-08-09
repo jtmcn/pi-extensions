@@ -7,6 +7,8 @@
  *   /worktree                 interactive menu
  *   /worktree list            show worktrees for this repo
  *   /worktree new <name>      create a worktree (+ branch) and focus it
+ *   /worktree checkout <branch> [name]
+ *                             create a worktree for a branch that exists
  *   /worktree focus <name>    redirect tool calls into a worktree
  *   /worktree focus off       stop redirecting
  *   /worktree remove <name>   remove a worktree
