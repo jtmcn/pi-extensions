@@ -619,7 +619,12 @@ const userEntry = (content) => ({ type: "message", message: { role: "user", cont
 	const upstreamRef = (await pexec("git", ["config", "branch.alice/hotfix.merge"], { cwd: dir })).stdout.trim();
 	ok("checkout: upstream configured", upstreamRef === "refs/heads/alice/hotfix", upstreamRef);
 
+	// The lazy-fetch rule, measured where a fetch was actually possible: this repo
+	// has a remote, and `origin/alice/hotfix` was already a remote-tracking ref, so
+	// nothing above may have touched the network.
 	const before = t.gitCalls.filter((c) => c.startsWith("fetch")).length;
+	ok("checkout: no fetch when a remote-tracking ref already matched", before === 0, JSON.stringify(t.gitCalls));
+
 	await t.commands.dispatch(info, t.ctx, "checkout pushed-later");
 	const fetches = t.gitCalls.filter((c) => c.startsWith("fetch")).length - before;
 	ok("checkout: a miss fetches exactly once", fetches === 1, String(fetches));
@@ -635,7 +640,7 @@ const userEntry = (content) => ({ type: "message", message: { role: "user", cont
 	const t = setup({ hasUI: false });
 	await t.commands.dispatch(info, t.ctx, "checkout");
 	ok("checkout: no argument without a UI is an error", t.errors().at(-1)?.includes("required"), String(t.errors().at(-1)));
-	ok("checkout: nothing was created", t.prompts.select.length === 0);
+	ok("checkout: no picker is shown without a UI", t.prompts.select.length === 0);
 	await rm(dir, { recursive: true, force: true });
 }
 
@@ -665,6 +670,17 @@ const userEntry = (content) => ({ type: "message", message: { role: "user", cont
 	await pexec("git", ["branch", "other/thing"], { cwd: dir });
 	await t.commands.dispatch(info, t.ctx, "checkout joel/thing custom-dir");
 	ok("checkout: explicit name is used verbatim", await exists(join(dir, ".claude/worktrees/custom-dir")), t.messages().join(" | "));
+
+	// The same name again, for a different branch: an explicit name must fail
+	// loudly rather than quietly becoming `custom-dir-2`.
+	await pexec("git", ["branch", "third/thing"], { cwd: dir });
+	await t.commands.dispatch(info, t.ctx, "checkout third/thing custom-dir");
+	ok(
+		"checkout: explicit name is never uniquified",
+		t.errors().at(-1)?.includes("Path already exists") && !(await exists(join(dir, ".claude/worktrees/custom-dir-2"))),
+		String(t.errors().at(-1)),
+	);
+
 	await t.commands.dispatch(info, t.ctx, "checkout other/thing");
 	ok("checkout: derived name is other-thing", await exists(join(dir, ".claude/worktrees/other-thing")), t.messages().join(" | "));
 	await t.commands.dispatch(info, t.ctx, "checkout joel/thing a b");
