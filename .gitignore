@@ -13,3 +13,7 @@ tests/node_modules/
 
 # Subagent-driven-development scratch (ledger, briefs, review packages)
 .superpowers/
+
+# Default worktree location — the worktree extension's `path` puts checkouts
+# inside the repo, so every worktree would otherwise show up as untracked.
+.claude/
