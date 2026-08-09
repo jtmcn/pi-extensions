@@ -30,6 +30,7 @@
  */
 
 import { stat } from "node:fs/promises";
+import { basename } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getRepoInfo, listWorktrees, type RepoInfo } from "../lib/git.ts";
 import { createCommands } from "./commands.ts";
@@ -122,7 +123,30 @@ export default function (pi: ExtensionAPI) {
 		active.prMonitor.refresh();
 	});
 
-	pi.on("session_shutdown", (_event, ctx) => {
+	/**
+	 * On the way out, leave the focused worktree's path in the user's scrollback.
+	 *
+	 * Focus moves the *agent*, never the user's shell — a child process cannot
+	 * change its parent's working directory — so quitting drops the user back
+	 * wherever they launched pi, with the worktree they were just working in
+	 * named only in a status bar that is now gone. Printing the path makes the
+	 * follow-up `cd` a copy-paste instead of an archaeology exercise.
+	 *
+	 * Only on `quit`: the same event fires for `/new`, `/fork`, `/reload`, and
+	 * `--resume`, where the TUI lives on and a raw stdout write would tear a hole
+	 * in the rendering.
+	 */
+	pi.on("session_shutdown", (event, ctx) => {
+		const focus = session?.focus;
+		// Focus on the session's own worktree never redirected anything, so its path
+		// is just the cwd the user already has.
+		const redirected = focus && focus.path !== session?.repo?.worktreeRoot;
+		if (event.reason === "quit" && focus && redirected) {
+			ui.farewell(ctx, [
+				`worktree: ${basename(focus.path)}${focus.branch ? ` (${focus.branch})` : ""}`,
+				`  cd ${focus.path}`,
+			]);
+		}
 		replaceSession(undefined);
 		ui.clearAll(ctx);
 	});

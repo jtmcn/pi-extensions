@@ -147,4 +147,40 @@ function setup() {
 	ok("no UI: shutdown touches nothing", ctx.calls.status.length === 0 && ctx.calls.widget.length === 0);
 }
 
+// ===================================================== farewell
+
+// Unlike `say`, this one is keyed on `mode` alone: at quit the TUI is already
+// coming down, so stdout is the only channel that reaches the user.
+{
+	const { ui, out, err } = setup();
+	const ctx = fakeCtx({ hasUI: true, mode: "tui" });
+	ui.farewell(ctx, ["worktree: lucky-willow (joel/lucky-willow)", "  cd /repo/wt/lucky-willow"]);
+	ok(
+		"quit: writes the block to stdout",
+		out[0] === "worktree: lucky-willow (joel/lucky-willow)\n  cd /repo/wt/lucky-willow\n",
+	);
+	ok("quit: does not notify a UI that is being torn down", ctx.calls.notify.length === 0);
+	ok("quit: nothing on stderr", err.length === 0);
+}
+
+{
+	const { ui, out } = setup();
+	ui.farewell(fakeCtx({ hasUI: false, mode: "print" }), ["one"]);
+	ok("print: still reaches stdout", out[0] === "one\n");
+}
+
+// stdout is a protocol stream in these modes; a human-readable line corrupts it.
+{
+	const { ui, out, err } = setup();
+	ui.farewell(fakeCtx({ hasUI: false, mode: "json" }), ["one"]);
+	ui.farewell(fakeCtx({ hasUI: true, mode: "rpc" }), ["one"]);
+	ok("json and rpc: silent, so the stream stays parseable", out.length === 0 && err.length === 0);
+}
+
+{
+	const { ui, out } = setup();
+	ui.farewell(fakeCtx({ hasUI: true, mode: "tui" }), []);
+	ok("nothing to say: writes no stray newline", out.length === 0);
+}
+
 done();
