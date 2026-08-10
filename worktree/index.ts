@@ -7,6 +7,8 @@
  *   /worktree                 interactive menu
  *   /worktree list            show worktrees for this repo
  *   /worktree new <name>      create a worktree (+ branch) and focus it
+ *   /worktree checkout <branch> [name]
+ *                             create a worktree for a branch that exists
  *   /worktree focus <name>    redirect tool calls into a worktree
  *   /worktree focus off       stop redirecting
  *   /worktree remove <name>   remove a worktree
@@ -33,6 +35,7 @@ import { stat } from "node:fs/promises";
 import { basename } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getRepoInfo, listWorktrees, type RepoInfo } from "../lib/git.ts";
+import { EMPTY_BRANCHES, listBranches } from "./branches.ts";
 import { createCommands } from "./commands.ts";
 import { DEFAULT_CONFIG, loadConfig } from "./config.ts";
 import { applyFocus } from "./focus.ts";
@@ -72,6 +75,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		replaceSession(undefined);
 		commands.setKnown([]);
+		commands.setKnownBranches(EMPTY_BRANCHES);
 
 		const repo = await getRepoInfo(pi, ctx.cwd);
 		if (!repo) {
@@ -100,8 +104,10 @@ export default function (pi: ExtensionAPI) {
 
 		try {
 			commands.setKnown(await listWorktrees(pi, repo.projectRoot));
+			commands.setKnownBranches(await listBranches(pi, repo.projectRoot));
 		} catch {
 			commands.setKnown([]);
+			commands.setKnownBranches(EMPTY_BRANCHES);
 		}
 
 		// Restore focus from the session transcript so /reload and resume keep it.
@@ -236,6 +242,7 @@ export default function (pi: ExtensionAPI) {
 			getSessionCtx: () => session?.ctx,
 			setFocus,
 			setKnown: commands.setKnown,
+			setKnownBranches: commands.setKnownBranches,
 		}),
 	);
 }

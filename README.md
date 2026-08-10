@@ -42,6 +42,7 @@ extensions/
 ├── typecheck.sh        tsc over every extension (no build step otherwise)
 └── worktree/           an extension (loaded via worktree/index.ts)
     ├── index.ts
+    ├── branches.ts
     ├── config.ts
     ├── focus.ts
     ├── gh.ts

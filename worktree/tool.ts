@@ -15,6 +15,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { listWorktrees, type RepoInfo, slugify, type Worktree } from "../lib/git.ts";
+import { type BranchList, listBranches } from "./branches.ts";
 import type { WorktreeConfig } from "./config.ts";
 import type { FocusTarget } from "./focus.ts";
 import { type CommandRunner, createWorktree } from "./worktrees.ts";
@@ -28,10 +29,12 @@ export interface ToolDeps {
 	setFocus: (ctx: ExtensionContext, target: FocusTarget | undefined, announce?: boolean) => void;
 	/** Keep the slash command's completion cache in step after a create. */
 	setKnown: (worktrees: Worktree[]) => void;
+	/** Same, for the branch cache `checkout` completes from. */
+	setKnownBranches: (branches: BranchList) => void;
 }
 
 export function createWorktreeTool(deps: ToolDeps) {
-	const { runner, getRepo, getConfig, getSessionCtx, setFocus, setKnown } = deps;
+	const { runner, getRepo, getConfig, getSessionCtx, setFocus, setKnown, setKnownBranches } = deps;
 
 	return {
 		name: "worktree",
@@ -87,7 +90,12 @@ export function createWorktreeTool(deps: ToolDeps) {
 					sourceWorktree: repo.worktreeRoot,
 					signal,
 				});
-				setKnown((await listWorktrees(runner, repo.projectRoot)).filter((wt) => !wt.bare));
+				// Completion caches only. The worktree exists either way, so a git call
+				// failing here must not turn a successful create into an error.
+				try {
+					setKnown((await listWorktrees(runner, repo.projectRoot)).filter((wt) => !wt.bare));
+					setKnownBranches(await listBranches(runner, repo.projectRoot));
+				} catch {}
 
 				// Move the model into the new worktree, same as `/worktree new`. Without
 				// a context there is no status line to update, so focus would be invisible

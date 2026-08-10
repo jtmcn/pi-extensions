@@ -447,4 +447,92 @@ if (OPTIONAL_BARE_REPO && (await exists(join(OPTIONAL_BARE_REPO, ".bare")))) {
 }
 
 await rm(root, { recursive: true, force: true });
+
+// ================================= create: tracking an existing remote branch
+
+{
+	const pair = await realpath(await mkdtemp(join(tmpdir(), "pi-worktree-track-")));
+	const upstream = join(pair, "upstream");
+	await pexec("git", ["init", "-q", "-b", "main", upstream]);
+	await pexec("git", ["config", "user.email", "test@example.com"], { cwd: upstream });
+	await pexec("git", ["config", "user.name", "Test"], { cwd: upstream });
+	await writeFile(join(upstream, "a.txt"), "hi\n");
+	await pexec("git", ["add", "-A"], { cwd: upstream });
+	await pexec("git", ["commit", "-qm", "init"], { cwd: upstream });
+	await pexec("git", ["branch", "alice/hotfix"], { cwd: upstream });
+	await pexec("git", ["branch", "shadowed"], { cwd: upstream });
+
+	const down = join(pair, "down");
+	await pexec("git", ["clone", "-q", upstream, down]);
+	await pexec("git", ["config", "user.email", "test@example.com"], { cwd: down });
+	await pexec("git", ["config", "user.name", "Test"], { cwd: down });
+	const trackCfg = { ...config.DEFAULT_CONFIG, branchPrefix: "joel/", copyFiles: [] };
+
+	const tracked = await worktrees.createWorktree(runner, {
+		name: "alice-hotfix",
+		branch: "alice/hotfix",
+		track: "origin/alice/hotfix",
+		config: trackCfg,
+		projectRoot: down,
+		sourceWorktree: down,
+	});
+	ok("track: local branch created", tracked.createdBranch === true && tracked.branch === "alice/hotfix");
+	ok("track: reported on the result", tracked.track === "origin/alice/hotfix", String(tracked.track));
+	ok("track: no base was resolved", tracked.base === undefined, String(tracked.base));
+	const upstreamRef = (await pexec("git", ["config", "branch.alice/hotfix.merge"], { cwd: down })).stdout.trim();
+	ok("track: upstream configured", upstreamRef === "refs/heads/alice/hotfix", upstreamRef);
+	ok("track: checked out at the worktree", (await pexec("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: tracked.path })).stdout.trim() === "alice/hotfix");
+
+	// A local branch that already exists must be used as it stands: it may hold
+	// commits the remote does not, and `track` must not cause a reset.
+	await pexec("git", ["branch", "shadowed", "origin/shadowed"], { cwd: down });
+	const wtForCommit = join(pair, "tmp-wt");
+	await pexec("git", ["worktree", "add", "-q", wtForCommit, "shadowed"], { cwd: down });
+	await pexec("git", ["commit", "-qm", "unpushed", "--allow-empty"], { cwd: wtForCommit });
+	const head = (await pexec("git", ["rev-parse", "shadowed"], { cwd: down })).stdout.trim();
+	await pexec("git", ["worktree", "remove", wtForCommit], { cwd: down });
+
+	const shadowed = await worktrees.createWorktree(runner, {
+		name: "shadowed",
+		branch: "shadowed",
+		track: "origin/shadowed",
+		config: trackCfg,
+		projectRoot: down,
+		sourceWorktree: down,
+	});
+	ok("track: existing local branch is reused, not recreated", shadowed.createdBranch === false);
+	ok("track: no tracking reported when the local branch won", shadowed.track === undefined, String(shadowed.track));
+	ok("track: unpushed commit survives", (await pexec("git", ["rev-parse", "shadowed"], { cwd: down })).stdout.trim() === head);
+
+	await rejects(
+		"track: base and track together are rejected",
+		() =>
+			worktrees.createWorktree(runner, {
+				name: "both",
+				branch: "both",
+				base: "main",
+				track: "origin/main",
+				config: trackCfg,
+				projectRoot: down,
+				sourceWorktree: down,
+			}),
+		/mutually exclusive/,
+	);
+	await rejects(
+		"track: unknown remote ref rejected",
+		() =>
+			worktrees.createWorktree(runner, {
+				name: "ghost",
+				branch: "ghost",
+				track: "origin/ghost",
+				config: trackCfg,
+				projectRoot: down,
+				sourceWorktree: down,
+			}),
+		/does not exist/,
+	);
+
+	await rm(pair, { recursive: true, force: true });
+}
+
 done();
