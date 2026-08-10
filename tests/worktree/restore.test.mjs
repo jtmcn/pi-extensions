@@ -284,4 +284,39 @@ const focusEntry = (data) => ({
 	await rm(dir, { recursive: true, force: true });
 }
 
+// ---------------------------------------- unfocused session shows repo branch -----
+//
+// Mutation: change `active.focus ? active.focus.branch : repo.branch` back to
+// `active.focus?.branch` — this assertion must FAIL because `branch` becomes
+// `undefined` and `⑂ main` disappears from the panel.
+{
+	const { dir } = await makeRepo();
+	const h = harness(dir, []);
+	panels.resetPanels("worktree");
+	await h.fire("session_start");
+	const panel = panels.listPanels().find((p) => p.owner === "worktree");
+	const rendered = panel?.render(120).join("\n") ?? "";
+	ok("unfocused: panel shows repo branch", rendered.includes("⑂ main"), rendered);
+	await h.fire("session_shutdown");
+	await rm(dir, { recursive: true, force: true });
+}
+
+// ---------------------------------------- focused session with undefined branch -----
+//
+// Mutation: change the fix to `active.focus?.branch ?? repo.branch` — this
+// assertion must FAIL because `branch` picks up `repo.branch` even though the
+// session is focused, so `⑂ main` leaks into the focused panel.
+{
+	const { dir, worktree } = await makeRepo();
+	// Focus entry has a path but no recorded branch (focus.branch === undefined).
+	const h = harness(dir, [focusEntry({ path: worktree })]);
+	panels.resetPanels("worktree");
+	await h.fire("session_start");
+	const panel = panels.listPanels().find((p) => p.owner === "worktree");
+	const rendered = panel?.render(120).join("\n") ?? "";
+	ok("focused with undefined branch: panel does not show repo branch", !rendered.includes("⑂ main"), rendered);
+	await h.fire("session_shutdown");
+	await rm(dir, { recursive: true, force: true });
+}
+
 done();
