@@ -42,7 +42,7 @@ This adds a `dashboard` extension that replaces the whole screen.
   personal (22)
     ci-watch                  ▃  coordinator                 ▄  dagster-expert   ▅
     ...
-  pi-subagents@0.38.0 (1)
+  pi-subagents (1)
     pi-subagents              ▂
 
 [MCP]  3 servers · 24 tools
