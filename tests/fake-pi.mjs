@@ -47,11 +47,15 @@ const pexec = promisify(execFile);
  *                              string (same for every session) or a zero-arg
  *                              function called per `getSystemPrompt()` invocation,
  *                              so the caller can change it between sessions.
+ * @param options.mode  What `ctx.mode` returns. Accepts a string (same for
+ *                      every session) or a zero-arg function called per
+ *                      `session_start`, so the caller can change it between
+ *                      sessions. Follow the same shape as `systemPrompt`.
  */
 export function createFakePi({
 	cwd = process.cwd(),
 	hasUI = true,
-	mode = "interactive",
+	mode: modeInput = "interactive",
 	exec,
 	entries = () => [],
 	projectTrusted = false,
@@ -63,6 +67,8 @@ export function createFakePi({
 	const resolvePrompt = typeof systemPromptInput === "function"
 		? systemPromptInput
 		: () => systemPromptInput;
+	// Same for mode: a function lets the same pi run TUI and non-TUI sessions.
+	const resolveMode = typeof modeInput === "function" ? modeInput : () => modeInput;
 
 	const events = new Map();
 	const tools = new Map();
@@ -131,6 +137,7 @@ export function createFakePi({
 
 	/** A context, recording its own writes as well as the aggregate ones. */
 	const makeCtx = () => {
+		const mode = resolveMode();
 		const own = { statuses: [], widgets: [], notices: [], headers: [] };
 		const ctx = {
 			cwd,

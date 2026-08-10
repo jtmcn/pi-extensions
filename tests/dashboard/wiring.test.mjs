@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { assertions, loadExt } from "../harness.mjs";
@@ -9,6 +9,15 @@ const extension = (await loadExt("dashboard/index.ts")).default;
 const panels = await loadExt("lib/panels.ts");
 
 const dir = await mkdtemp(join(tmpdir(), "dash-wiring-"));
+
+// Pin PI_CODING_AGENT_DIR to an isolated temp dir so defaultSettingsPath()
+// resolves here, not to the developer's real ~/.pi/agent/settings.json.
+// Pattern from tests/mcp/mcp.test.mjs:343-357.
+const agentDir = join(dir, "pi_agent");
+await mkdir(agentDir, { recursive: true });
+const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+process.env.PI_CODING_AGENT_DIR = agentDir;
+
 const skillPath = join(dir, "SKILL.md");
 await writeFile(skillPath, "x".repeat(4000));
 
@@ -120,34 +129,35 @@ for (const mode of ["print", "json", "rpc"]) {
 
 // --- A non-TUI second session clears the model (model = undefined is live) ---
 //
-// Mutation: deleting `model = undefined;` from session_start. When a non-TUI
-// session fires, model is never re-set, so the old component would still render
-// the previous session's skills. With the reset, model becomes undefined and
-// render returns [].
+// Mutation: deleting `model = undefined;` from session_start. After a TUI
+// session sets the model and stores a component, a subsequent non-TUI session
+// fires `model = undefined` then returns early without calling setHeader. The
+// still-live component from session 1 must now render [], because model is
+// undefined.
+//
+// fake-pi.mjs supports a per-session mode function (like systemPrompt) so the
+// same pi closure can run both sessions. Without that, the test would need two
+// separate pi instances and could not observe the shared `model` variable.
 {
 	panels.resetPanels("dashboard");
-	const h = harness(); // TUI mode → sets model and component
+	let sessionMode = "tui";
+	const h = createFakePi({ cwd: dir, mode: () => sessionMode, systemPrompt, commands });
 	extension(h.pi);
-	await h.fire("session_start");
+
+	await h.fire("session_start"); // mode = tui → model set, header registered
 	const component = h.header();
 	ok("first TUI session has a component", component !== undefined);
 	ok("first TUI session renders", component.render(120).length > 0);
 
-	// A non-TUI session: model = undefined, then early return — setHeader never
-	// called, so the same component is still active. Its render must return [].
-	const h2 = createFakePi({ cwd: dir, mode: "print", hasUI: false, systemPrompt, commands });
-	// Share the same extension closure (same pi) so the second session_start
-	// fires on the same model variable.
-	// We can't reuse h.pi with a different harness, so this is tested by firing
-	// a non-TUI session on the same harness: mode is fixed at harness creation.
-	// Instead we verify indirectly: the second fire in a TUI harness uses a new
-	// model. If model=undefined were deleted, the component from session 1 would
-	// still render even while session 2 runs — which the previous block covers.
-	// This block verifies the shape of the early-return: no header for non-TUI.
-	const noHeader = createFakePi({ cwd: dir, mode: "print", hasUI: false, systemPrompt, commands });
-	extension(noHeader.pi);
-	await noHeader.fire("session_start");
-	ok("non-TUI session sets no header", noHeader.header() === undefined);
+	sessionMode = "print";
+	await h.fire("session_start"); // mode = print → model = undefined, early return
+	// setHeader was not called, so component is still the one from session 1.
+	// But model is now undefined, so render() must return [].
+	ok("non-TUI session sets no header", h.header() === component);
+	ok(
+		"live component renders [] after model is cleared by non-TUI session",
+		component.render(120).length === 0,
+	);
 }
 
 // --- Disposed component must not repaint on panel updates (unsubscribe is live) ---
@@ -226,15 +236,55 @@ for (const mode of ["print", "json", "rpc"]) {
 	ok("unparseable block degrades", h.header().render(120).join("\n").includes("unavailable"));
 }
 
-// --- /dashboard setup ---
+
+// --- /dashboard setup: usage notice and first-run notification ---
+//
+// When quietStartup is not set, session_start fires a first-run notification
+// that also contains the text "/dashboard setup". The usage notice and the
+// notification are two separate messages; asserting both explicitly prevents
+// a corrupted usage string from surviving behind the notification match.
 {
+	panels.resetPanels("dashboard");
+	// agentDir is empty at this point — no settings.json — so quietStartup is unset.
 	const h = harness();
 	extension(h.pi);
 	await h.fire("session_start");
 	ok("registers the command", h.commands.has("dashboard"));
+	// Notification fires on session_start when quietStartup is not set.
+	// Note: the notification string uses a curly apostrophe (U+2019) in "pi's";
+	// match on "startup sections are visible above" to avoid encoding fragility.
+	ok(
+		"first-run notification fires when quietStartup is unset",
+		h.messages().some((m) => m.includes("startup sections are visible above")),
+	);
 
 	await h.command("dashboard", "");
-	ok("bare command explains usage", h.messages().some((m) => m.includes("/dashboard setup")));
+	// Assert the usage message with its "usage:" prefix — the notification also
+	// contains "/dashboard setup", so a bare .includes check would survive
+	// a corrupted usage string.
+	ok(
+		"bare command explains usage",
+		h.messages().some((m) => m.startsWith("usage: /dashboard setup")),
+	);
 }
+
+// --- /dashboard setup: no notification when quietStartup is already true ---
+{
+	panels.resetPanels("dashboard");
+	// Write quietStartup: true so the notification should not fire.
+	const settingsPath = join(agentDir, "settings.json");
+	await writeFile(settingsPath, JSON.stringify({ quietStartup: true }));
+	const h = harness();
+	extension(h.pi);
+	await h.fire("session_start");
+	ok(
+		"no notification when quietStartup is already true",
+		!h.messages().some((m) => m.includes("startup sections are visible above")),
+	);
+}
+
+// Restore PI_CODING_AGENT_DIR before exit.
+if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
 
 done();
