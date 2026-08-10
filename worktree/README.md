@@ -198,10 +198,52 @@ PR appears promptly.
 Everything fails silently: no `gh`, not logged in, no network, or a non-GitHub
 remote simply means no PR text.
 
+## herdr
+
+[herdr](https://herdr.dev) labels a space from its pane's `cwd` and derives the
+branch the same way, so a bare-layout checkout (`~/Code/hellos/main`) reads
+`main` — and keeps reading `main` after `git switch`, and after `/worktree
+focus`, since focus never changes `cwd`.
+
+When pi runs inside herdr with a UI, the branch on the footer is also reported
+to it, on every paint:
+
+```
+herdr workspace report-metadata $HERDR_WORKSPACE_ID --source pi --token pi_branch=<branch>
+herdr pane report-metadata $HERDR_PANE_ID --source pi --title "π - <branch>"
+```
+
+The value is the branch pi displays — the focused worktree's, else the
+session's — with `branchPrefix` stripped, since it is on every branch you make
+and the sidebar is 18–36 columns wide. A detached HEAD clears both rather than
+showing a SHA. Unchanged branches cost nothing: the reporter dedupes, so the
+60s PR poll does not fork a process to repeat itself.
+
+The token renders only if a row layout names it:
+
+```toml
+[ui.sidebar.spaces]
+rows = [["state_icon", "workspace"], ["$pi_branch", "git_status"]]
+```
+
+That replaces herdr's built-in `branch` token. Keeping both is correct for
+spaces with no pi in them, but every pi space then reads `fix-parser main`.
+
+Nothing is reported outside herdr, or under `pi -p`. The first failure — no
+`herdr` on `PATH`, a dead socket — switches it off for the session, like a
+missing `gh`. `session_shutdown` clears both surfaces; a `kill -9` leaves the
+last value on screen until the next pi session in that space reports over it.
+
+Two known gaps: workspace tokens are per space, so two pi sessions in one space
+show whichever painted last (pane titles stay right), and the space *label* is
+left alone — it is `basename(cwd)`, and only `workspace rename` changes it,
+which is persistent state a crash would strand.
+
 ## Files
 
 ```
 lib/git.ts               shared git helpers (used by other extensions too)
+lib/herdr.ts             reporting the displayed branch to herdr (pure + one CLI)
 worktree/index.ts        wiring only: event handlers and registration
 worktree/session.ts      per-session state, focus, and the session's monitor
 worktree/pr-monitor.ts   the PR status state machine
@@ -232,7 +274,7 @@ node tests/run-all.mjs worktree     # this extension only
 npm test                            # the whole collection
 ```
 
-Eleven files under `tests/worktree/`. `worktree.test.mjs` runs against throwaway
+Thirteen files under `tests/worktree/`. `worktree.test.mjs` runs against throwaway
 repos in `$TMPDIR`, covering both plain and bare layouts, plus pure-function
 tests for focus rewriting, argument parsing, name matching and config
 precedence. Set `PI_TEST_BARE_REPO` to also check a real bare-layout checkout on
@@ -247,6 +289,11 @@ subprocesses.
 extracted units directly, with injected runners and clocks and no fake `pi` at
 all — single flight, the pending re-run, backoff, idle suspension, disposal,
 focus persistence, and the `hasUI` × print matrix.
+
+`herdr.test.mjs` covers the reporter as a fake-runner unit — argv order, prefix
+stripping, deduping, and the first-failure switch-off — and
+`herdr-wiring.test.mjs` covers when a reporter exists at all: under herdr, with
+a UI, cleared at shutdown.
 
 `restore.test.mjs` covers restoring focus from the transcript through a fake
 `pi` with real git: the last entry winning, a cleared entry meaning unfocused,
