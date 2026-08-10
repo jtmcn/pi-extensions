@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { assertions, loadExt } from "../harness.mjs";
 
-const { ok, done } = assertions();
+const { ok, skip, done } = assertions();
 const { enableQuietStartup, defaultSettingsPath } = await loadExt("dashboard/settings.ts");
 
 const dir = join(await mkdtemp(join(tmpdir(), "dash-settings-")), "agent");
@@ -57,6 +57,7 @@ ok("created nested file has the setting", JSON.parse(await readFile(nested, "utf
 // An unreadable existing file must not be silently treated as a first-run
 // (ENOENT): touching the user’s config when we couldn’t even read it is data loss.
 if (process.getuid?.() !== 0) {
+	// chmod 0o000 — completely inaccessible: read fails, write fails.
 	const locked = join(dir, "locked.json");
 	await writeFile(locked, JSON.stringify({ existing: true }));
 	await chmod(locked, 0o000);
@@ -67,9 +68,42 @@ if (process.getuid?.() !== 0) {
 	} finally {
 		await chmod(locked, 0o644);
 	}
+
+	// chmod 0o200 — write-only: read fails with EACCES (not ENOENT), but write succeeds.
+	// The ENOENT-distinction guard must recognise this as not-first-run and fail,
+	// not clobber the file. Neutralising `if (code !== "ENOENT")` to `if (false)`
+	// would make it treat the EACCES as first-run and overwrite the file → ok: true.
+	const writeOnly = join(dir, "write-only.json");
+	await writeFile(writeOnly, JSON.stringify({ existing: true }));
+	await chmod(writeOnly, 0o200);
+	try {
+		const writeOnlyResult = await enableQuietStartup(writeOnly);
+		ok("write-only file (EACCES, not ENOENT) fails rather than being treated as first-run", writeOnlyResult.ok === false);
+		ok("write-only file error is not a parse error", !(writeOnlyResult.reason ?? "").includes("parse"));
+	} finally {
+		await chmod(writeOnly, 0o644);
+	}
+
+	// chmod 0o444 on the target — readable but not writable: read succeeds,
+	// write fails. The write try/catch must be present; removing it lets the
+	// error propagate unhandled.
+	const readOnly = join(dir, "read-only.json");
+	await writeFile(readOnly, JSON.stringify({ existing: true }));
+	await chmod(readOnly, 0o444);
+	try {
+		const readOnlyResult = await enableQuietStartup(readOnly);
+		ok("read-only file write fails gracefully", readOnlyResult.ok === false);
+		ok("read-only file error mentions the path", (readOnlyResult.reason ?? "").includes(readOnly));
+	} finally {
+		await chmod(readOnly, 0o644);
+	}
 } else {
-	ok("unreadable file fails rather than being treated as first-run", true); // skip: running as root
-	ok("unreadable file error is not a parse error", true);
+	skip("unreadable file (chmod 0o000) fails rather than being treated as first-run — running as root, permissions not enforced");
+	skip("unreadable file error is not a parse error — skipped");
+	skip("write-only file (EACCES) fails rather than being treated as first-run — skipped");
+	skip("write-only file error is not a parse error — skipped");
+	skip("read-only file write fails gracefully — skipped");
+	skip("read-only file error mentions the path — skipped");
 }
 
 done();
