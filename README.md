@@ -64,6 +64,7 @@ extension means adding a directory and a test file — no script to edit.
 
 | Name | What it does |
 |---|---|
+| [`dashboard`](dashboard/README.md) | Startup screen: mascot, location and Graphite stack, loaded skills grouped by source with size bars, and MCP server health. Run `/dashboard setup` once to suppress pi's built-in listing. |
 | [`mcp`](mcp/README.md) | MCP client: spawn stdio MCP servers and expose their tools as native pi tools. |
 | [`worktree`](worktree/README.md) | Manage git worktrees; optionally redirect the agent's tool calls into one without restarting the session. Shows the branch's PR in the status bar. |
 

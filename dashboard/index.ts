@@ -26,6 +26,7 @@
 import { type ExtensionAPI, VERSION } from "@earendil-works/pi-coding-agent";
 import { listPanels, subscribe } from "../lib/panels.ts";
 import { type DashboardModel, renderDashboard } from "./render.ts";
+import { defaultSettingsPath, enableQuietStartup } from "./settings.ts";
 import { measureSkills } from "./sizes.ts";
 import { parseContextFiles, parseSkills } from "./skills.ts";
 
@@ -94,5 +95,26 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", () => {
 		model = undefined;
+	});
+
+	// Writing to the user's settings file changes their environment, so this
+	// stays a slash command rather than a model-callable tool.
+	pi.registerCommand("dashboard", {
+		description: "Set up the startup dashboard",
+		handler: async (args, ctx) => {
+			if (args.trim() !== "setup") {
+				ctx.ui.notify("usage: /dashboard setup", "info");
+				return;
+			}
+			const result = await enableQuietStartup(defaultSettingsPath());
+			if (!result.ok) {
+				ctx.ui.notify(result.reason, "warning");
+				return;
+			}
+			ctx.ui.notify(
+				`quietStartup enabled in ${result.path}. Restart pi to see the dashboard alone.`,
+				"info",
+			);
+		},
 	});
 }

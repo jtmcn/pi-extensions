@@ -106,4 +106,15 @@ for (const mode of ["print", "json", "rpc"]) {
 	ok("unparseable block degrades", h.header(120).render(120).join("\n").includes("unavailable"));
 }
 
+// --- /dashboard setup ---
+{
+	const h = harness();
+	extension(h.pi);
+	await h.fire("session_start");
+	ok("registers the command", h.commands.has("dashboard"));
+
+	await h.command("dashboard", "");
+	ok("bare command explains usage", h.messages().some((m) => m.includes("/dashboard setup")));
+}
+
 done();
