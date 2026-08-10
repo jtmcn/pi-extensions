@@ -19,7 +19,7 @@ A pi session running under herdr reports its current branch to two surfaces:
 
 | Surface | Call | Shown as |
 |---|---|---|
-| space sidebar row | `workspace report-metadata <ws> --source pi --token pi_branch <branch>` | `$pi_branch` token |
+| space sidebar row | `workspace report-metadata <ws> --source pi --token pi_branch=<branch>` | `$pi_branch` token |
 | pane title | `pane report-metadata <pane> --source pi --title "π - <branch>"` | pane title / border |
 
 "Current branch" means the branch pi displays: the focused worktree's branch
@@ -83,13 +83,15 @@ Measured against herdr 0.8.0, not documented upstream: the positional argument
 comes **first**, and options take a space-separated value.
 
 ```
-herdr workspace report-metadata wF --source pi --token pi_branch fix-parser   ok
+herdr workspace report-metadata wF --source pi --token pi_branch=fix-parser   ok
 herdr workspace report-metadata --source pi --token pi_branch=x wF            "unknown option: wF"
 herdr workspace report-metadata wF --source=pi                                "unknown option: --source=pi"
 ```
 
-`--source=pi` and `--token=k=v` are both rejected, so the argv is asserted as an
-ordered array in the tests rather than by substring.
+The token *value* is one `NAME=VALUE` argument, but `--source=pi` and
+`--token=NAME=VALUE` are both rejected: the flag itself takes a space-separated
+value. So the argv is asserted as an ordered array in the tests rather than by
+substring.
 
 ## Lifecycle
 
@@ -141,7 +143,7 @@ lib helpers are tested alongside their consumer here, as `lib/git.ts` is.
 
 | Case | Assertion |
 |---|---|
-| argv shape | exact ordered argv, positional first |
+| argv shape | exact ordered argv, positional first, `--token pi_branch=<v>` |
 | no herdr env | zero runner calls across several reports |
 | prefix stripping | `joel/fix-parser` → `fix-parser`; `alice/hotfix` untouched |
 | detached HEAD | clears both surfaces |
