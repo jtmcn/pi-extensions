@@ -34,12 +34,19 @@
 import { stat } from "node:fs/promises";
 import { basename } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { getRepoInfo, listWorktrees, type RepoInfo } from "../lib/git.ts";
+import { aheadBehind, countDirty, getRepoInfo, listWorktrees, type RepoInfo } from "../lib/git.ts";
 import { createHerdrReporter, type HerdrReporter, herdrTarget } from "../lib/herdr.ts";
 import { EMPTY_BRANCHES, listBranches } from "./branches.ts";
 import { createCommands } from "./commands.ts";
 import { DEFAULT_CONFIG, loadConfig } from "./config.ts";
 import { applyFocus } from "./focus.ts";
+import {
+	beginLocationCycle,
+	clearLocationPanel,
+	isCurrentLocationCycle,
+	publishLocationPanel,
+	readStack,
+} from "./panel.ts";
 import { createSession, FOCUS_ENTRY_TYPE, type WorktreeSession } from "./session.ts";
 import { createWorktreeTool } from "./tool.ts";
 import { createUi } from "./ui.ts";
@@ -120,8 +127,10 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		replaceSession(undefined);
+		clearLocationPanel();
 		commands.setKnown([]);
 		commands.setKnownBranches(EMPTY_BRANCHES);
+		const cycle = beginLocationCycle();
 
 		const repo = await getRepoInfo(pi, ctx.cwd);
 		if (!repo) {
@@ -178,6 +187,22 @@ export default function (pi: ExtensionAPI) {
 			say(ctx, `focused worktree ${restored.path} no longer exists; focus cleared`, "warning");
 			active.setFocus(ctx, undefined, false);
 		}
+		// Publish location immediately with git facts; gt stack read runs unawaited.
+		// `ctx` is not touched inside the callback — publishing goes through the
+		// registry so no stale-context crash is possible. The cycle guard ensures a
+		// superseded session's result doesn't overwrite the current location.
+		const location = {
+			path: repo.worktreeRoot ?? ctx.cwd,
+			branch: repo.branch,
+			dirty: await countDirty(pi, ctx.cwd),
+			...((await aheadBehind(pi, ctx.cwd)) ?? {}),
+		};
+		publishLocationPanel(location, { kind: "pending" });
+		void readStack(pi, ctx.cwd, repo.branch).then((stack) => {
+			if (!isCurrentLocationCycle(cycle)) return;
+			publishLocationPanel(location, stack);
+		});
+
 		active.paint(ctx);
 		active.prMonitor.refresh();
 	});
@@ -211,7 +236,10 @@ export default function (pi: ExtensionAPI) {
 		// silently dispose the newly created session. Workspace tokens have no TTL,
 		// so a half-finished clear leaves a stale branch on herdr's sidebar.
 		const retiring = reporter;
+		// Invalidate any in-flight readStack so its result cannot publish after shutdown.
+		beginLocationCycle();
 		replaceSession(undefined);
+		clearLocationPanel();
 		ui.clearAll(ctx);
 		// Cap the clear at 1s: pi sends SIGTERM and SIGKILLs 5s later; one wedged
 		// herdr call costs HERDR_TIMEOUT_MS (2s) and clear() can await up to four
