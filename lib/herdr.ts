@@ -192,13 +192,27 @@ export function createHerdrReporter(options: HerdrReporterOptions): HerdrReporte
 		...(value ? ["--token", `${BRANCH_TOKEN}=${value}`] : ["--clear-token", BRANCH_TOKEN]),
 	];
 
+	/**
+	 * The pane carries the branch twice: as the title, and as a token.
+	 *
+	 * herdr's two sidebar panels read different metadata — Space rows can only
+	 * name workspace tokens, Agent rows only pane ones — so the Agents panel
+	 * cannot see `pi_branch` on the workspace. Reporting it here too is what puts
+	 * the branch in that panel, and it rides along on the command the title
+	 * already needed, so it costs no extra spawn.
+	 *
+	 * Unlike the workspace token, this one is per *pane*: two pi sessions sharing
+	 * a space each keep their own value here.
+	 */
 	const paneArgs = (value: string | undefined): string[] => [
 		"pane",
 		"report-metadata",
 		target.paneId,
 		"--source",
 		SOURCE,
-		...(value ? ["--title", `π - ${value}`] : ["--clear-title"]),
+		...(value
+			? ["--title", `π - ${value}`, "--token", `${BRANCH_TOKEN}=${value}`]
+			: ["--clear-title", "--clear-token", BRANCH_TOKEN]),
 	];
 
 	const send = async (branch: string | undefined): Promise<void> => {

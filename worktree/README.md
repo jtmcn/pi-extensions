@@ -210,7 +210,7 @@ to it, on every paint:
 
 ```
 herdr workspace report-metadata $HERDR_WORKSPACE_ID --source pi --token pi_branch=<branch>
-herdr pane report-metadata $HERDR_PANE_ID --source pi --title "π - <branch>"
+herdr pane report-metadata $HERDR_PANE_ID --source pi --title "π - <branch>" --token pi_branch=<branch>
 ```
 
 The value is the branch pi displays — the focused worktree's, else the
@@ -224,15 +224,31 @@ every poll and on input — including in a session where `gh` is unavailable and
 nothing is polling, so a `git switch` there still reaches herdr on the next
 prompt.
 
-The token renders only if a row layout names it:
+Two reports, because herdr's two sidebar panels read different metadata: Space
+rows can only name workspace tokens, Agent rows only pane ones. The pane token
+rides along on the command the title already needed, so the Agents panel costs
+no extra process. It is also per *pane*, so unlike the workspace token it stays
+correct when two pi sessions share a space.
+
+Neither renders unless a row layout names it:
 
 ```toml
 [ui.sidebar.spaces]
 rows = [["state_icon", "workspace"], ["$pi_branch", "git_status"]]
+
+[ui.sidebar.agents]
+rows = [["state_icon", "workspace", "tab"], ["$pi_branch"]]
 ```
 
-That replaces herdr's built-in `branch` token. Keeping both is correct for
-spaces with no pi in them, but every pi space then reads `fix-parser main`.
+In the Space rows that replaces herdr's built-in `branch` token. Keeping both is
+correct for spaces with no pi in them, but every pi space then reads
+`fix-parser main`. The Agent rows shown here drop the built-in `agent` name for
+the branch; keep `agent` in the second row if you run several kinds of agent and
+need to tell them apart.
+
+The Agents panel cannot be turned off in herdr 0.8.0 — `rows = []` empties it but
+it keeps its share of the sidebar — so filling it is the only way to reclaim
+that space.
 
 Nothing is reported outside herdr, or under `pi -p`. The first failure — no
 `herdr` on `PATH`, a dead socket — switches it off for the session, like a

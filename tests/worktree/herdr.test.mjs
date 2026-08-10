@@ -66,12 +66,27 @@ function scriptedRunner(results = []) {
 			]),
 		JSON.stringify(runner.calls[0]?.args),
 	);
+	// The pane carries the token as well as the title, in the same command: the
+	// Agents panel renders pane-reported values as `$pi_branch`, and its rows
+	// cannot read the workspace token. Riding along on the existing call is why
+	// showing the branch there costs no extra spawn.
 	ok(
-		"argv: pane title, positional first",
+		"argv: pane title and token, positional first",
 		JSON.stringify(runner.calls[1]?.args) ===
-			JSON.stringify(["pane", "report-metadata", "wF:p1", "--source", "pi", "--title", "π - fix-parser"]),
+			JSON.stringify([
+				"pane",
+				"report-metadata",
+				"wF:p1",
+				"--source",
+				"pi",
+				"--title",
+				"π - fix-parser",
+				"--token",
+				"pi_branch=fix-parser",
+			]),
 		JSON.stringify(runner.calls[1]?.args),
 	);
+	ok("argv: still one call per surface", runner.calls.length === 2, `${runner.calls.length} calls`);
 	ok("argv: passes a timeout", runner.calls[0]?.options.timeout === HERDR_TIMEOUT_MS);
 }
 
@@ -84,6 +99,7 @@ function scriptedRunner(results = []) {
 	await settle();
 	ok("prefix: the user's own prefix is dropped", runner.calls[0]?.args.includes("pi_branch=fix-parser"), JSON.stringify(runner.calls[0]?.args));
 	ok("prefix: the title drops it too", runner.calls[1]?.args.includes("π - fix-parser"));
+	ok("prefix: the pane token drops it too", runner.calls[1]?.args.includes("pi_branch=fix-parser"), JSON.stringify(runner.calls[1]?.args));
 }
 
 {
@@ -108,9 +124,18 @@ function scriptedRunner(results = []) {
 		JSON.stringify(runner.calls[0]?.args),
 	);
 	ok(
-		"detached: clears the title",
+		"detached: clears the title and the pane token",
 		JSON.stringify(runner.calls[1]?.args) ===
-			JSON.stringify(["pane", "report-metadata", "wF:p1", "--source", "pi", "--clear-title"]),
+			JSON.stringify([
+				"pane",
+				"report-metadata",
+				"wF:p1",
+				"--source",
+				"pi",
+				"--clear-title",
+				"--clear-token",
+				"pi_branch",
+			]),
 		JSON.stringify(runner.calls[1]?.args),
 	);
 }
