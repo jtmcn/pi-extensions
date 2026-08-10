@@ -35,6 +35,30 @@ for (const [label, width] of [["120", 120], ["90", 90], ["60", 60], ["40", 40]])
 	ok(`no line exceeds width ${label}`, longest <= width, `longest was ${longest}`);
 }
 
+// The sweep above uses 14-char labels ("skill-number-N") which are shorter
+// than the minimum column width (34 chars at width 40). Those labels are
+// padded but never truncated, so the gutter term in `available` is never
+// load-bearing: the lines land ~100 chars wide regardless of whether the
+// gutter is subtracted. The assertions pass even with the gutter deleted.
+//
+// These 57-char labels are always truncated to exactly `labelWidth`. A full
+// multi-column row of them reaches the width boundary, so dropping the gutter
+// term inflates every column by one character and pushes multi-column rows
+// past the limit. The critical widths are 120 (3 cols) and 90 (2 cols);
+// widths 60 and 40 use 1 column so gutter*(cols-1) = 0 either way.
+const wideCells = [...Array(7).keys()].map((i) => ({
+	label: `a-label-that-is-definitely-longer-than-any-column-width-${i}`,
+	bar: "▄",
+}));
+
+for (const [wLabel, wWidth] of [["120 (wide labels)", 120], ["90 (wide labels)", 90], ["60 (wide labels)", 60], ["40 (wide labels)", 40]]) {
+	const wRows = layoutRows(wideCells, wWidth, 4);
+	const wLongest = Math.max(
+		...wRows.map((row) => " ".repeat(4) + row.map((c) => `${c.label} ${c.bar}`).join("  ")).map((line) => line.length),
+	);
+	ok(`no line exceeds width ${wLabel}`, wLongest <= wWidth, `longest was ${wLongest}`);
+}
+
 // Long names must be truncated, not wrapped.
 const long = [{ label: "a-very-long-skill-name-that-will-not-fit-anywhere", bar: "█" }];
 const cramped = layoutRows(long, 40, 4);
