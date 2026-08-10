@@ -34,7 +34,7 @@ export function mcpPanelLines(servers: ServerStatus[], width: number): string[] 
 	const tools = connected.reduce((sum, s) => sum + s.toolCount, 0);
 	const nameWidth = Math.max(...servers.map((s) => s.name.length));
 
-	const lines = [`  ${servers.length} servers · ${tools} tools`];
+	const lines = [`  ${servers.length} ${servers.length === 1 ? "server" : "servers"} · ${tools} tools`];
 	for (const server of servers) {
 		lines.push(`  ${server.name.padEnd(nameWidth)}  ${describe(server)}`);
 	}
