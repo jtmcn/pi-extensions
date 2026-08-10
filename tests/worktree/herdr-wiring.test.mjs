@@ -202,6 +202,11 @@ const saved = { ws: process.env.HERDR_WORKSPACE_ID, pane: process.env.HERDR_PANE
 
 // `/new` while a report is in flight: the old session's remaining write would
 // land on top of the new session's, since both address the same ids.
+//
+// The gate is released as soon as the new session has *issued* its report, not
+// after it has landed: herdr commands are queued per surface, so the new
+// session's workspace write deliberately waits for the retiring session's
+// spawned one to finish. That is the ordering guarantee — old first, new last.
 {
 	process.env.HERDR_WORKSPACE_ID = "wT";
 	process.env.HERDR_PANE_ID = "wT:p1";
@@ -211,6 +216,9 @@ const saved = { ws: process.env.HERDR_WORKSPACE_ID, pane: process.env.HERDR_PANE
 		release = resolve;
 	});
 	const herdrCalls = [];
+	// Completion order, not call order: which write herdr applies LAST is the
+	// whole question, and both sessions report through the same `pi`.
+	const landed = [];
 	const h = createFakePi({
 		cwd: raceRepo,
 		hasUI: true,
@@ -220,6 +228,7 @@ const saved = { ws: process.env.HERDR_WORKSPACE_ID, pane: process.env.HERDR_PANE
 			herdrCalls.push(args);
 			// Wedge the first session's workspace write; everything after runs free.
 			if (herdrCalls.length === 1) await gate;
+			landed.push(args);
 			return gitOk;
 		},
 	});
@@ -229,15 +238,20 @@ const saved = { ws: process.env.HERDR_WORKSPACE_ID, pane: process.env.HERDR_PANE
 
 	await pexec("git", ["switch", "-q", "-c", "feature/two"], { cwd: raceRepo });
 	await h.fire("session_start");
+	release();
 	const replaced = await until(() => herdrCalls.some((args) => args.includes("\u03c0 - feature/two")));
 	ok("wiring: the new session reports its own branch", replaced, JSON.stringify(herdrCalls));
 
-	release();
 	await new Promise((resolve) => setTimeout(resolve, 100));
 	ok(
 		"wiring: a retired session does not retitle the pane behind the new one",
 		herdrCalls.every((args) => !args.includes("\u03c0 - feature/one")),
 		JSON.stringify(herdrCalls),
+	);
+	ok(
+		"wiring: the retired session's workspace write lands before the new one",
+		landed.filter((args) => args[0] === "workspace").at(-1)?.includes("pi_branch=feature/two") === true,
+		JSON.stringify(landed),
 	);
 	await rm(raceRepo, { recursive: true, force: true });
 }

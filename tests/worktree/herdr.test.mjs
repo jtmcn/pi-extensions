@@ -300,6 +300,92 @@ function scriptedRunner(results = []) {
 	);
 }
 
+// =============================================== completion order across sessions
+
+// The retired session's FIRST write cannot be cancelled — it is already spawned,
+// so `isCurrent` cannot stop it. If herdr applies it after the new session's
+// write, the workspace token is stale and stays stale: the new reporter dedupes
+// on `last`, so it never re-reports the branch it already sent.
+//
+// Both reporters share one runner, as they do in production (`runner: pi`, one
+// object per process, sessions come and go), which is what pairs them to the
+// same queue. `completed` records COMPLETION order, not call order: the bug is
+// invisible in argv recorded at call time.
+{
+	const completed = [];
+	let releaseOld;
+	const oldGate = new Promise((resolve) => {
+		releaseOld = resolve;
+	});
+	const runner = {
+		async exec(_command, args) {
+			// The old session's workspace write finishes only after the new session
+			// has reported.
+			if (args[0] === "workspace" && args.includes("pi_branch=old")) await oldGate;
+			completed.push(args);
+			return { stdout: "", stderr: "", code: 0, killed: false };
+		},
+	};
+	let generation = 0;
+	const oldGeneration = ++generation;
+	const retiring = createHerdrReporter({
+		runner,
+		target: TARGET,
+		isCurrent: () => oldGeneration === generation,
+	});
+	retiring.report("old");
+	await settle();
+
+	// session_start: a new reporter owns the same ids and reports its own branch.
+	const freshGeneration = ++generation;
+	retiring.dispose();
+	const fresh = createHerdrReporter({
+		runner,
+		target: TARGET,
+		isCurrent: () => freshGeneration === generation,
+	});
+	fresh.report("new");
+	await settle();
+
+	releaseOld();
+	await settle();
+	const workspaceWrites = completed.filter((args) => args[0] === "workspace");
+	ok(
+		"order: the new session's workspace token lands last",
+		workspaceWrites.at(-1)?.includes("pi_branch=new") === true,
+		JSON.stringify(completed),
+	);
+	ok(
+		"order: the retired session's write still happens, just first",
+		workspaceWrites.length === 2 && workspaceWrites[0]?.includes("pi_branch=old") === true,
+		JSON.stringify(completed),
+	);
+}
+
+// A command that rejects must not take the queue down with it: the next session
+// reports through the same runner, and its writes are chained behind that one.
+{
+	const calls = [];
+	const runner = {
+		async exec(_command, args) {
+			calls.push(args);
+			if (args.includes("pi_branch=boom")) throw new Error("spawn herdr ENOENT");
+			return { stdout: "", stderr: "", code: 0, killed: false };
+		},
+	};
+	const failing = createHerdrReporter({ runner, target: TARGET });
+	failing.report("boom");
+	await settle();
+	const fresh = createHerdrReporter({ runner, target: TARGET });
+	fresh.report("after");
+	await settle();
+	ok(
+		"queue: a rejected command does not wedge the next session",
+		calls.some((args) => args.includes("pi_branch=after")),
+		JSON.stringify(calls),
+	);
+}
+
 // ================================================================== dispose
 
 {

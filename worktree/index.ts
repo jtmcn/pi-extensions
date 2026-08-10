@@ -75,6 +75,10 @@ export default function (pi: ExtensionAPI) {
 	 * session starts reporting (`/new` fires session_shutdown, then
 	 * session_start). Both sessions write the same workspace and pane id, so the
 	 * loser of that race must drop its remaining writes rather than land last.
+	 *
+	 * The write it has already spawned cannot be dropped; lib/herdr.ts orders that
+	 * one behind this session's, keyed by `runner` — which is why every reporter
+	 * in this process is built over the same `pi`.
 	 */
 	let reporterGeneration = 0;
 
@@ -211,7 +215,8 @@ export default function (pi: ExtensionAPI) {
 		ui.clearAll(ctx);
 		// Cap the clear at 1s: pi sends SIGTERM and SIGKILLs 5s later; one wedged
 		// herdr call costs HERDR_TIMEOUT_MS (2s) and clear() can await up to four
-		// calls (an in-flight report's two, then its own two) — worst case ≈28s.
+		// calls (an in-flight report's two, then its own two) — worst case ≈28s,
+		// plus whatever the previous session still has queued for those surfaces.
 		// The timer is unref'd so a pending deadline cannot hold the process open;
 		// .catch() ensures the losing clear() cannot produce an unhandled rejection.
 		const clearDeadline = new Promise<void>((resolve) => {

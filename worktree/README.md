@@ -239,6 +239,13 @@ Nothing is reported outside herdr, or under `pi -p`. The first failure — no
 missing `gh`. `session_shutdown` clears both surfaces; a `kill -9` leaves the
 last value on screen until the next pi session in that space reports over it.
 
+Commands are queued per surface within a pi process, so `/new` cannot leave the
+retiring session's already-spawned write on screen: it lands first and the new
+session's lands last. The cost is that the new session's first report waits for
+that one command, which a wedged socket caps at roughly seven seconds (a 2s
+timeout plus pi's SIGTERM/SIGKILL grace). Reports are fire-and-forget, so
+nothing in the session waits with it.
+
 Two known gaps: workspace tokens are per space, so two pi sessions in one space
 show whichever painted last (pane titles stay right), and the space *label* is
 left alone — it is `basename(cwd)`, and only `workspace rename` changes it,
