@@ -24,6 +24,7 @@ ok("shows disabled servers", text.includes("old") && text.includes("disabled"));
 ok("shows connecting servers", text.includes("slow") && text.includes("connecting"));
 ok("only connected servers contribute tool counts", text.includes("24 tools"));
 ok("header counts every server", text.includes("5 servers"));
+ok("singular: one server uses 'server' not 'servers'", mcpPanelLines([{ name: "only", state: "connected", toolCount: 1 }], 120).join("\n").includes("1 server "));
 ok("no line exceeds width", Math.max(...mcpPanelLines(servers, 80).map((l) => l.length)) <= 80);
 ok("narrow width still fits", Math.max(...mcpPanelLines(servers, 60).map((l) => l.length)) <= 60);
 ok("no servers yields no lines", mcpPanelLines([], 120).length === 0);

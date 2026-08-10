@@ -68,7 +68,7 @@ Expanded view:
   /parallel-cleanup
   /review
 [Extensions]
-  worktree, mcp
+  dashboard, mcp, worktree
 ```
 
 *Capture produced by calling `renderDashboard` directly with real panels from
@@ -78,7 +78,8 @@ Expanded view:
 
 pi's own `[Context]/[Skills]/[Prompts]/[Extensions]` listing lives in a
 separate container that `setHeader` cannot reach. The only switch that suppresses
-it is the `quietStartup` setting in `~/.pi/agent/settings.json`. Until that is
+it is the `quietStartup` setting in `getAgentDir()/settings.json` (honouring
+`PI_CODING_AGENT_DIR`; typically `~/.pi/agent/settings.json`). Until that is
 set, pi shows both screens on startup, and the dashboard notifies you once to
 run `/dashboard setup`.
 

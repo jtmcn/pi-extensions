@@ -5,7 +5,8 @@
  * what skills are loaded and what they cost, and whatever the other extensions
  * in this collection have to report.
  *
- * Requires `"quietStartup": true` in `~/.pi/agent/settings.json`, because pi's
+ * Requires `"quietStartup": true` in `getAgentDir()/settings.json` (honours
+ * `PI_CODING_AGENT_DIR`; typically `~/.pi/agent/settings.json`), because pi's
  * own resource listing lives in a container `setHeader` cannot reach and only
  * that setting suppresses it. `/dashboard setup` writes it.
  *

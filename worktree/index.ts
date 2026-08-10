@@ -197,7 +197,7 @@ export default function (pi: ExtensionAPI) {
 		// `ctx` is not touched inside the callback — publishing goes through the
 		// registry so no stale-context crash is possible.
 		const head = active.focus?.path ?? repo.worktreeRoot ?? ctx.cwd;
-		const branch = active.focus?.branch ?? repo.branch;
+		const branch = active.focus?.branch;
 		try {
 			const [dirty, ab] = await Promise.all([
 				countDirty(pi, head),
