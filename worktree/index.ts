@@ -34,6 +34,7 @@
 import { stat } from "node:fs/promises";
 import { basename } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { createHerdrReporter, type HerdrReporter, herdrTarget } from "../lib/herdr.ts";
 import { getRepoInfo, listWorktrees, type RepoInfo } from "../lib/git.ts";
 import { EMPTY_BRANCHES, listBranches } from "./branches.ts";
 import { createCommands } from "./commands.ts";
@@ -59,6 +60,13 @@ export default function (pi: ExtensionAPI) {
 	let session: WorktreeSession | undefined;
 
 	/**
+	 * The current session's herdr reporter, if pi is running under herdr with a
+	 * UI. Retired with the session it belongs to, so a replaced session cannot
+	 * keep reporting a branch nobody is looking at.
+	 */
+	let reporter: HerdrReporter | undefined;
+
+	/**
 	 * The only place `session` is assigned.
 	 *
 	 * Retiring the outgoing session is not optional: its monitor may have a fetch
@@ -66,10 +74,25 @@ export default function (pi: ExtensionAPI) {
 	 * made stale — which throws and takes the process down. Routing every change
 	 * through here means the disposal cannot be forgotten or ordered wrongly.
 	 */
-	const replaceSession = (next: WorktreeSession | undefined) => {
+	const replaceSession = (next: WorktreeSession | undefined, nextReporter?: HerdrReporter) => {
 		session?.dispose();
+		reporter?.dispose();
 		session = next;
+		reporter = nextReporter;
 		return next;
+	};
+
+	/**
+	 * A reporter for this session, or undefined.
+	 *
+	 * Gated on `hasUI` deliberately: a `pi -p` run borrows the user's own shell
+	 * pane for a few seconds, and the PR monitor does not poll without a footer,
+	 * so a reported branch would never refresh anyway.
+	 */
+	const makeReporter = (ctx: ExtensionContext, branchPrefix: string): HerdrReporter | undefined => {
+		if (!ctx.hasUI) return undefined;
+		const target = herdrTarget(process.env);
+		return target ? createHerdrReporter({ runner: pi, target, branchPrefix }) : undefined;
 	};
 
 	pi.on("session_start", async (_event, ctx) => {
@@ -81,7 +104,11 @@ export default function (pi: ExtensionAPI) {
 		if (!repo) {
 			// Still a session, just not one that can do anything: the status segment
 			// needs clearing either way.
-			replaceSession(createSession({ pi, ui, ctx, repo: undefined }))?.paint(ctx);
+			const noRepoReporter = makeReporter(ctx, "");
+			replaceSession(
+				createSession({ pi, ui, ctx, repo: undefined, report: (branch) => noRepoReporter?.report(branch) }),
+				noRepoReporter,
+			)?.paint(ctx);
 			return;
 		}
 
@@ -89,6 +116,7 @@ export default function (pi: ExtensionAPI) {
 			projectRoot: repo.projectRoot,
 			projectTrusted: ctx.isProjectTrusted(),
 		});
+		const nextReporter = makeReporter(ctx, loaded.config.branchPrefix);
 		const active = replaceSession(
 			createSession({
 				pi,
@@ -97,7 +125,9 @@ export default function (pi: ExtensionAPI) {
 				repo,
 				config: loaded.config,
 				configSources: loaded.sources,
+				report: (branch) => nextReporter?.report(branch),
 			}),
+			nextReporter,
 		);
 		if (!active) return;
 		for (const warning of loaded.warnings) say(ctx, warning, "warning");
@@ -142,7 +172,7 @@ export default function (pi: ExtensionAPI) {
 	 * `--resume`, where the TUI lives on and a raw stdout write would tear a hole
 	 * in the rendering.
 	 */
-	pi.on("session_shutdown", (event, ctx) => {
+	pi.on("session_shutdown", async (event, ctx) => {
 		const focus = session?.focus;
 		// Focus on the session's own worktree never redirected anything, so its path
 		// is just the cwd the user already has.
@@ -153,6 +183,10 @@ export default function (pi: ExtensionAPI) {
 				`  cd ${focus.path}`,
 			]);
 		}
+		// Awaited, not fire-and-forget: pi may exit the moment this returns, and a
+		// half-spawned clear leaves a dead session's branch on herdr's sidebar.
+		// Workspace tokens are reported without a TTL, so nothing expires them.
+		await reporter?.clear();
 		replaceSession(undefined);
 		ui.clearAll(ctx);
 	});

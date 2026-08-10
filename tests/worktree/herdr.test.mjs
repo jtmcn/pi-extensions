@@ -179,6 +179,40 @@ function scriptedRunner(results = []) {
 	ok("clear: nothing reported, nothing to clear", runner.calls.length === 0, JSON.stringify(runner.calls));
 }
 
+// ============================================================= clear: races
+
+// report() in flight when clear() is called: clear must still land.
+// Run against the unmodified clear() to confirm this fails, then apply the fix.
+{
+	const runner = fakeRunner();
+	const reporter = createHerdrReporter({ runner, target: TARGET });
+	reporter.report("main"); // fire-and-forget — no settle
+	await reporter.clear(); // clear races the in-flight report
+	ok(
+		"clear: in-flight report does not skip the clear",
+		runner.calls.length === 4 &&
+			runner.calls[0]?.args.some((a) => a.startsWith("pi_branch=")) &&
+			runner.calls[2]?.args.includes("--clear-token") &&
+			runner.calls[3]?.args.includes("--clear-title"),
+		`${runner.calls.length} calls`,
+	);
+}
+
+// workspace call succeeds but pane call fails (partial state on screen);
+// clear() must still issue both clear commands.
+{
+	const runner = scriptedRunner([{ code: 0 }, { code: 1, stderr: "timeout" }]);
+	const reporter = createHerdrReporter({ runner, target: TARGET });
+	reporter.report("main");
+	await settle();
+	await reporter.clear();
+	ok(
+		"clear: partial send failure still clears",
+		runner.calls.length >= 3 && runner.calls.some((c) => c.args.includes("--clear-token")),
+		`${runner.calls.length} calls`,
+	);
+}
+
 // ================================================================== dispose
 
 {

@@ -73,9 +73,18 @@ export function createHerdrReporter(options: HerdrReporterOptions): HerdrReporte
 	let last: string | undefined;
 	/** Whether anything has been sent at all; `undefined` is a real value. */
 	let sent = false;
+	/**
+	 * Set the moment the first herdr spawn is issued, before its Promise resolves.
+	 * Unlike `sent`, this is true even when only the workspace call succeeded and
+	 * the pane call failed — we still have partial state on screen that must be
+	 * cleared.
+	 */
+	let issued = false;
 	/** One call at a time; a report arriving mid-flight is remembered, not dropped. */
 	let busy = false;
 	let pending: { branch: string | undefined } | undefined;
+	/** The currently executing report IIFE, so clear() can await it. */
+	let inFlight: Promise<void> | undefined;
 	/** Cleared by the first failure: no herdr, dead socket, unknown workspace. */
 	let available = true;
 	let disposed = false;
@@ -115,6 +124,7 @@ export function createHerdrReporter(options: HerdrReporterOptions): HerdrReporte
 		const value = display(branch);
 		// Sequential, not Promise.all: two writes to the same socket for one
 		// decoration, and the second is pointless once the first has failed.
+		issued = true;
 		const workspaceOk = await run(workspaceArgs(value));
 		const paneOk = workspaceOk && (await run(paneArgs(value)));
 		if (!workspaceOk || !paneOk) {
@@ -133,7 +143,7 @@ export function createHerdrReporter(options: HerdrReporterOptions): HerdrReporte
 			return;
 		}
 		busy = true;
-		void (async () => {
+		inFlight = (async () => {
 			try {
 				await send(branch);
 			} finally {
@@ -143,19 +153,19 @@ export function createHerdrReporter(options: HerdrReporterOptions): HerdrReporte
 				if (next) report(next.branch);
 			}
 		})();
+		void inFlight;
 	};
 
 	const clear = async (): Promise<void> => {
-		// Nothing was reported, so there is nothing of ours on screen to remove.
-		// Note the absence of an `available` check: a session that reported once and
-		// failed later still has a stale branch on screen, and the clear is cheap.
-		if (!sent) {
-			disposed = true;
-			return;
-		}
 		// Retire first: a paint racing shutdown must not re-report after the clear.
 		disposed = true;
 		pending = undefined;
+		// Let an in-flight report finish before clearing: the clear must land after
+		// the report, not before it, or the report puts the branch straight back.
+		// This also ensures `issued` is stable when we read it below.
+		await inFlight;
+		// Nothing was ever spawned, so there is nothing of ours on screen.
+		if (!issued) return;
 		await run(workspaceArgs(undefined));
 		await run(paneArgs(undefined));
 	};
