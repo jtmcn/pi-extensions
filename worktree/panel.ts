@@ -62,7 +62,6 @@ export function parseStack(stdout: string): StackEntry[] {
 	const entries: StackEntry[] = [];
 	for (const raw of stdout.split("\n")) {
 		const line = raw.trimEnd();
-		if (!line.trim()) continue;
 		const match = /([◉◯])\s*[─┘│]*\s+(\S+)(?:\s+\((.+)\))?\s*$/.exec(line);
 		if (!match) continue;
 		entries.push({

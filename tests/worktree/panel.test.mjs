@@ -35,7 +35,9 @@ const absent = await readStack(
 );
 ok("missing gt is unavailable", absent.kind === "unavailable");
 
-const failed = await readStack(fakeRunner({ code: 1, stderr: "not a graphite repo" }), "/repo", "main");
+// Fixture: parseable stdout *and* a non-zero exit. If the exit-code check were deleted,
+// readStack would fall through to parseStack and return a `stack` instead of `unavailable`.
+const failed = await readStack(fakeRunner({ code: 1, stdout: "◉  main\n" }), "/repo", "main");
 ok("other failures are unavailable", failed.kind === "unavailable");
 
 const good = await readStack(fakeRunner({ code: 0, stdout: "◉  main\n" }), "/repo", "main");
