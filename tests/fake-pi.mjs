@@ -43,6 +43,8 @@ export function createFakePi({
 	exec,
 	entries = () => [],
 	projectTrusted = false,
+	systemPrompt = "",
+	commands: commandInfos = () => [],
 } = {}) {
 	const events = new Map();
 	const tools = new Map();
@@ -51,6 +53,7 @@ export function createFakePi({
 	const execCalls = [];
 	/** Everything written through any context, in order. */
 	const statuses = [];
+	const headers = [];
 	const widgets = [];
 	const notices = [];
 	const appended = [];
@@ -87,13 +90,14 @@ export function createFakePi({
 		registerCommand(name, spec) {
 			commands.set(name, spec);
 		},
+		getCommands: () => commandInfos(),
 		appendEntry: (customType, data) => appended.push({ customType, data }),
 		sendMessage: (message, options) => sent.push({ message, options }),
 	};
 
 	/** A context, recording its own writes as well as the aggregate ones. */
 	const makeCtx = () => {
-		const own = { statuses: [], widgets: [], notices: [] };
+		const own = { statuses: [], widgets: [], notices: [], headers: [] };
 		const ctx = {
 			cwd,
 			hasUI,
@@ -103,6 +107,8 @@ export function createFakePi({
 			paints: own.statuses,
 			isProjectTrusted: () => projectTrusted,
 			sessionManager: { getBranch: () => entries(), getEntries: () => entries() },
+			getSystemPrompt: () => systemPrompt,
+			getCommands: () => commandInfos(),
 			ui: {
 				setStatus: (_key, value) => {
 					own.statuses.push(value);
@@ -115,6 +121,10 @@ export function createFakePi({
 				notify: (message, level) => {
 					own.notices.push({ message, level });
 					notices.push({ message, level });
+				},
+				setHeader: (factory) => {
+					own.headers.push(factory);
+					headers.push(factory);
 				},
 			},
 		};
@@ -137,6 +147,7 @@ export function createFakePi({
 		registrations,
 		execCalls,
 		statuses,
+		headers,
 		widgets,
 		notices,
 		appended,
@@ -144,6 +155,13 @@ export function createFakePi({
 		names: () => [...tools.keys()].sort(),
 		messages: () => notices.map((n) => n.message),
 		status: () => statuses.at(-1),
+		/** Render the most recently set header at a given width. */
+		header: (width = 120) => {
+			const factory = headers.at(-1);
+			if (!factory) return undefined;
+			const theme = { fg: (_color, text) => text, bold: (text) => text };
+			return factory({ requestRender() {}, invalidate() {} }, theme);
+		},
 		/**
 		 * Deliver an event. `session_start` mints a fresh context first, because pi
 		 * does: see the note at the top of this file.
