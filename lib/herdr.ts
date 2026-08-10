@@ -54,6 +54,23 @@ export interface HerdrReporterOptions {
 	 * creates and the sidebar is 18–36 columns wide.
 	 */
 	branchPrefix?: string;
+	/**
+	 * False once a newer reporter exists for this herdr target. Defaults to true.
+	 *
+	 * A report is two sequential spawns and `clear()` awaits up to four, while a
+	 * session can be replaced (`/new`, `/fork`, resume) at any await point in
+	 * between. Every surface is keyed by the same workspace and pane id and the
+	 * same `--source pi`, so the last write wins: a retired session finishing its
+	 * writes overwrites the branch the new session has already reported. Checked
+	 * after every await.
+	 *
+	 * `disposed` cannot serve here. `clear()` runs *after* the reporter is
+	 * disposed — that is how shutdown works — so it needs a signal that means
+	 * "someone else owns these ids now" rather than "this reporter is retired".
+	 * A predicate rather than a `ctx` or a generation of its own: the reporter
+	 * still holds no session state, and index.ts owns which reporter is current.
+	 */
+	isCurrent?: () => boolean;
 }
 
 export interface HerdrReporter {
@@ -68,6 +85,7 @@ export interface HerdrReporter {
 export function createHerdrReporter(options: HerdrReporterOptions): HerdrReporter {
 	const { runner, target } = options;
 	const branchPrefix = options.branchPrefix ?? "";
+	const isCurrent = options.isCurrent ?? (() => true);
 
 	/** Last branch actually sent, so an unchanged paint costs nothing. */
 	let last: string | undefined;
@@ -126,6 +144,10 @@ export function createHerdrReporter(options: HerdrReporterOptions): HerdrReporte
 		// decoration, and the second is pointless once the first has failed.
 		issued = true;
 		const workspaceOk = await run(workspaceArgs(value));
+		// A newer reporter took over while that spawn was in flight: it has already
+		// reported its own branch, and the pane write below would put ours back on
+		// top of it.
+		if (!isCurrent()) return;
 		const paneOk = workspaceOk && (await run(paneArgs(value)));
 		if (!workspaceOk || !paneOk) {
 			available = false;
@@ -166,7 +188,13 @@ export function createHerdrReporter(options: HerdrReporterOptions): HerdrReporte
 		// No `available` check: a session that reported once and then hit a socket
 		// error still has a stale branch on screen, and the clear is cheap.
 		if (!issued) return;
+		// The clear may have lost its race with the next session: `/new` fires
+		// session_shutdown and then session_start, and the shutdown deadline
+		// abandons — but cannot cancel — a slow clear. Clearing now would wipe the
+		// branch the new session has already reported under the same ids.
+		if (!isCurrent()) return;
 		await run(workspaceArgs(undefined));
+		if (!isCurrent()) return;
 		await run(paneArgs(undefined));
 	};
 

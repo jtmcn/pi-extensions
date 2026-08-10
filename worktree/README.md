@@ -219,6 +219,11 @@ and the sidebar is 18–36 columns wide. A detached HEAD clears both rather than
 showing a SHA. Unchanged branches cost nothing: the reporter dedupes, so the
 60s PR poll does not fork a process to repeat itself.
 
+What keeps the value current is the PR monitor's HEAD re-read, which runs on
+every poll and on input — including in a session where `gh` is unavailable and
+nothing is polling, so a `git switch` there still reaches herdr on the next
+prompt.
+
 The token renders only if a row layout names it:
 
 ```toml
@@ -293,7 +298,8 @@ focus persistence, and the `hasUI` × print matrix.
 `herdr.test.mjs` covers the reporter as a fake-runner unit — argv order, prefix
 stripping, deduping, and the first-failure switch-off — and
 `herdr-wiring.test.mjs` covers when a reporter exists at all: under herdr, with
-a UI, cleared at shutdown.
+a UI, cleared at shutdown, following a `git switch` with `gh` unavailable, and a
+session replaced mid-report whose late write must not land on the new one's.
 
 `restore.test.mjs` covers restoring focus from the transcript through a fake
 `pi` with real git: the last entry winning, a cleared entry meaning unfocused,

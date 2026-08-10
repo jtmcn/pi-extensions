@@ -64,7 +64,13 @@ function setup(options = {}) {
 		},
 		getTarget: () => state.target,
 		getHead: () => state.head,
-		setBranch: (head, branch) => state.branchWrites.push({ head, branch }),
+		setBranch: (head, branch) => {
+			state.branchWrites.push({ head, branch });
+			// The real caller writes the re-read branch back into the object getTarget()
+			// reads, which is what makes a `git switch` look like a moved target. Opt-in,
+			// because most tests here drive the target by hand instead.
+			if (options.writeBack) state.target = branch ? { cwd: head, branch } : undefined;
+		},
 		paint: () => {
 			state.paints++;
 		},
@@ -228,6 +234,31 @@ function setup(options = {}) {
 	await h.settle();
 	ok("the feature stays off for the session", h.ghCalls().length === after);
 	ok("and no poll is armed", h.live().length === 0);
+}
+
+// The branch re-read must survive gh being switched off entirely, not just the
+// backoff. Such a session arms no poll either, so input is the only thing left
+// that notices a `git switch` — and the branch on screen is also what is
+// reported to herdr, which would otherwise name the old branch forever.
+{
+	const h = setup({
+		writeBack: true,
+		repoView: () => ({ code: 1, stdout: "", stderr: "", killed: false }),
+	});
+	h.monitor.refresh();
+	await h.settle();
+	const writes = h.state.branchWrites.length;
+	const paints = h.state.paints;
+	const ghBefore = h.ghCalls().length;
+
+	h.state.branch = "feature/two";
+	h.monitor.onInput();
+	await h.settle();
+	ok("gh off: HEAD is still re-read", h.state.branchWrites.length === writes + 1, `${h.state.branchWrites.length} writes`);
+	ok("gh off: the new branch is written back", h.state.branchWrites.at(-1)?.branch === "feature/two");
+	ok("gh off: the moved target repaints", h.state.paints > paints, `${h.state.paints} vs ${paints}`);
+	ok("gh off: gh is not called again", h.ghCalls().length === ghBefore, `${h.ghCalls().length} vs ${ghBefore}`);
+	ok("gh off: still no poll armed", h.live().length === 0, `${h.live().length} timers`);
 }
 
 // ===================================================== target movement

@@ -227,6 +227,79 @@ function scriptedRunner(results = []) {
 	);
 }
 
+// =============================================== retirement mid-write
+
+// A session replaced while a report is in flight must not finish it. The new
+// session reports through the same workspace and pane ids with the same
+// `--source pi`, so a late pane write from the old one is what ends up on screen.
+{
+	let release;
+	const gate = new Promise((resolve) => {
+		release = resolve;
+	});
+	const calls = [];
+	let current = true;
+	const runner = {
+		async exec(_command, args) {
+			calls.push(args);
+			if (calls.length === 1) await gate; // wedge the workspace write
+			return { stdout: "", stderr: "", code: 0, killed: false };
+		},
+	};
+	const reporter = createHerdrReporter({ runner, target: TARGET, isCurrent: () => current });
+	reporter.report("old");
+	await settle();
+	ok("retired: the workspace write is in flight", calls.length === 1, JSON.stringify(calls));
+
+	// session_start: a newer reporter owns the ids now, and has already reported.
+	current = false;
+	reporter.dispose();
+	release();
+	await settle();
+	ok("retired: no pane title is written after replacement", calls.length === 1, JSON.stringify(calls));
+}
+
+// The shutdown clear can lose its race with the next session: `/new` fires
+// session_shutdown and then session_start, and index.ts's deadline abandons —
+// but cannot cancel — a slow clear.
+{
+	const runner = fakeRunner();
+	let current = true;
+	const reporter = createHerdrReporter({ runner, target: TARGET, isCurrent: () => current });
+	reporter.report("main");
+	await settle();
+	const before = runner.calls.length;
+	current = false;
+	await reporter.clear();
+	ok(
+		"clear: a superseded clear wipes nothing",
+		runner.calls.length === before,
+		`${runner.calls.length} vs ${before}`,
+	);
+}
+
+{
+	const calls = [];
+	let current = true;
+	const runner = {
+		async exec(_command, args) {
+			calls.push(args);
+			// The next session starts while the first of the two clears is in flight.
+			if (args.includes("--clear-token")) current = false;
+			return { stdout: "", stderr: "", code: 0, killed: false };
+		},
+	};
+	const reporter = createHerdrReporter({ runner, target: TARGET, isCurrent: () => current });
+	reporter.report("main");
+	await settle();
+	await reporter.clear();
+	ok(
+		"clear: replacement between the two clears stops the second",
+		calls.filter((args) => args.includes("--clear-title")).length === 0,
+		JSON.stringify(calls),
+	);
+}
+
 // ================================================================== dispose
 
 {

@@ -160,6 +160,88 @@ const saved = { ws: process.env.HERDR_WORKSPACE_ID, pane: process.env.HERDR_PANE
 	);
 }
 
+// ================================== gh unavailable: the branch still follows
+
+// The branch reported to herdr is refreshed by the PR monitor's re-read. Once gh
+// switches the PR feature off for the session (missing, unauthenticated, not a
+// GitHub remote) no poll is armed either, so input is the only thing left that
+// can notice a `git switch` — and it must.
+{
+	process.env.HERDR_WORKSPACE_ID = "wT";
+	process.env.HERDR_PANE_ID = "wT:p1";
+	const noGhRepo = await makeRepo();
+	const herdrCalls = [];
+	const h = createFakePi({
+		cwd: noGhRepo,
+		hasUI: true,
+		exec: async (command, args) => {
+			// pi resolves an unspawnable binary as exit 1 with both streams empty,
+			// which is how a missing gh actually arrives.
+			if (command === "gh") return { ...gitOk, code: 1 };
+			if (command !== "herdr") return undefined;
+			herdrCalls.push(args);
+			return gitOk;
+		},
+	});
+	extension(h.pi);
+	await h.fire("session_start");
+	await until(() => herdrCalls.some((args) => args.includes("pi_branch=feature/one")));
+
+	await pexec("git", ["switch", "-q", "-c", "feature/two"], { cwd: noGhRepo });
+	await h.fire("input", {});
+	const followed = await until(
+		() =>
+			herdrCalls.some((args) => args.includes("pi_branch=feature/two")) &&
+			herdrCalls.some((args) => args.includes("\u03c0 - feature/two")),
+	);
+	ok("wiring: a git switch reaches herdr with gh unavailable", followed, JSON.stringify(herdrCalls));
+	await rm(noGhRepo, { recursive: true, force: true });
+}
+
+// ============================ session replacement: the retired write must lose
+
+// `/new` while a report is in flight: the old session's remaining write would
+// land on top of the new session's, since both address the same ids.
+{
+	process.env.HERDR_WORKSPACE_ID = "wT";
+	process.env.HERDR_PANE_ID = "wT:p1";
+	const raceRepo = await makeRepo();
+	let release;
+	const gate = new Promise((resolve) => {
+		release = resolve;
+	});
+	const herdrCalls = [];
+	const h = createFakePi({
+		cwd: raceRepo,
+		hasUI: true,
+		exec: async (command, args) => {
+			if (command === "gh") return { ...gitOk, stdout: "[]" };
+			if (command !== "herdr") return undefined;
+			herdrCalls.push(args);
+			// Wedge the first session's workspace write; everything after runs free.
+			if (herdrCalls.length === 1) await gate;
+			return gitOk;
+		},
+	});
+	extension(h.pi);
+	await h.fire("session_start");
+	await until(() => herdrCalls.length > 0);
+
+	await pexec("git", ["switch", "-q", "-c", "feature/two"], { cwd: raceRepo });
+	await h.fire("session_start");
+	const replaced = await until(() => herdrCalls.some((args) => args.includes("\u03c0 - feature/two")));
+	ok("wiring: the new session reports its own branch", replaced, JSON.stringify(herdrCalls));
+
+	release();
+	await new Promise((resolve) => setTimeout(resolve, 100));
+	ok(
+		"wiring: a retired session does not retitle the pane behind the new one",
+		herdrCalls.every((args) => !args.includes("\u03c0 - feature/one")),
+		JSON.stringify(herdrCalls),
+	);
+	await rm(raceRepo, { recursive: true, force: true });
+}
+
 process.env.HERDR_WORKSPACE_ID = saved.ws ?? "";
 process.env.HERDR_PANE_ID = saved.pane ?? "";
 await rm(repo, { recursive: true, force: true });

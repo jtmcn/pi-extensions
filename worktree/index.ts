@@ -67,6 +67,18 @@ export default function (pi: ExtensionAPI) {
 	let reporter: HerdrReporter | undefined;
 
 	/**
+	 * Bumped for every reporter created, so a reporter can tell whether it still
+	 * owns the herdr ids it is about to write.
+	 *
+	 * `dispose()` is not enough on its own: shutdown disposes the reporter and
+	 * *then* awaits its clear, and that clear can still be running when the next
+	 * session starts reporting (`/new` fires session_shutdown, then
+	 * session_start). Both sessions write the same workspace and pane id, so the
+	 * loser of that race must drop its remaining writes rather than land last.
+	 */
+	let reporterGeneration = 0;
+
+	/**
 	 * The only place `session` is assigned.
 	 *
 	 * Retiring the outgoing session is not optional: its monitor may have a fetch
@@ -92,7 +104,14 @@ export default function (pi: ExtensionAPI) {
 	const makeReporter = (ctx: ExtensionContext, branchPrefix: string): HerdrReporter | undefined => {
 		if (!ctx.hasUI) return undefined;
 		const target = herdrTarget(process.env);
-		return target ? createHerdrReporter({ runner: pi, target, branchPrefix }) : undefined;
+		if (!target) return undefined;
+		const generation = ++reporterGeneration;
+		return createHerdrReporter({
+			runner: pi,
+			target,
+			branchPrefix,
+			isCurrent: () => generation === reporterGeneration,
+		});
 	};
 
 	pi.on("session_start", async (_event, ctx) => {
