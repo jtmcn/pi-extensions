@@ -20,6 +20,8 @@ import { join } from "node:path";
 import { createFakePi } from "../fake-pi.mjs";
 import { assertions, loadExt, pexec } from "../harness.mjs";
 
+const panels = await loadExt("lib/panels.ts");
+
 const { ok, done } = assertions();
 const extension = (await loadExt("worktree/index.ts")).default;
 
@@ -236,6 +238,49 @@ const focusEntry = (data) => ({
 
 	const output = await captureStdout(() => h.fire("session_shutdown", { reason: "quit" }));
 	ok("unfocused: quit prints nothing", output === "", JSON.stringify(output));
+	await rm(dir, { recursive: true, force: true });
+}
+
+// ------------------------------------------ location panel lifecycle --------
+//
+// Mutation: deleting publishLocationPanel() from session_start, or deleting
+// clearLocationPanel() from session_shutdown. After session_start in a real
+// git repo, exactly one panel owned by "worktree" must be registered; after
+// session_shutdown, none.
+{
+	const { dir } = await makeRepo();
+	const h = harness(dir, []);
+	panels.resetPanels("worktree");
+	await h.fire("session_start");
+	ok(
+		"panel: session_start publishes exactly one location panel",
+		panels.listPanels().filter((p) => p.owner === "worktree").length === 1,
+		`got ${panels.listPanels().filter((p) => p.owner === "worktree").length}`,
+	);
+	await h.fire("session_shutdown");
+	ok(
+		"panel: session_shutdown removes the location panel",
+		panels.listPanels().filter((p) => p.owner === "worktree").length === 0,
+	);
+	await rm(dir, { recursive: true, force: true });
+}
+
+// ---------------------------------------- location panel reflects focus -----
+//
+// When a focus is restored from the transcript, the location panel must show
+// the focused worktree’s path, not the repo root. Without this, /dashboard
+// shows the parent repo while the footer shows the focused branch.
+{
+	const { dir, worktree } = await makeRepo();
+	const h = harness(dir, [focusEntry({ path: worktree, branch: "exp" })]);
+	panels.resetPanels("worktree");
+	await h.fire("session_start");
+	const panel = panels.listPanels().find((p) => p.owner === "worktree");
+	const rendered = panel?.render(120).join("\n") ?? "";
+	ok("focused panel shows the focused path, not the repo root", rendered.includes(worktree), rendered);
+	ok("focused panel shows the focused branch", rendered.includes("exp"), rendered);
+	ok("focused panel does not show the repo root", !rendered.includes(dir + "  "), rendered);
+	await h.fire("session_shutdown");
 	await rm(dir, { recursive: true, force: true });
 }
 

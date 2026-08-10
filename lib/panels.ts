@@ -9,6 +9,14 @@
  * module instance; a well-known symbol is true regardless.
  */
 
+/**
+ * A section contributed to the dashboard.
+ *
+ * Two invariants that allow `render.ts` to composite panels safely:
+ *   1. `render` must not throw — a throwing panel takes the whole header down.
+ *   2. `render` must return plain text with no ANSI escape sequences —
+ *      the caller clips lines with `truncateVisible`, which relies on that.
+ */
 export interface Panel {
 	/** Unique across all extensions. Re-registering an id replaces it. */
 	id: string;

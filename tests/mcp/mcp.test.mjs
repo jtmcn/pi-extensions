@@ -620,6 +620,44 @@ async function extHarness(servers, { hasUI = true, startupTimeoutMs = 10_000 } =
 	await h.cleanup();
 }
 
+// -------------------------------------------- panel publication lifecycle ---
+
+// Mutation: deleting the publishPanel() / clearMcpPanel() calls from index.ts.
+// After session_start, exactly one panel owned by "mcp" must be registered;
+// after session_shutdown, zero.
+{
+	const panels = await loadExt("lib/panels.ts");
+
+	// With a configured server, the panel is published in session_start.
+	const h = await extHarness({ fake: { command: process.execPath, args: [FAKE], timeoutMs: 5000 } });
+	panels.resetPanels("mcp");
+	await h.fire("session_start");
+	ok(
+		"panel: session_start publishes exactly one mcp panel",
+		panels.listPanels().filter((p) => p.owner === "mcp").length === 1,
+		`got ${panels.listPanels().filter((p) => p.owner === "mcp").length}`,
+	);
+	await h.fire("session_shutdown");
+	ok(
+		"panel: session_shutdown removes the mcp panel",
+		panels.listPanels().filter((p) => p.owner === "mcp").length === 0,
+	);
+	await h.cleanup();
+}
+
+{
+	// Without any configured servers, no panel should be published at all.
+	const panels = await loadExt("lib/panels.ts");
+	const h = await extHarness({});
+	panels.resetPanels("mcp");
+	await h.fire("session_start");
+	ok(
+		"panel: no panel when unconfigured",
+		panels.listPanels().filter((p) => p.owner === "mcp").length === 0,
+	);
+	await h.cleanup();
+}
+
 // ------------------------------------------------------- real server (opt) ---
 
 if (REAL_COMMAND) {

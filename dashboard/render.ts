@@ -92,7 +92,16 @@ export function renderDashboard(model: DashboardModel, theme: MascotTheme, width
 
 		for (const panel of model.panels) {
 			lines.push(heading(theme, panel.title));
-			lines.push(...panel.render(width));
+			// A panel that throws must not take the whole header down. The contract on
+			// Panel requires render not to throw; this is the safety net for the cases
+			// that escape it, especially third-party panels the README invites.
+			let panelLines: string[];
+			try {
+				panelLines = panel.render(width);
+			} catch {
+				panelLines = [theme.fg("dim", "  panel failed")];
+			}
+			lines.push(...panelLines);
 			lines.push("");
 		}
 
