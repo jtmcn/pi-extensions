@@ -120,6 +120,46 @@ const saved = { ws: process.env.HERDR_WORKSPACE_ID, pane: process.env.HERDR_PANE
 	ok("wiring: no UI means no reporting", h.herdrCalls.length === 0, JSON.stringify(h.herdrCalls));
 }
 
+// ======================================= shutdown deadline: wedged herdr calls
+
+// A herdr socket that never answers must not block session_shutdown indefinitely.
+// With no deadline, clear() awaits up to four never-resolving execs; pi sends
+// SIGTERM and SIGKILLs 5s later, so the window is dangerously wide.
+{
+	process.env.HERDR_WORKSPACE_ID = "wT";
+	process.env.HERDR_PANE_ID = "wT:p1";
+
+	const herdrCalls = [];
+	const h = createFakePi({
+		cwd: repo,
+		hasUI: true,
+		exec: async (command, args) => {
+			if (command === "gh") return { ...gitOk, stdout: "[]" };
+			if (command !== "herdr") return undefined;
+			herdrCalls.push(args);
+			return new Promise(() => {}); // never resolves — simulates a wedged socket
+		},
+	});
+	extension(h.pi);
+	await h.fire("session_start");
+	// Let the fire-and-forget report IIFE run and enter the exec call.
+	await until(() => herdrCalls.length > 0);
+
+	const t0 = Date.now();
+	// Race the shutdown against a generous outer guard: if the implementation has
+	// no deadline, the shutdown never resolves and the outer timer fires instead.
+	const completed = await Promise.race([
+		h.fire("session_shutdown", { reason: "quit" }).then(() => true),
+		new Promise((resolve) => setTimeout(() => resolve(false), 2_000)),
+	]);
+	const elapsed = Date.now() - t0;
+	ok(
+		"wiring: shutdown with wedged herdr completes within the deadline",
+		completed === true && elapsed < 2_000,
+		`completed=${String(completed)}, elapsed=${elapsed}ms`,
+	);
+}
+
 process.env.HERDR_WORKSPACE_ID = saved.ws ?? "";
 process.env.HERDR_PANE_ID = saved.pane ?? "";
 await rm(repo, { recursive: true, force: true });

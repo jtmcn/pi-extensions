@@ -132,6 +132,20 @@ function scriptedRunner(results = []) {
 	ok("dedupe: a changed branch reports once", runner.calls.length === 4, `${runner.calls.length} calls`);
 }
 
+// Detached HEAD reports as undefined; a repeated undefined must also be deduped.
+// Without this test, making send() skip last/sent updates for undefined passes
+// the whole suite — but detached-HEAD sessions then fork two herdr processes on
+// every 60s PR poll.
+{
+	const runner = fakeRunner();
+	const reporter = createHerdrReporter({ runner, target: TARGET });
+	reporter.report(undefined);
+	await settle();
+	reporter.report(undefined);
+	await settle();
+	ok("dedupe: repeated detached-HEAD report costs nothing", runner.calls.length === 2, `${runner.calls.length} calls`);
+}
+
 // ======================================================== failure disables
 
 {

@@ -152,8 +152,7 @@ export function createHerdrReporter(options: HerdrReporterOptions): HerdrReporte
 				pending = undefined;
 				if (next) report(next.branch);
 			}
-		})();
-		void inFlight;
+		})().catch(() => {});
 	};
 
 	const clear = async (): Promise<void> => {
@@ -164,7 +163,8 @@ export function createHerdrReporter(options: HerdrReporterOptions): HerdrReporte
 		// the report, not before it, or the report puts the branch straight back.
 		// This also ensures `issued` is stable when we read it below.
 		await inFlight;
-		// Nothing was ever spawned, so there is nothing of ours on screen.
+		// No `available` check: a session that reported once and then hit a socket
+		// error still has a stale branch on screen, and the clear is cheap.
 		if (!issued) return;
 		await run(workspaceArgs(undefined));
 		await run(paneArgs(undefined));

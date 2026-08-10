@@ -34,8 +34,8 @@
 import { stat } from "node:fs/promises";
 import { basename } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { createHerdrReporter, type HerdrReporter, herdrTarget } from "../lib/herdr.ts";
 import { getRepoInfo, listWorktrees, type RepoInfo } from "../lib/git.ts";
+import { createHerdrReporter, type HerdrReporter, herdrTarget } from "../lib/herdr.ts";
 import { EMPTY_BRANCHES, listBranches } from "./branches.ts";
 import { createCommands } from "./commands.ts";
 import { DEFAULT_CONFIG, loadConfig } from "./config.ts";
@@ -183,12 +183,23 @@ export default function (pi: ExtensionAPI) {
 				`  cd ${focus.path}`,
 			]);
 		}
-		// Awaited, not fire-and-forget: pi may exit the moment this returns, and a
-		// half-spawned clear leaves a dead session's branch on herdr's sidebar.
-		// Workspace tokens are reported without a TTL, so nothing expires them.
-		await reporter?.clear();
+		// Retire session and UI before awaiting the clear: if pi fires session_start
+		// before the clear resolves, a post-await replaceSession(undefined) would
+		// silently dispose the newly created session. Workspace tokens have no TTL,
+		// so a half-finished clear leaves a stale branch on herdr's sidebar.
+		const retiring = reporter;
 		replaceSession(undefined);
 		ui.clearAll(ctx);
+		// Cap the clear at 1s: pi sends SIGTERM and SIGKILLs 5s later; one wedged
+		// herdr call costs HERDR_TIMEOUT_MS (2s) and clear() can await up to four
+		// calls (an in-flight report's two, then its own two) — worst case ≈28s.
+		// The timer is unref'd so a pending deadline cannot hold the process open;
+		// .catch() ensures the losing clear() cannot produce an unhandled rejection.
+		const clearDeadline = new Promise<void>((resolve) => {
+			const t = setTimeout(resolve, 1_000);
+			t.unref();
+		});
+		await Promise.race([(retiring?.clear() ?? Promise.resolve()).catch(() => {}), clearDeadline]);
 	});
 
 	// Reports stay up until the user does something else.
