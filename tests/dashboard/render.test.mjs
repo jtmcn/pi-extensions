@@ -97,19 +97,44 @@ ok("empty model still draws the mascot", empty.collapsed.join("\n").includes("â–
 // Panels render in the order they are given. Ordering derivation (sort by
 // order then id) is tested in panels.test.mjs against listPanels(); here we
 // only verify that renderDashboard preserves the order it receives.
+//
+// The input deliberately puts BEE (order:30) before AY (order:10). A sort
+// inside renderDashboard would reorder them by order-value, making AY first;
+// pass-through preserves BEE first. The assertion therefore breaks if someone
+// re-introduces a sort in renderDashboard.
 const ordered = renderDashboard(
 	{
 		...model,
 		panels: [
-			{ id: "a", owner: "x", title: "AY", order: 10, render: () => ["  ay"] },
 			{ id: "b", owner: "x", title: "BEE", order: 30, render: () => ["  bee"] },
+			{ id: "a", owner: "x", title: "AY", order: 10, render: () => ["  ay"] },
 		],
 	},
 	theme,
 	120,
 );
-ok("panels render in order", ordered.collapsed.join("\n").indexOf("[AY]") < ordered.collapsed.join("\n").indexOf("[BEE]"));
+ok("panels render in order", ordered.collapsed.join("\n").indexOf("[BEE]") < ordered.collapsed.join("\n").indexOf("[AY]"));
 
 ok("mascot is stable", mascotLines(theme, "1.2.3").join("\n").includes("1.2.3"));
+
+// ANSI theme: emits real escape sequences so the ANSI-aware width guard is exercised.
+// Under the identity theme above, line.length equals visible width, so the byte-counting
+// bug was invisible. This theme exposes it.
+const ansiTheme = {
+	fg: (_c, t) => `\x1b[2m${t}\x1b[0m`,
+	bold: (t) => `\x1b[1m${t}\x1b[0m`,
+};
+const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*m/g, "");
+// After stripping complete escapes any remaining \x1b is a severed sequence.
+const hasSeveredEscape = (s) => stripAnsi(s).includes("\x1b");
+
+for (const width of [120, 90, 60]) {
+	const rendered = renderDashboard(widthModel, ansiTheme, width);
+	const lines = [...rendered.collapsed, ...rendered.expanded];
+	const longestVisible = Math.max(...lines.map((l) => stripAnsi(l).length));
+	ok(`ANSI: no visible line exceeds ${width}`, longestVisible <= width, `longest visible was ${longestVisible}`);
+	const severed = lines.filter((l) => hasSeveredEscape(l));
+	ok(`ANSI: no severed escape at width ${width}`, severed.length === 0, `severed: ${JSON.stringify(severed[0])}`);
+}
 
 done();

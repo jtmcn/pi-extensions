@@ -6,7 +6,7 @@
  * whole screen is testable without a session.
  */
 
-import { layoutRows } from "./layout.ts";
+import { layoutRows, truncateVisible } from "./layout.ts";
 import { type MascotTheme, mascotLines } from "./mascot.ts";
 import type { Panel } from "../lib/panels.ts";
 import { barGlyph, formatTokens, type SizedSkill, totalTokens } from "./sizes.ts";
@@ -73,7 +73,7 @@ function renderSkills(model: DashboardModel, theme: MascotTheme, width: number, 
 			for (const skill of skills) {
 				const bar = barGlyph(skill.tokens, max);
 				lines.push(`${" ".repeat(INDENT)}${skill.name} ${theme.fg("accent", bar)}`);
-				lines.push(theme.fg("dim", `${" ".repeat(INDENT + 2)}${skill.description}`.slice(0, width)));
+				lines.push(truncateVisible(theme.fg("dim", `${" ".repeat(INDENT + 2)}${skill.description}`), width));
 			}
 			continue;
 		}
@@ -128,8 +128,9 @@ export function renderDashboard(model: DashboardModel, theme: MascotTheme, width
 		}
 
 		// Truncation here is the last line of defence: a panel is free to
-		// return anything, and the header must never wrap.
-		return lines.map((line) => (line.length > width ? line.slice(0, width) : line));
+		// return anything, and the header must never wrap. Measure by visible
+		// columns so ANSI escape bytes do not cause premature truncation.
+		return lines.map((line) => truncateVisible(line, width));
 	};
 
 	return { collapsed: build(false), expanded: build(true) };
