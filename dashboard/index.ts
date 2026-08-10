@@ -23,12 +23,31 @@
  * The component closes over `tui` and a module-level model instead.
  */
 
+import { basename, dirname } from "node:path";
 import { type ExtensionAPI, VERSION } from "@earendil-works/pi-coding-agent";
 import { listPanels, subscribe } from "../lib/panels.ts";
 import { type DashboardModel, renderDashboard } from "./render.ts";
-import { defaultSettingsPath, enableQuietStartup } from "./settings.ts";
+import { defaultSettingsPath, enableQuietStartup, readQuietStartup } from "./settings.ts";
 import { measureSkills } from "./sizes.ts";
 import { parseContextFiles, parseSkills } from "./skills.ts";
+
+/**
+ * Derive a display name for an extension command.
+ *
+ * pi sets `sourceInfo.source` to "local" or "auto" for filesystem-loaded
+ * extensions, never to the extension’s name. The name lives in the path:
+ * basename(dirname(path)) for index.* files, or basename without extension
+ * otherwise. Package-origin commands (origin === "package") do carry a
+ * meaningful source, e.g. "pi-subagents@0.38.0".
+ */
+function extensionName(sourceInfo: { source?: string; path?: string; origin?: string } | undefined): string {
+	if (sourceInfo?.origin === "package" && sourceInfo.source) return sourceInfo.source;
+	if (!sourceInfo?.path) return "unknown";
+	const file = basename(sourceInfo.path);
+	return /^index\./i.test(file)
+		? basename(dirname(sourceInfo.path))
+		: file.replace(/\.[^.]+$/, "");
+}
 
 export default function (pi: ExtensionAPI) {
 	/**
@@ -57,11 +76,20 @@ export default function (pi: ExtensionAPI) {
 				...new Set(
 					commands
 						.filter((c) => c.source === "extension")
-						.map((c) => c.sourceInfo?.source || c.name),
+						.map((c) => extensionName(c.sourceInfo)),
 				),
 			].sort(),
 			panels: [],
 		};
+
+		// When quietStartup is not set, pi’s own startup sections render above this
+		// dashboard. Notify once so the user learns about /dashboard setup.
+		if (!await readQuietStartup(defaultSettingsPath())) {
+			ctx.ui.notify(
+				"pi’s startup sections are visible above. Run /dashboard setup once to see this dashboard alone.",
+				"info",
+			);
+		}
 
 		ctx.ui.setHeader((tui, theme) => {
 			let expanded = false;

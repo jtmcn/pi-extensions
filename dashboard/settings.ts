@@ -6,24 +6,51 @@
  * tested against a temp file rather than through a fake `pi`.
  */
 
-import { readFile, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 export type SetupResult =
 	| { ok: true; path: string }
 	| { ok: false; path: string; reason: string };
 
 export function defaultSettingsPath(): string {
-	return join(homedir(), ".pi", "agent", "settings.json");
+	return join(getAgentDir(), "settings.json");
+}
+
+/**
+ * Return whether `quietStartup` is enabled at the given settings path.
+ *
+ * Never throws: a missing file, invalid JSON, or any read error returns false
+ * so a startup failure here cannot break a session.
+ */
+export async function readQuietStartup(path: string): Promise<boolean> {
+	try {
+		const raw = await readFile(path, "utf8");
+		const parsed: unknown = JSON.parse(raw);
+		return (
+			typeof parsed === "object" &&
+			parsed !== null &&
+			!Array.isArray(parsed) &&
+			(parsed as Record<string, unknown>).quietStartup === true
+		);
+	} catch {
+		return false;
+	}
 }
 
 export async function enableQuietStartup(path: string): Promise<SetupResult> {
 	let raw: string;
 	try {
 		raw = await readFile(path, "utf8");
-	} catch {
-		// No settings file yet is a first run, not a failure.
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code;
+		if (code !== "ENOENT") {
+			// An unreadable file (permissions, etc.) is not a first-run scenario.
+			// Treat it as missing but report the real reason.
+			return { ok: false, path, reason: `could not read ${path}: ${String(error)}` };
+		}
+		// No settings file yet — first run.
 		raw = "{}";
 	}
 
@@ -31,7 +58,7 @@ export async function enableQuietStartup(path: string): Promise<SetupResult> {
 	try {
 		parsed = JSON.parse(raw);
 	} catch (error) {
-		// Never clobber a file we could not read: the user's whole configuration
+		// Never clobber a file we could not parse: the user's whole configuration
 		// is in there, and a rewrite would silently discard it.
 		return { ok: false, path, reason: `could not parse ${path}: ${String(error)}` };
 	}
@@ -41,6 +68,11 @@ export async function enableQuietStartup(path: string): Promise<SetupResult> {
 	}
 
 	const settings = { ...(parsed as Record<string, unknown>), quietStartup: true };
-	await writeFile(path, `${JSON.stringify(settings, null, "\t")}\n`);
+	try {
+		await mkdir(dirname(path), { recursive: true });
+		await writeFile(path, `${JSON.stringify(settings, null, "\t")}\n`);
+	} catch (error) {
+		return { ok: false, path, reason: `could not write ${path}: ${String(error)}` };
+	}
 	return { ok: true, path };
 }

@@ -187,24 +187,32 @@ export default function (pi: ExtensionAPI) {
 			say(ctx, `focused worktree ${restored.path} no longer exists; focus cleared`, "warning");
 			active.setFocus(ctx, undefined, false);
 		}
-		// Publish location immediately with git facts; gt stack read runs unawaited.
-		// `ctx` is not touched inside the callback — publishing goes through the
-		// registry so no stale-context crash is possible. The cycle guard ensures a
-		// superseded session's result doesn't overwrite the current location.
-		const location = {
-			path: repo.worktreeRoot ?? ctx.cwd,
-			branch: repo.branch,
-			dirty: await countDirty(pi, ctx.cwd),
-			...((await aheadBehind(pi, ctx.cwd)) ?? {}),
-		};
-		publishLocationPanel(location, { kind: "pending" });
-		void readStack(pi, ctx.cwd, repo.branch).then((stack) => {
-			if (!isCurrentLocationCycle(cycle)) return;
-			publishLocationPanel(location, stack);
-		});
-
 		active.paint(ctx);
 		active.prMonitor.refresh();
+
+		// Read git status after painting the footer so a git error here cannot
+		// prevent the footer from rendering. The focused worktree (if any) is the
+		// canonical head; fall back to the repo root for an unfocused session.
+		// countDirty and aheadBehind run concurrently to halve the serial latency.
+		// `ctx` is not touched inside the callback — publishing goes through the
+		// registry so no stale-context crash is possible.
+		const head = active.focus?.path ?? repo.worktreeRoot ?? ctx.cwd;
+		const branch = active.focus?.branch ?? repo.branch;
+		try {
+			const [dirty, ab] = await Promise.all([
+				countDirty(pi, head),
+				aheadBehind(pi, head),
+			]);
+			if (!isCurrentLocationCycle(cycle)) return;
+			const location = { path: head, branch, dirty, ...(ab ?? {}) };
+			publishLocationPanel(location, { kind: "pending" });
+			void readStack(pi, head, branch).then((stack) => {
+				if (!isCurrentLocationCycle(cycle)) return;
+				publishLocationPanel(location, stack);
+			});
+		} catch {
+			// Git errors during startup do not affect the session.
+		}
 	});
 
 	/**
