@@ -47,6 +47,13 @@ export interface SessionOptions {
 	config?: WorktreeConfig;
 	/** Config files that were applied, for `/worktree config`. */
 	configSources?: string[];
+	/**
+	 * Called with the branch the session displays, whenever it is painted.
+	 *
+	 * A plain function rather than a herdr dependency: `session.ts` owns state
+	 * with a lifetime, and what consumes that state is `index.ts`'s business.
+	 */
+	report?: (branch: string | undefined) => void;
 }
 
 export interface WorktreeSession {
@@ -70,6 +77,7 @@ export function createSession(options: SessionOptions): WorktreeSession {
 	const { pi, ui, ctx, repo } = options;
 	const config = options.config ?? { ...DEFAULT_CONFIG };
 	const configSources = options.configSources ?? [];
+	const report = options.report ?? (() => {});
 
 	let focus: FocusTarget | undefined;
 	let disposed = false;
@@ -90,6 +98,10 @@ export function createSession(options: SessionOptions): WorktreeSession {
 		const pr = prMonitor.label();
 		if (pr) parts.push(pr);
 		ui.setStatus(target, parts);
+		// The branch on screen, not the session's: while focused, the footer and
+		// herdr both show the focused worktree's branch. Undefined is a real
+		// value here — a detached HEAD clears rather than showing a SHA.
+		report(focus ? focus.branch : repo?.branch);
 	};
 
 	const prMonitor = createPrMonitor({
