@@ -27,6 +27,13 @@ export interface CreateOptions {
 	branch: string;
 	/** Start point for a new branch. Defaults to config.defaultBase or repo default. */
 	base?: string;
+	/**
+	 * Remote-tracking ref to branch from, e.g. `origin/foo`. Mutually exclusive
+	 * with `base`: a tracked branch has its start point already. Ignored when
+	 * the local branch already exists, which is deliberate — that branch may
+	 * hold unpushed commits.
+	 */
+	track?: string;
 	config: WorktreeConfig;
 	projectRoot: string;
 	/** Worktree to copy `config.copyFiles` from. */
@@ -38,6 +45,8 @@ export interface CreateResult {
 	path: string;
 	branch: string;
 	base?: string;
+	/** The remote ref the new branch tracks, when one was used. */
+	track?: string;
 	createdBranch: boolean;
 	copied: string[];
 	/** Non-fatal problems (a `copyFiles` entry that could not be copied, etc.). */
@@ -61,6 +70,7 @@ export async function createWorktree(pi: CommandRunner, options: CreateOptions):
 
 	const branch = options.branch.trim();
 	if (!branch) throw new Error("Branch name is required");
+	if (options.track && options.base) throw new Error("base and track are mutually exclusive");
 
 	const existing = await branchExists(pi, branch, projectRoot);
 	const inUse = (await listWorktrees(pi, projectRoot)).find((wt) => wt.branch === branch);
@@ -71,8 +81,15 @@ export async function createWorktree(pi: CommandRunner, options: CreateOptions):
 	await mkdir(dirname(target), { recursive: true });
 
 	let base: string | undefined;
+	let track: string | undefined;
 	if (existing) {
 		await gitOrThrow(pi, ["worktree", "add", target, branch], projectRoot, { signal });
+	} else if (options.track) {
+		track = options.track;
+		if (!(await refExists(pi, track, projectRoot))) {
+			throw new Error(`Remote branch "${track}" does not exist`);
+		}
+		await gitOrThrow(pi, ["worktree", "add", "--track", "-b", branch, target, track], projectRoot, { signal });
 	} else {
 		base = options.base ?? config.defaultBase ?? (await defaultBranch(pi, projectRoot));
 		if (base && !(await refExists(pi, base, projectRoot))) {
@@ -98,7 +115,7 @@ export async function createWorktree(pi: CommandRunner, options: CreateOptions):
 		};
 	}
 
-	return { path: target, branch, base, createdBranch: !existing, copied, warnings, postCreate };
+	return { path: target, branch, base, track, createdBranch: !existing, copied, warnings, postCreate };
 }
 
 export interface RemoveOptions {

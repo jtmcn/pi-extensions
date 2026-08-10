@@ -25,6 +25,8 @@ export interface Ui {
 	clearReport: (ctx: ExtensionContext) => void;
 	/** Paint the footer segment from already-composed parts, or clear it. */
 	setStatus: (ctx: ExtensionContext, parts: string[]) => void;
+	/** Write a parting message to stdout as the process exits. */
+	farewell: (ctx: ExtensionContext, lines: string[]) => void;
 	/** Drop both the segment and the widget, whether or not one was shown. */
 	clearAll: (ctx: ExtensionContext) => void;
 }
@@ -88,6 +90,25 @@ export function createUi(options: UiOptions): Ui {
 		ctx.ui.setStatus(statusKey, parts.length > 0 ? parts.join(" ") : undefined);
 	};
 
+	/**
+	 * Say something on the way out.
+	 *
+	 * Deliberately *not* `say`: at quit the TUI is being torn down, so a notify
+	 * lands on a surface that is about to be erased. stdout is the only channel
+	 * that survives into the user's scrollback. This works because pi renders
+	 * inline by default — under `tui.altScreen` fullscreen the write is lost with
+	 * the alternate buffer, which is why this is a nicety and not a mechanism
+	 * anything depends on.
+	 *
+	 * Silent outside `tui` and `print`: in `json` and `rpc` modes stdout is a
+	 * protocol stream, and a stray human-readable line corrupts it.
+	 */
+	const farewell = (ctx: ExtensionContext, lines: string[]) => {
+		if (lines.length === 0) return;
+		if (ctx.mode !== "tui" && ctx.mode !== "print") return;
+		stdout(`${lines.join("\n")}\n`);
+	};
+
 	/** Shutdown: leave nothing painted for the next session to inherit. */
 	const clearAll = (ctx: ExtensionContext) => {
 		if (!ctx.hasUI) return;
@@ -96,5 +117,5 @@ export function createUi(options: UiOptions): Ui {
 		widgetShown = false;
 	};
 
-	return { say, report, clearReport, setStatus, clearAll };
+	return { say, report, clearReport, setStatus, farewell, clearAll };
 }

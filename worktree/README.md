@@ -39,6 +39,7 @@ already resolved, but a hand-written `/var` vs `/private/var` will not match.
 /worktree                 interactive menu
 /worktree list            worktrees for this repo, with dirty counts
 /worktree new <name> [base]   create worktree + branch, then focus it
+/worktree checkout <branch> [name]  worktree for an existing branch
 /worktree focus <name>    redirect tool calls into a worktree
 /worktree focus off       stop redirecting
 /worktree remove <name>   remove a worktree (prompts about dirt and the branch)
@@ -70,6 +71,35 @@ command previously did nothing at all.
 
 When focused, the footer shows `⑂ <name> (<branch>)`.
 
+## An existing branch
+
+`/worktree checkout <branch> [name]` is the counterpart to `new`: `new` makes a
+branch, `checkout` takes one that exists. The argument is a local branch, a
+fully qualified remote ref (`origin/alice/hotfix`), or a branch name that is
+unambiguous across remotes. With no argument you get a picker; non-interactively
+a branch name is required, as for `focus` and `remove`.
+
+Resolution is local-first, and that is load-bearing: a local branch may hold
+commits the remote does not, so `checkout origin/foo` with a local `foo` checks
+out your `foo` untouched and says so, rather than resetting anything.
+
+The network is touched only on a miss — one `git fetch` of the relevant remote,
+then one retry. So the common case costs nothing and a branch pushed a minute
+ago is still found. A stale remote-tracking ref is the accepted gap: it matches
+immediately, so the worktree can start a few commits behind. A fetch that fails
+is a warning, not an error.
+
+The directory name drops the remote and `branchPrefix`, so with
+`"branchPrefix": "joel/"`, `origin/joel/fix-parser` becomes `fix-parser` and
+`origin/alice/hotfix` becomes `alice-hotfix`. A derived name that collides gets
+`-2`; a name you pass yourself is never adjusted and fails instead. `autoFocus`
+applies exactly as it does for `new`.
+
+The model's `worktree` tool deliberately does not expose this. With auto-focus
+on, checking out an existing branch could put the model to work directly on a
+shared branch instead of a scratch one, so it stays a user decision — like
+`focus` and `remove`.
+
 ## Tool
 
 The model gets a `worktree` tool with `action: "list" | "create"`. It can spin
@@ -79,8 +109,9 @@ up an isolated worktree for a parallel experiment.
 model keeps working where it just landed instead of threading an absolute path
 through every later call. The footer shows the focus and `/worktree focus off`
 undoes it. Set `"autoFocus": false` for the old behaviour, where the tool only
-returns the path. The tool still cannot focus an *existing* worktree — switching
-between worktrees stays a user decision.
+returns the path. The tool still cannot focus an *existing* worktree or check
+out an *existing* branch — switching between worktrees, and starting work on a
+branch that already exists, stay user decisions.
 
 Note that `create` runs the configured `postCreate` command, so a model tool
 call can execute the project's setup command. `postCreate` therefore only comes
@@ -167,10 +198,64 @@ PR appears promptly.
 Everything fails silently: no `gh`, not logged in, no network, or a non-GitHub
 remote simply means no PR text.
 
+## herdr
+
+[herdr](https://herdr.dev) labels a space from its pane's `cwd` and derives the
+branch the same way, so a bare-layout checkout (`~/Code/hellos/main`) reads
+`main` — and keeps reading `main` after `git switch`, and after `/worktree
+focus`, since focus never changes `cwd`.
+
+When pi runs inside herdr with a UI, the branch on the footer is also reported
+to it, on every paint:
+
+```
+herdr workspace report-metadata $HERDR_WORKSPACE_ID --source pi --token pi_branch=<branch>
+herdr pane report-metadata $HERDR_PANE_ID --source pi --title "π - <branch>"
+```
+
+The value is the branch pi displays — the focused worktree's, else the
+session's — with `branchPrefix` stripped, since it is on every branch you make
+and the sidebar is 18–36 columns wide. A detached HEAD clears both rather than
+showing a SHA. Unchanged branches cost nothing: the reporter dedupes, so the
+60s PR poll does not fork a process to repeat itself.
+
+What keeps the value current is the PR monitor's HEAD re-read, which runs on
+every poll and on input — including in a session where `gh` is unavailable and
+nothing is polling, so a `git switch` there still reaches herdr on the next
+prompt.
+
+The token renders only if a row layout names it:
+
+```toml
+[ui.sidebar.spaces]
+rows = [["state_icon", "workspace"], ["$pi_branch", "git_status"]]
+```
+
+That replaces herdr's built-in `branch` token. Keeping both is correct for
+spaces with no pi in them, but every pi space then reads `fix-parser main`.
+
+Nothing is reported outside herdr, or under `pi -p`. The first failure — no
+`herdr` on `PATH`, a dead socket — switches it off for the session, like a
+missing `gh`. `session_shutdown` clears both surfaces; a `kill -9` leaves the
+last value on screen until the next pi session in that space reports over it.
+
+Commands are queued per surface within a pi process, so `/new` cannot leave the
+retiring session's already-spawned write on screen: it lands first and the new
+session's lands last. The cost is that the new session's first report waits for
+that one command, which a wedged socket caps at roughly seven seconds (a 2s
+timeout plus pi's SIGTERM/SIGKILL grace). Reports are fire-and-forget, so
+nothing in the session waits with it.
+
+Two known gaps: workspace tokens are per space, so two pi sessions in one space
+show whichever painted last (pane titles stay right), and the space *label* is
+left alone — it is `basename(cwd)`, and only `workspace rename` changes it,
+which is persistent state a crash would strand.
+
 ## Files
 
 ```
 lib/git.ts               shared git helpers (used by other extensions too)
+lib/herdr.ts             reporting the displayed branch to herdr (pure + one CLI)
 worktree/index.ts        wiring only: event handlers and registration
 worktree/session.ts      per-session state, focus, and the session's monitor
 worktree/pr-monitor.ts   the PR status state machine
@@ -178,6 +263,7 @@ worktree/commands.ts     /worktree and its completions
 worktree/tool.ts         the model-facing tool
 worktree/ui.ts           notifications, reports, status segment
 worktree/config.ts       config loading and path templating
+worktree/branches.ts     branch listing, resolution and naming (pure + two git calls)
 worktree/focus.ts        tool-input rewriting (pure, heavily tested)
 worktree/select.ts       argument parsing and name matching (pure)
 worktree/suggest.ts      the generated name offered by `new` (pure)
@@ -200,17 +286,27 @@ node tests/run-all.mjs worktree     # this extension only
 npm test                            # the whole collection
 ```
 
-Ten files under `tests/worktree/`. `worktree.test.mjs` runs against throwaway
+Thirteen files under `tests/worktree/`. `worktree.test.mjs` runs against throwaway
 repos in `$TMPDIR`, covering both plain and bare layouts, plus pure-function
 tests for focus rewriting, argument parsing, name matching and config
 precedence. Set `PI_TEST_BARE_REPO` to also check a real bare-layout checkout on
-this machine. `pr.test.mjs`, `gh.test.mjs`, and `suggest.test.mjs` cover the PR
-display and its `gh` calls, and name suggestion; all pure or fake-runner tests
-with no network or subprocesses.
+this machine. `branches.test.mjs` covers resolution and naming as pure
+functions — local-wins, multi-remote ambiguity, a slash-containing remote
+name — plus `listBranches` and `fetchRemote` against a real clone, including a
+branch pushed after the clone that only a fetch can reveal. `pr.test.mjs`,
+`gh.test.mjs`, and `suggest.test.mjs` cover the PR display and its `gh` calls,
+and name suggestion; all pure or fake-runner tests with no network or
+subprocesses.
 `pr-monitor.test.mjs`, `session.test.mjs`, and `ui.test.mjs` cover the three
 extracted units directly, with injected runners and clocks and no fake `pi` at
 all — single flight, the pending re-run, backoff, idle suspension, disposal,
 focus persistence, and the `hasUI` × print matrix.
+
+`herdr.test.mjs` covers the reporter as a fake-runner unit — argv order, prefix
+stripping, deduping, and the first-failure switch-off — and
+`herdr-wiring.test.mjs` covers when a reporter exists at all: under herdr, with
+a UI, cleared at shutdown, following a `git switch` with `gh` unavailable, and a
+session replaced mid-report whose late write must not land on the new one's.
 
 `restore.test.mjs` covers restoring focus from the transcript through a fake
 `pi` with real git: the last entry winning, a cleared entry meaning unfocused,

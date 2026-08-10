@@ -7,6 +7,8 @@
  *   /worktree                 interactive menu
  *   /worktree list            show worktrees for this repo
  *   /worktree new <name>      create a worktree (+ branch) and focus it
+ *   /worktree checkout <branch> [name]
+ *                             create a worktree for a branch that exists
  *   /worktree focus <name>    redirect tool calls into a worktree
  *   /worktree focus off       stop redirecting
  *   /worktree remove <name>   remove a worktree
@@ -30,8 +32,11 @@
  */
 
 import { stat } from "node:fs/promises";
+import { basename } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getRepoInfo, listWorktrees, type RepoInfo } from "../lib/git.ts";
+import { createHerdrReporter, type HerdrReporter, herdrTarget } from "../lib/herdr.ts";
+import { EMPTY_BRANCHES, listBranches } from "./branches.ts";
 import { createCommands } from "./commands.ts";
 import { DEFAULT_CONFIG, loadConfig } from "./config.ts";
 import { applyFocus } from "./focus.ts";
@@ -55,6 +60,29 @@ export default function (pi: ExtensionAPI) {
 	let session: WorktreeSession | undefined;
 
 	/**
+	 * The current session's herdr reporter, if pi is running under herdr with a
+	 * UI. Retired with the session it belongs to, so a replaced session cannot
+	 * keep reporting a branch nobody is looking at.
+	 */
+	let reporter: HerdrReporter | undefined;
+
+	/**
+	 * Bumped for every reporter created, so a reporter can tell whether it still
+	 * owns the herdr ids it is about to write.
+	 *
+	 * `dispose()` is not enough on its own: shutdown disposes the reporter and
+	 * *then* awaits its clear, and that clear can still be running when the next
+	 * session starts reporting (`/new` fires session_shutdown, then
+	 * session_start). Both sessions write the same workspace and pane id, so the
+	 * loser of that race must drop its remaining writes rather than land last.
+	 *
+	 * The write it has already spawned cannot be dropped; lib/herdr.ts orders that
+	 * one behind this session's, keyed by `runner` — which is why every reporter
+	 * in this process is built over the same `pi`.
+	 */
+	let reporterGeneration = 0;
+
+	/**
 	 * The only place `session` is assigned.
 	 *
 	 * Retiring the outgoing session is not optional: its monitor may have a fetch
@@ -62,21 +90,48 @@ export default function (pi: ExtensionAPI) {
 	 * made stale — which throws and takes the process down. Routing every change
 	 * through here means the disposal cannot be forgotten or ordered wrongly.
 	 */
-	const replaceSession = (next: WorktreeSession | undefined) => {
+	const replaceSession = (next: WorktreeSession | undefined, nextReporter?: HerdrReporter) => {
 		session?.dispose();
+		reporter?.dispose();
 		session = next;
+		reporter = nextReporter;
 		return next;
+	};
+
+	/**
+	 * A reporter for this session, or undefined.
+	 *
+	 * Gated on `hasUI` deliberately: a `pi -p` run borrows the user's own shell
+	 * pane for a few seconds, and the PR monitor does not poll without a footer,
+	 * so a reported branch would never refresh anyway.
+	 */
+	const makeReporter = (ctx: ExtensionContext, branchPrefix: string): HerdrReporter | undefined => {
+		if (!ctx.hasUI) return undefined;
+		const target = herdrTarget(process.env);
+		if (!target) return undefined;
+		const generation = ++reporterGeneration;
+		return createHerdrReporter({
+			runner: pi,
+			target,
+			branchPrefix,
+			isCurrent: () => generation === reporterGeneration,
+		});
 	};
 
 	pi.on("session_start", async (_event, ctx) => {
 		replaceSession(undefined);
 		commands.setKnown([]);
+		commands.setKnownBranches(EMPTY_BRANCHES);
 
 		const repo = await getRepoInfo(pi, ctx.cwd);
 		if (!repo) {
 			// Still a session, just not one that can do anything: the status segment
 			// needs clearing either way.
-			replaceSession(createSession({ pi, ui, ctx, repo: undefined }))?.paint(ctx);
+			const noRepoReporter = makeReporter(ctx, "");
+			replaceSession(
+				createSession({ pi, ui, ctx, repo: undefined, report: (branch) => noRepoReporter?.report(branch) }),
+				noRepoReporter,
+			)?.paint(ctx);
 			return;
 		}
 
@@ -84,6 +139,7 @@ export default function (pi: ExtensionAPI) {
 			projectRoot: repo.projectRoot,
 			projectTrusted: ctx.isProjectTrusted(),
 		});
+		const nextReporter = makeReporter(ctx, loaded.config.branchPrefix);
 		const active = replaceSession(
 			createSession({
 				pi,
@@ -92,15 +148,19 @@ export default function (pi: ExtensionAPI) {
 				repo,
 				config: loaded.config,
 				configSources: loaded.sources,
+				report: (branch) => nextReporter?.report(branch),
 			}),
+			nextReporter,
 		);
 		if (!active) return;
 		for (const warning of loaded.warnings) say(ctx, warning, "warning");
 
 		try {
 			commands.setKnown(await listWorktrees(pi, repo.projectRoot));
+			commands.setKnownBranches(await listBranches(pi, repo.projectRoot));
 		} catch {
 			commands.setKnown([]);
+			commands.setKnownBranches(EMPTY_BRANCHES);
 		}
 
 		// Restore focus from the session transcript so /reload and resume keep it.
@@ -122,9 +182,48 @@ export default function (pi: ExtensionAPI) {
 		active.prMonitor.refresh();
 	});
 
-	pi.on("session_shutdown", (_event, ctx) => {
+	/**
+	 * On the way out, leave the focused worktree's path in the user's scrollback.
+	 *
+	 * Focus moves the *agent*, never the user's shell — a child process cannot
+	 * change its parent's working directory — so quitting drops the user back
+	 * wherever they launched pi, with the worktree they were just working in
+	 * named only in a status bar that is now gone. Printing the path makes the
+	 * follow-up `cd` a copy-paste instead of an archaeology exercise.
+	 *
+	 * Only on `quit`: the same event fires for `/new`, `/fork`, `/reload`, and
+	 * `--resume`, where the TUI lives on and a raw stdout write would tear a hole
+	 * in the rendering.
+	 */
+	pi.on("session_shutdown", async (event, ctx) => {
+		const focus = session?.focus;
+		// Focus on the session's own worktree never redirected anything, so its path
+		// is just the cwd the user already has.
+		const redirected = focus && focus.path !== session?.repo?.worktreeRoot;
+		if (event.reason === "quit" && focus && redirected) {
+			ui.farewell(ctx, [
+				`worktree: ${basename(focus.path)}${focus.branch ? ` (${focus.branch})` : ""}`,
+				`  cd ${focus.path}`,
+			]);
+		}
+		// Retire session and UI before awaiting the clear: if pi fires session_start
+		// before the clear resolves, a post-await replaceSession(undefined) would
+		// silently dispose the newly created session. Workspace tokens have no TTL,
+		// so a half-finished clear leaves a stale branch on herdr's sidebar.
+		const retiring = reporter;
 		replaceSession(undefined);
 		ui.clearAll(ctx);
+		// Cap the clear at 1s: pi sends SIGTERM and SIGKILLs 5s later; one wedged
+		// herdr call costs HERDR_TIMEOUT_MS (2s) and clear() can await up to four
+		// calls (an in-flight report's two, then its own two) — worst case ≈28s,
+		// plus whatever the previous session still has queued for those surfaces.
+		// The timer is unref'd so a pending deadline cannot hold the process open;
+		// .catch() ensures the losing clear() cannot produce an unhandled rejection.
+		const clearDeadline = new Promise<void>((resolve) => {
+			const t = setTimeout(resolve, 1_000);
+			t.unref();
+		});
+		await Promise.race([(retiring?.clear() ?? Promise.resolve()).catch(() => {}), clearDeadline]);
 	});
 
 	// Reports stay up until the user does something else.
@@ -212,6 +311,7 @@ export default function (pi: ExtensionAPI) {
 			getSessionCtx: () => session?.ctx,
 			setFocus,
 			setKnown: commands.setKnown,
+			setKnownBranches: commands.setKnownBranches,
 		}),
 	);
 }

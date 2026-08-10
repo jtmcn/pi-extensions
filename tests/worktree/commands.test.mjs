@@ -58,6 +58,29 @@ async function makeRepo(branches = ["exp"]) {
 }
 
 /**
+ * An upstream repo plus a clone of it, for the remote half of `checkout`.
+ * `remoteOnly` branches are created upstream *after* the clone, so the clone
+ * cannot see them without fetching.
+ */
+async function makeClone({ shared = [], remoteOnly = [] } = {}) {
+	const root = await realpath(await mkdtemp(join(tmpdir(), "pi-commands-clone-")));
+	const upstream = join(root, "upstream");
+	await pexec("git", ["init", "-q", "-b", "main", upstream]);
+	await pexec("git", ["config", "user.email", "test@example.com"], { cwd: upstream });
+	await pexec("git", ["config", "user.name", "Test"], { cwd: upstream });
+	await writeFile(join(upstream, "file.txt"), "hi\n");
+	await pexec("git", ["add", "."], { cwd: upstream });
+	await pexec("git", ["commit", "-q", "-m", "init"], { cwd: upstream });
+	for (const branch of shared) await pexec("git", ["branch", branch], { cwd: upstream });
+	const dir = join(root, "down");
+	await pexec("git", ["clone", "-q", upstream, dir]);
+	await pexec("git", ["config", "user.email", "test@example.com"], { cwd: dir });
+	await pexec("git", ["config", "user.name", "Test"], { cwd: dir });
+	for (const branch of remoteOnly) await pexec("git", ["branch", branch], { cwd: upstream });
+	return { root, upstream, dir };
+}
+
+/**
  * Commands wired to fakes.
  *
  * `confirm` is a queue of answers, so a test can say yes to removal and no to
@@ -79,6 +102,15 @@ function setup({
 	const prompts = { confirm: [], select: [], input: [], editor: [] };
 	let focus;
 
+	const gitCalls = [];
+	const real = execRunner();
+	const runner = {
+		exec: (command, args, options) => {
+			gitCalls.push(args.join(" "));
+			return real.exec(command, args, options);
+		},
+	};
+
 	const ui = {
 		say: (_ctx, message, level = "info") => said.push({ message, level }),
 		report: (_ctx, title, lines) => reported.push({ title, lines }),
@@ -88,7 +120,7 @@ function setup({
 	};
 
 	const commands = createCommands({
-		runner: execRunner(),
+		runner,
 		ui,
 		getConfig: () => ({ ...DEFAULT_CONFIG, ...config }),
 		getConfigSources: () => [],
@@ -130,6 +162,7 @@ function setup({
 		reported,
 		prompts,
 		focusCalls,
+		gitCalls,
 		setFocus: (target) => {
 			focus = target;
 		},
@@ -544,6 +577,156 @@ const userEntry = (content) => ({ type: "message", message: { role: "user", cont
 	await rm(dir, { recursive: true, force: true });
 }
 
+// ==================================================== checkout
+
+{
+	const { dir, paths } = await makeRepo(["exp"]);
+	const info = await getRepoInfo(execRunner(), dir);
+	const t = setup({ config: { branchPrefix: "joel/", autoFocus: true } });
+	await pexec("git", ["branch", "joel/local-work"], { cwd: dir });
+
+	await t.commands.dispatch(info, t.ctx, "checkout joel/local-work");
+	const created = join(dir, ".claude/worktrees/local-work");
+	ok("checkout: local branch checked out", await exists(created), t.messages().join(" | "));
+	ok("checkout: branchPrefix stripped from the directory", !(await exists(join(dir, ".claude/worktrees/joel-local-work"))), t.messages().join(" | "));
+	ok("checkout: focused", t.focusCalls.at(-1)?.path === created, JSON.stringify(t.focusCalls.at(-1)));
+	ok("checkout: no fetch when it resolved locally", !t.gitCalls.some((c) => c.startsWith("fetch")), JSON.stringify(t.gitCalls));
+
+	await t.commands.dispatch(info, t.ctx, "checkout exp");
+	ok(
+		"checkout: a branch checked out elsewhere is refused with the path",
+		t.errors().at(-1)?.includes(paths.exp) && t.errors().at(-1)?.includes("/worktree focus"),
+		String(t.errors().at(-1)),
+	);
+
+	await t.commands.dispatch(info, t.ctx, "checkout no-such-branch");
+	ok("checkout: unknown branch errors", t.errors().at(-1)?.includes("no branch matching"), String(t.errors().at(-1)));
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// The remote half, with a branch that only exists upstream: resolving must
+	// miss, fetch once, and then succeed.
+	const { root, dir } = await makeClone({ shared: ["alice/hotfix"], remoteOnly: ["pushed-later"] });
+	const info = await getRepoInfo(execRunner(), dir);
+	const t = setup({ config: { branchPrefix: "joel/", autoFocus: false } });
+
+	await t.commands.dispatch(info, t.ctx, "checkout origin/alice/hotfix");
+	const hotfix = join(dir, ".claude/worktrees/alice-hotfix");
+	ok("checkout: remote branch checked out", await exists(hotfix), t.messages().join(" | "));
+	ok("checkout: tracking reported", t.messages().at(-1)?.includes("tracking origin/alice/hotfix"), String(t.messages().at(-1)));
+	const upstreamRef = (await pexec("git", ["config", "branch.alice/hotfix.merge"], { cwd: dir })).stdout.trim();
+	ok("checkout: upstream configured", upstreamRef === "refs/heads/alice/hotfix", upstreamRef);
+
+	// The lazy-fetch rule, measured where a fetch was actually possible: this repo
+	// has a remote, and `origin/alice/hotfix` was already a remote-tracking ref, so
+	// nothing above may have touched the network.
+	const before = t.gitCalls.filter((c) => c.startsWith("fetch")).length;
+	ok("checkout: no fetch when a remote-tracking ref already matched", before === 0, JSON.stringify(t.gitCalls));
+
+	await t.commands.dispatch(info, t.ctx, "checkout pushed-later");
+	const fetches = t.gitCalls.filter((c) => c.startsWith("fetch")).length - before;
+	ok("checkout: a miss fetches exactly once", fetches === 1, String(fetches));
+	ok("checkout: found after fetching", await exists(join(dir, ".claude/worktrees/pushed-later")), t.messages().join(" | "));
+
+	await rm(root, { recursive: true, force: true });
+}
+
+{
+	// Non-interactive: no argument is an error, never a prompt.
+	const { dir } = await makeRepo([]);
+	const info = await getRepoInfo(execRunner(), dir);
+	const t = setup({ hasUI: false });
+	await t.commands.dispatch(info, t.ctx, "checkout");
+	ok("checkout: no argument without a UI is an error", t.errors().at(-1)?.includes("required"), String(t.errors().at(-1)));
+	ok("checkout: no picker is shown without a UI", t.prompts.select.length === 0);
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// Interactive picker, and the marking of a branch already checked out.
+	const { dir } = await makeRepo(["exp"]);
+	const info = await getRepoInfo(execRunner(), dir);
+	const t = setup({ select: (labels) => labels.find((l) => l.startsWith("main")) });
+	await t.commands.dispatch(info, t.ctx, "checkout");
+	const labels = t.prompts.select.at(-1)?.labels ?? [];
+	ok("checkout: picker lists branches", labels.some((l) => l.startsWith("exp")), JSON.stringify(labels));
+	ok("checkout: checked-out branches are marked", labels.find((l) => l.startsWith("exp"))?.includes("checked out"), JSON.stringify(labels));
+	ok(
+		"checkout: picking the session's own branch is refused with focus hint",
+		t.errors().at(-1)?.includes("/worktree focus"),
+		String(t.errors().at(-1)),
+	);
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// An explicit name is used verbatim; a derived one gets uniquified.
+	const { dir } = await makeRepo([]);
+	const info = await getRepoInfo(execRunner(), dir);
+	const t = setup({ config: { branchPrefix: "joel/" } });
+	await pexec("git", ["branch", "joel/thing"], { cwd: dir });
+	await pexec("git", ["branch", "other/thing"], { cwd: dir });
+	await t.commands.dispatch(info, t.ctx, "checkout joel/thing custom-dir");
+	ok("checkout: explicit name is used verbatim", await exists(join(dir, ".claude/worktrees/custom-dir")), t.messages().join(" | "));
+
+	// The same name again, for a different branch: an explicit name must fail
+	// loudly rather than quietly becoming `custom-dir-2`.
+	await pexec("git", ["branch", "third/thing"], { cwd: dir });
+	await t.commands.dispatch(info, t.ctx, "checkout third/thing custom-dir");
+	ok(
+		"checkout: explicit name is never uniquified",
+		t.errors().at(-1)?.includes("Path already exists") && !(await exists(join(dir, ".claude/worktrees/custom-dir-2"))),
+		String(t.errors().at(-1)),
+	);
+
+	await t.commands.dispatch(info, t.ctx, "checkout other/thing");
+	ok("checkout: derived name is other-thing", await exists(join(dir, ".claude/worktrees/other-thing")), t.messages().join(" | "));
+	await t.commands.dispatch(info, t.ctx, "checkout joel/thing a b");
+	ok("checkout: extra arguments rejected", t.errors().at(-1)?.includes("unexpected extra arguments"), String(t.errors().at(-1)));
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// The branch cache is refreshed after a create, so `checkout <tab>` offers a
+	// branch `/worktree new` just made without waiting for the next session.
+	const { dir } = await makeRepo([]);
+	const info = await getRepoInfo(execRunner(), dir);
+	const t = setup({ config: { branchPrefix: "joel/" } });
+	ok("completions: nothing is cached before anything runs", t.commands.getArgumentCompletions("checkout ") === null);
+
+	await t.commands.dispatch(info, t.ctx, "new fresh-thing");
+	const items = t.commands.getArgumentCompletions("checkout ");
+	ok(
+		"completions: a branch /worktree new just created is offered",
+		items?.some((i) => i.value === "checkout joel/fresh-thing"),
+		JSON.stringify(items),
+	);
+	await rm(dir, { recursive: true, force: true });
+}
+
+// ==================================================== completions
+
+{
+	const t = setup();
+	t.commands.setKnownBranches({
+		local: ["main", "joel/fix-parser", "feature/joel/cleanup"],
+		remote: [{ remote: "origin", name: "alice/hotfix", full: "origin/alice/hotfix" }],
+		remotes: ["origin"],
+	});
+	const all = t.commands.getArgumentCompletions("checkout ");
+	ok("completions: locals offered", all?.some((i) => i.value === "checkout main"), JSON.stringify(all));
+	ok("completions: remotes offered by full ref", all?.some((i) => i.value === "checkout origin/alice/hotfix"), JSON.stringify(all));
+	const filtered = t.commands.getArgumentCompletions("checkout joel/");
+	ok("completions: filtered by prefix", filtered?.length === 1 && filtered[0].value === "checkout joel/fix-parser", JSON.stringify(filtered));
+	ok("completions: no match yields null", t.commands.getArgumentCompletions("checkout zzz") === null);
+	ok("completions: subcommand itself still completes", t.commands.getArgumentCompletions("che")?.some((i) => i.value === "checkout"), JSON.stringify(t.commands.getArgumentCompletions("che")));
+	ok("completions: unrelated subcommand unaffected", t.commands.getArgumentCompletions("prune x") === null);
+
+	t.commands.setKnownBranches({ local: [], remote: [], remotes: [] });
+	ok("completions: cleared cache offers nothing", t.commands.getArgumentCompletions("checkout ") === null);
+}
 done();
 
 function basename(p) {

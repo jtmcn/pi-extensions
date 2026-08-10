@@ -18,9 +18,11 @@
  *  - **Retirement.** The session can be *replaced* (`/new`, resume) while a fetch
  *    is in flight. One monitor belongs to one session and is disposed with it,
  *    and every await point rechecks that, so a superseded fetch paints nothing.
- *  - **Re-read the branch before the backoff.** The branch can change inside a
- *    live session, and that read is local git, unaffected by whatever is wrong
- *    with `gh`.
+ *  - **Re-read the branch before the backoff, and before the availability
+ *    check.** The branch can change inside a live session, and that read is
+ *    local git, unaffected by whatever is wrong with `gh`. It is also what keeps
+ *    the displayed branch — and herdr's report of it — honest in a session where
+ *    `gh` switched the PR feature off entirely.
  *  - **Repaint when the displayed target moves**, or the previous branch's PR is
  *    left on screen, linked.
  */
@@ -69,7 +71,11 @@ export interface PrMonitorDeps {
 }
 
 export interface PrMonitor {
-	/** Fetch the active target's PR in the background. Never awaited. */
+	/**
+	 * Re-read the displayed branch and fetch its PR in the background. Never
+	 * awaited. The branch re-read still happens once `gh` has switched the PR
+	 * lookup off for the session; the fetch does not.
+	 */
 	refresh: (force?: boolean) => void;
 	/** User input: end idle suspension, refresh if stale, re-arm the poll. */
 	onInput: () => void;
@@ -184,7 +190,6 @@ export function createPrMonitor(deps: PrMonitorDeps): PrMonitor {
 		// gh for output that can never render.
 		if (disposed) return;
 		if (!hasUI()) return;
-		if (!available) return;
 
 		if (fetching) {
 			// The request is not lost: re-run once the in-flight fetch settles.
@@ -224,6 +229,14 @@ export function createPrMonitor(deps: PrMonitorDeps): PrMonitor {
 					const moved = getTarget();
 					if ((moved ? key(moved) : undefined) !== previousKey) paint();
 				}
+
+				// gh is off for this session (missing, unauthenticated, non-GitHub remote)
+				// and there is no poll timer left to re-arm. Deliberately *after* the
+				// branch re-read above rather than at the top of refresh(): that read is
+				// local git, it is the only thing that notices a `git switch`, and the
+				// displayed branch is reported to herdr whether or not gh works. Input is
+				// what re-triggers it, via onInput().
+				if (!available) return;
 
 				// During a gh outage, every submitted message would otherwise spawn
 				// another gh call (up to 10s, serialized). Bypassed by a forced refresh

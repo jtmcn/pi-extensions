@@ -44,14 +44,37 @@ async function makeRepo() {
  * as unavailable so the PR monitor disables itself immediately: this file is
  * about restore, and a real gh would make it slow and machine-dependent.
  */
-function harness(cwd, entries) {
+function harness(cwd, entries, options = {}) {
 	const h = createFakePi({
 		cwd,
 		entries: () => entries,
 		exec: (command) => (command === "gh" ? { stdout: "", stderr: "", code: 1, killed: false } : undefined),
+		...options,
 	});
 	extension(h.pi);
 	return h;
+}
+
+/**
+ * Capture real `process.stdout` writes.
+ *
+ * The extension builds its own `ui` internally, so the injectable stdout that
+ * ui.test.mjs uses is not reachable from here — and the whole point of the quit
+ * banner is that it goes to the real stream.
+ */
+async function captureStdout(fn) {
+	const written = [];
+	const original = process.stdout.write;
+	process.stdout.write = (chunk) => {
+		written.push(String(chunk));
+		return true;
+	};
+	try {
+		await fn();
+	} finally {
+		process.stdout.write = original;
+	}
+	return written.join("");
 }
 
 /** A transcript entry as `pi.appendEntry("worktree-focus", …)` writes it. */
@@ -175,6 +198,44 @@ const focusEntry = (data) => ({
 	// pr-status.test.mjs, where a gated gh call makes it observable.
 
 	await h.fire("session_shutdown");
+	await rm(dir, { recursive: true, force: true });
+}
+
+// ============================================ the path printed on quit
+
+// Focus moves the agent, not the user's shell, so on quit the only trace of
+// where the work happened is whatever reached the scrollback.
+{
+	const { dir, worktree } = await makeRepo();
+	const h = harness(dir, [focusEntry({ path: worktree, branch: "exp" })], { mode: "tui" });
+	await h.fire("session_start");
+
+	const output = await captureStdout(() => h.fire("session_shutdown", { reason: "quit" }));
+	ok("quit: prints the full worktree path", output.includes(`cd ${worktree}`), JSON.stringify(output));
+	ok("quit: names the branch", output.includes("(exp)"), JSON.stringify(output));
+	await rm(dir, { recursive: true, force: true });
+}
+
+// The same event fires for session replacement, where the TUI lives on and a raw
+// write would tear a hole in the rendering.
+{
+	const { dir, worktree } = await makeRepo();
+	const h = harness(dir, [focusEntry({ path: worktree, branch: "exp" })], { mode: "tui" });
+	await h.fire("session_start");
+
+	const output = await captureStdout(() => h.fire("session_shutdown", { reason: "new" }));
+	ok("/new: prints nothing into a live TUI", output === "", JSON.stringify(output));
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// Nothing was redirected, so the path is just the cwd the user already has.
+	const { dir } = await makeRepo();
+	const h = harness(dir, [], { mode: "tui" });
+	await h.fire("session_start");
+
+	const output = await captureStdout(() => h.fire("session_shutdown", { reason: "quit" }));
+	ok("unfocused: quit prints nothing", output === "", JSON.stringify(output));
 	await rm(dir, { recursive: true, force: true });
 }
 

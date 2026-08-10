@@ -43,8 +43,9 @@ function setup({ noRepo = false, hasUI = true, exec } = {}) {
 		setStatus: (_ctx, parts) => statuses.push(parts),
 	};
 	const ctx = { cwd: "/proj/main", hasUI, mode: "interactive" };
-	const session = createSession({ pi, ui, ctx, repo });
-	return { session, ctx, entries, messages, statuses };
+	const reported = [];
+	const session = createSession({ pi, ui, ctx, repo, report: (branch) => reported.push(branch) });
+	return { session, ctx, entries, messages, statuses, reported };
 }
 
 // ===================================================== focus persistence
@@ -131,6 +132,37 @@ function setup({ noRepo = false, hasUI = true, exec } = {}) {
 	ok("a session outside a repo still exists", h.session.repo === undefined);
 	h.session.paint(h.ctx);
 	ok("and paints an empty segment rather than nothing", JSON.stringify(h.statuses.at(-1)) === "[]");
+}
+
+// ===================================================== reporting the branch
+
+{
+	const h = setup();
+	h.session.paint(h.ctx);
+	ok("report: an unfocused session reports its own branch", h.reported.at(-1) === "main", JSON.stringify(h.reported));
+
+	h.session.setFocus(h.ctx, { path: "/proj/feat", branch: "feature/x" });
+	ok("report: focus reports the worktree's branch", h.reported.at(-1) === "feature/x", JSON.stringify(h.reported));
+
+	h.session.setFocus(h.ctx, undefined);
+	ok("report: clearing focus goes back to the session's branch", h.reported.at(-1) === "main", JSON.stringify(h.reported));
+
+	h.session.setFocus(h.ctx, { path: "/proj/detached" });
+	ok("report: a detached worktree reports nothing to show", h.reported.at(-1) === undefined, JSON.stringify(h.reported));
+}
+
+{
+	const h = setup();
+	const before = h.reported.length;
+	h.session.dispose();
+	h.session.paint(h.ctx);
+	ok("report: a disposed session reports nothing", h.reported.length === before, JSON.stringify(h.reported));
+}
+
+{
+	const h = setup({ noRepo: true });
+	h.session.paint(h.ctx);
+	ok("report: outside a repo there is no branch to report", h.reported.at(-1) === undefined && h.reported.length === 1, JSON.stringify(h.reported));
 }
 
 done();
