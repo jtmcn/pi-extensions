@@ -7,7 +7,7 @@ const panels = await loadExt("lib/panels.ts");
 const servers = [
 	{ name: "linear", state: "connected", toolCount: 12 },
 	{ name: "notion", state: "connected", toolCount: 12 },
-	{ name: "databricks", state: "failed", toolCount: 0, detail: "spawn failed" },
+	{ name: "databricks", state: "failed", toolCount: 8, detail: "spawn failed: ENOENT no such file or directory /usr/bin/mcp" },
 	{ name: "old", state: "disabled", toolCount: 0 },
 	{ name: "slow", state: "connecting", toolCount: 0 },
 ];
@@ -24,7 +24,7 @@ ok("shows disabled servers", text.includes("old") && text.includes("disabled"));
 ok("shows connecting servers", text.includes("slow") && text.includes("connecting"));
 ok("only connected servers contribute tool counts", text.includes("24 tools"));
 ok("header counts every server", text.includes("5 servers"));
-ok("no line exceeds width", Math.max(...lines.map((l) => l.length)) <= 120);
+ok("no line exceeds width", Math.max(...mcpPanelLines(servers, 80).map((l) => l.length)) <= 80);
 ok("narrow width still fits", Math.max(...mcpPanelLines(servers, 60).map((l) => l.length)) <= 60);
 ok("no servers yields no lines", mcpPanelLines([], 120).length === 0);
 
