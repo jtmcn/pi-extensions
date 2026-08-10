@@ -67,8 +67,24 @@ ok(
 	locationLines(location, { kind: "unavailable" }, 120).join("\n").split("\n").length === 1,
 );
 
+// Width-clamp sweep: fixture must genuinely exceed every width under test.
+// A deep worktree path + long branch name produces a 126-char head line
+// (verified: "  ~/Code/someorg/somerepo/.claude/worktrees/mellow-thicket  ⑂ joel/some-long-and-descriptive-branch-name  · 3 files dirty · ↑2"),
+// which exceeds 120, 80, and 40 — so all three assertions are live detectors.
+const longLocation = {
+	path: "~/Code/someorg/somerepo/.claude/worktrees/mellow-thicket",
+	branch: "joel/some-long-and-descriptive-branch-name",
+	dirty: 3,
+	ahead: 2,
+	behind: 0,
+};
+const longStack = await readStack(
+	fakeRunner({ code: 0, stdout: "◉  joel/some-long-and-descriptive-branch-name (needs restack)\n◯  main\n" }),
+	"/repo",
+	"joel/some-long-and-descriptive-branch-name",
+);
 for (const width of [120, 80, 40]) {
-	const lines = locationLines(location, good, width);
+	const lines = locationLines(longLocation, longStack, width);
 	ok(`no line exceeds ${width}`, Math.max(...lines.map((l) => l.length)) <= width);
 }
 
