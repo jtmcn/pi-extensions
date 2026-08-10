@@ -1743,7 +1743,17 @@ export interface LocationInfo {
 }
 export function publishLocationPanel(location: LocationInfo, stack: StackState): void;
 export function clearLocationPanel(): void;
+/** Invalidate every in-flight stack read and return the new generation token. */
+export function beginLocationCycle(): number;
+/** Whether `token` is still the current generation. */
+export function isCurrentLocationCycle(token: number): boolean;
 ```
+
+**Why a generation counter:** `gt` takes ~0.4s and runs unawaited. If
+`session_start` fires again in that window (`/reload`, fork, resume), the
+superseded session's result would publish the *old* worktree's location over
+the new one. Avoiding `ctx` prevents the stale-context crash but not this;
+`mcp/index.ts` guards the same hazard with its `cycle`/`generation` pair.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1824,6 +1834,31 @@ for (const width of [120, 80, 40]) {
 	ok(`no line exceeds ${width}`, Math.max(...lines.map((l) => l.length)) <= width);
 }
 
+// --- Session generation guard ---
+{
+	const { beginLocationCycle, isCurrentLocationCycle } = await loadExt("worktree/panel.ts");
+	const first = beginLocationCycle();
+	ok("a fresh cycle is current", isCurrentLocationCycle(first));
+	const second = beginLocationCycle();
+	ok("a new cycle supersedes the old", !isCurrentLocationCycle(first));
+	ok("the new cycle is current", isCurrentLocationCycle(second));
+	ok("cycles are distinct", first !== second);
+
+	// The bug this guards: a superseded session's late gt result must not
+	// overwrite the current session's location.
+	panels.resetPanels("worktree");
+	const stale = beginLocationCycle();
+	const fresh = beginLocationCycle();
+	if (isCurrentLocationCycle(fresh)) {
+		publishLocationPanel({ path: "~/new", dirty: 0 }, { kind: "pending" });
+	}
+	if (isCurrentLocationCycle(stale)) {
+		publishLocationPanel({ path: "~/old", dirty: 0 }, good);
+	}
+	const shown = panels.listPanels().find((p) => p.owner === "worktree").render(120).join("\n");
+	ok("a superseded session never publishes", shown.includes("~/new") && !shown.includes("~/old"));
+}
+
 // --- Registry integration ---
 panels.resetPanels("worktree");
 publishLocationPanel(location, { kind: "pending" });
@@ -1887,6 +1922,23 @@ import { registerPanel, resetPanels } from "../lib/panels.ts";
 
 const OWNER = "worktree";
 const PANEL_ID = "location";
+
+/**
+ * Which session's stack read is allowed to publish.
+ *
+ * Bumped on every `session_start`. A read from a superseded session finds its
+ * token stale and drops its result instead of overwriting the new session's
+ * location.
+ */
+let locationCycle = 0;
+
+export function beginLocationCycle(): number {
+	return ++locationCycle;
+}
+
+export function isCurrentLocationCycle(token: number): boolean {
+	return token === locationCycle;
+}
 
 export interface StackEntry {
 	branch: string;
@@ -2006,9 +2058,16 @@ Expected: every assertion prints `ok`, and the file ends `ALL PASS`. No `FAIL` l
 
 In `worktree/index.ts`'s `session_start` handler:
 
-1. Import: `import { clearLocationPanel, publishLocationPanel, readStack } from "./panel.ts";` and add `aheadBehind` and `countDirty` to the existing `../lib/git.ts` import.
+1. Import: `import { beginLocationCycle, clearLocationPanel, isCurrentLocationCycle, publishLocationPanel, readStack } from "./panel.ts";` and add `aheadBehind` and `countDirty` to the existing `../lib/git.ts` import.
 2. Call `clearLocationPanel()` at the top, next to `replaceSession(undefined)`.
-3. After `repo` resolves and before the `gt` call, publish the fast half:
+3. Immediately after `clearLocationPanel()`, take a generation token for this
+   session:
+
+```typescript
+		const cycle = beginLocationCycle();
+```
+
+4. After `repo` resolves and before the `gt` call, publish the fast half:
 
 ```typescript
 		const location = {
@@ -2020,23 +2079,31 @@ In `worktree/index.ts`'s `session_start` handler:
 		publishLocationPanel(location, { kind: "pending" });
 ```
 
-4. Then start the slow half without awaiting it, and **without touching `ctx`
-   in the callback** — `publishLocationPanel` reaches the dashboard through the
-   registry, never through a context:
+5. Then start the slow half without awaiting it. Two rules in the callback:
+   **never touch `ctx`** (`publishLocationPanel` reaches the dashboard through
+   the registry, so it does not need one), and **check the generation** so a
+   superseded session drops its result:
 
 ```typescript
 		void readStack(pi, ctx.cwd, repo.branch).then((stack) => {
+			if (!isCurrentLocationCycle(cycle)) return;
 			publishLocationPanel(location, stack);
 		});
 ```
 
-5. In `session_shutdown`, call `clearLocationPanel()` next to `ui.clearAll(ctx)`.
+6. In `session_shutdown`, call `beginLocationCycle()` (to invalidate any read
+   still in flight) and then `clearLocationPanel()`, next to `ui.clearAll(ctx)`.
 
-- [ ] **Step 7: Break it on purpose**
+- [ ] **Step 7: Break it on purpose, twice**
 
-In `worktree/panel.ts`, make `readStack` return `{ kind: "unavailable" }` for
-every non-zero exit (delete the `untracked branch` branch). Re-run: `untracked
-branch is its own state` and `untracked carries the branch` must FAIL. Revert.
+First: in `worktree/panel.ts`, make `readStack` return `{ kind: "unavailable" }`
+for every non-zero exit (delete the `untracked branch` branch). Re-run:
+`untracked branch is its own state` and `untracked carries the branch` must
+FAIL. Revert.
+
+Second: make `isCurrentLocationCycle` always return `true`. Re-run: `a
+superseded session never publishes` and `a new cycle supersedes the old` must
+FAIL. Revert.
 
 - [ ] **Step 8: Verify by hand and commit**
 
@@ -2058,73 +2125,186 @@ git commit -m "worktree: publish location and graphite stack to the dashboard"
 ### Task 9: Setup command and documentation
 
 **Files:**
-- Create: `dashboard/README.md`
+- Create: `dashboard/settings.ts`, `dashboard/README.md`
 - Modify: `dashboard/index.ts`, `README.md`
-- Test: `tests/dashboard/wiring.test.mjs` (extend)
+- Test: `tests/dashboard/settings.test.mjs`, `tests/dashboard/wiring.test.mjs` (extend)
 
 **Interfaces:**
 - Consumes: everything above.
-- Produces: a `/dashboard` slash command. No new exports.
+- Produces:
+```typescript
+export type SetupResult =
+	| { ok: true; path: string }
+	| { ok: false; path: string; reason: string };
+export function enableQuietStartup(path: string): Promise<SetupResult>;
+export function defaultSettingsPath(): string;
+```
 
-- [ ] **Step 1: Write the failing test**
+**The settings write is a separate injectable module, not an env-var hatch in
+`index.ts`.** This repo tests `commands.ts`, `session.ts`, `pr-monitor.ts` and
+`ui.ts` by injecting dependencies rather than reaching for a fake `pi`; a
+`process.env` override branch shipped in production code is the weaker version
+of the same idea and a reviewer would be right to flag it. `index.ts` passes
+`defaultSettingsPath()`; the test passes a temp path.
+
+- [ ] **Step 1: Write the failing test for the settings module**
+
+Create `tests/dashboard/settings.test.mjs`:
+
+```javascript
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { assertions, loadExt } from "../harness.mjs";
+
+const { ok, done } = assertions();
+const { enableQuietStartup, defaultSettingsPath } = await loadExt("dashboard/settings.ts");
+
+const dir = join(await mkdtemp(join(tmpdir(), "dash-settings-")), "agent");
+await mkdir(dir, { recursive: true });
+const path = join(dir, "settings.json");
+
+// Happy path preserves everything else in the file.
+await writeFile(path, JSON.stringify({ theme: "dark", editorPaddingX: 2 }, null, "\t"));
+const first = await enableQuietStartup(path);
+ok("reports success", first.ok === true);
+ok("reports the path it wrote", first.path === path);
+const written = JSON.parse(await readFile(path, "utf8"));
+ok("sets quietStartup", written.quietStartup === true);
+ok("preserves other settings", written.theme === "dark" && written.editorPaddingX === 2);
+ok("writes tab-indented json", (await readFile(path, "utf8")).includes('\n\t"'));
+ok("ends with a newline", (await readFile(path, "utf8")).endsWith("\n"));
+
+// Idempotent.
+const second = await enableQuietStartup(path);
+ok("running twice succeeds", second.ok === true);
+ok("running twice leaves it enabled", JSON.parse(await readFile(path, "utf8")).quietStartup === true);
+
+// A file we cannot parse is never overwritten: the user's whole config is in it.
+await writeFile(path, "{ not json");
+const broken = await enableQuietStartup(path);
+ok("malformed json fails", broken.ok === false);
+ok("malformed json explains why", typeof broken.reason === "string" && broken.reason.length > 0);
+ok("malformed json is left untouched", (await readFile(path, "utf8")) === "{ not json");
+
+// A missing file is a first-run, not an error.
+const fresh = join(dir, "absent.json");
+const created = await enableQuietStartup(fresh);
+ok("missing file is created", created.ok === true);
+ok("created file has the setting", JSON.parse(await readFile(fresh, "utf8")).quietStartup === true);
+
+// A JSON file that is not an object is not a settings file.
+await writeFile(path, "[1,2,3]");
+const array = await enableQuietStartup(path);
+ok("non-object json fails", array.ok === false);
+ok("non-object json is left untouched", (await readFile(path, "utf8")) === "[1,2,3]");
+
+ok("default path is under the pi agent dir", defaultSettingsPath().endsWith(join(".pi", "agent", "settings.json")));
+
+done();
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `node tests/dashboard/settings.test.mjs`
+Expected: FAIL — cannot resolve `dashboard/settings.ts`.
+
+- [ ] **Step 3: Write the settings module**
+
+Create `dashboard/settings.ts`:
+
+```typescript
+/**
+ * Enabling `quietStartup`, which the dashboard needs to own the screen.
+ *
+ * Separate from `index.ts` and takes its path as an argument: this is the one
+ * piece of the extension that writes to the user's configuration, and it is
+ * tested against a temp file rather than through a fake `pi`.
+ */
+
+import { readFile, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+export type SetupResult =
+	| { ok: true; path: string }
+	| { ok: false; path: string; reason: string };
+
+export function defaultSettingsPath(): string {
+	return join(homedir(), ".pi", "agent", "settings.json");
+}
+
+export async function enableQuietStartup(path: string): Promise<SetupResult> {
+	let raw: string;
+	try {
+		raw = await readFile(path, "utf8");
+	} catch {
+		// No settings file yet is a first run, not a failure.
+		raw = "{}";
+	}
+
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch (error) {
+		// Never clobber a file we could not read: the user's whole configuration
+		// is in there, and a rewrite would silently discard it.
+		return { ok: false, path, reason: `could not parse ${path}: ${String(error)}` };
+	}
+
+	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+		return { ok: false, path, reason: `${path} is not a settings object` };
+	}
+
+	const settings = { ...(parsed as Record<string, unknown>), quietStartup: true };
+	await writeFile(path, `${JSON.stringify(settings, null, "\t")}\n`);
+	return { ok: true, path };
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `node tests/dashboard/settings.test.mjs`
+Expected: every assertion prints `ok`, and the file ends `ALL PASS`. No `FAIL` lines.
+
+- [ ] **Step 5: Break it on purpose**
+
+Change the `JSON.parse` catch to `parsed = {}` instead of returning a failure.
+Re-run: `malformed json fails` and `malformed json is left untouched` must
+FAIL. Revert.
+
+- [ ] **Step 6: Write the failing wiring test for the command**
 
 Append to `tests/dashboard/wiring.test.mjs`, before `done()`:
 
 ```javascript
 // --- /dashboard setup ---
 {
-	const { mkdtemp, readFile, writeFile, mkdir } = await import("node:fs/promises");
-	const settingsDir = join(await mkdtemp(join(tmpdir(), "dash-settings-")), "agent");
-	await mkdir(settingsDir, { recursive: true });
-	const settingsPath = join(settingsDir, "settings.json");
-	await writeFile(settingsPath, JSON.stringify({ theme: "dark" }, null, "\t"));
-	process.env.PI_DASHBOARD_SETTINGS = settingsPath;
-
 	const h = harness();
 	extension(h.pi);
 	await h.fire("session_start");
 	ok("registers the command", h.commands.has("dashboard"));
 
-	await h.command("dashboard", "setup");
-	const written = JSON.parse(await readFile(settingsPath, "utf8"));
-	ok("sets quietStartup", written.quietStartup === true);
-	ok("preserves other settings", written.theme === "dark");
-	ok("reports success", h.messages().some((m) => m.includes("quietStartup")));
-
-	await h.command("dashboard", "setup");
-	ok("running twice is safe", JSON.parse(await readFile(settingsPath, "utf8")).quietStartup === true);
-
-	await writeFile(settingsPath, "{ not json");
-	await h.command("dashboard", "setup");
-	ok("malformed settings warn rather than throw", h.notices.some((n) => n.level === "warning"));
-	ok("malformed settings are not overwritten", (await readFile(settingsPath, "utf8")) === "{ not json");
-
-	delete process.env.PI_DASHBOARD_SETTINGS;
+	await h.command("dashboard", "");
+	ok("bare command explains usage", h.messages().some((m) => m.includes("/dashboard setup")));
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+The write itself is covered by `settings.test.mjs`; this only asserts the
+command exists and routes. Do not point the command at a real settings file
+from a test.
 
-Run: `node tests/dashboard/wiring.test.mjs`
-Expected: FAIL on `registers the command`.
+- [ ] **Step 7: Add the command**
 
-- [ ] **Step 3: Add the command**
-
-In `dashboard/index.ts`, add imports:
+In `dashboard/index.ts`, add the import:
 
 ```typescript
-import { readFile, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { defaultSettingsPath, enableQuietStartup } from "./settings.ts";
 ```
 
 and register the command inside the factory, after the event handlers:
 
 ```typescript
-	/** Overridable so the test does not write to the real settings file. */
-	const settingsPath = (): string =>
-		process.env.PI_DASHBOARD_SETTINGS ?? join(homedir(), ".pi", "agent", "settings.json");
-
 	pi.registerCommand("dashboard", {
 		description: "Set up the startup dashboard",
 		handler: async (args, ctx) => {
@@ -2132,21 +2312,15 @@ and register the command inside the factory, after the event handlers:
 				ctx.ui.notify("usage: /dashboard setup", "info");
 				return;
 			}
-
-			const path = settingsPath();
-			let settings: Record<string, unknown>;
-			try {
-				settings = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
-			} catch (error) {
-				// Never clobber a settings file we could not read: the user's
-				// whole configuration is in there.
-				ctx.ui.notify(`could not read ${path}: ${String(error)}`, "warning");
+			const result = await enableQuietStartup(defaultSettingsPath());
+			if (!result.ok) {
+				ctx.ui.notify(result.reason, "warning");
 				return;
 			}
-
-			settings.quietStartup = true;
-			await writeFile(path, `${JSON.stringify(settings, null, "\t")}\n`);
-			ctx.ui.notify(`quietStartup enabled in ${path}. Restart pi to see the dashboard alone.`, "info");
+			ctx.ui.notify(
+				`quietStartup enabled in ${result.path}. Restart pi to see the dashboard alone.`,
+				"info",
+			);
 		},
 	});
 ```
@@ -2155,17 +2329,12 @@ and register the command inside the factory, after the event handlers:
 their environment. This repo's convention gives the model the reversible half
 of a feature and keeps environment changes behind an explicit slash command.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 8: Run the wiring test**
 
 Run: `node tests/dashboard/wiring.test.mjs`
 Expected: every assertion prints `ok`, and the file ends `ALL PASS`. No `FAIL` lines.
 
-- [ ] **Step 5: Break it on purpose**
-
-Change the `catch` to `settings = {}` instead of returning. Re-run:
-`malformed settings are not overwritten` must FAIL. Revert.
-
-- [ ] **Step 6: Write `dashboard/README.md`**
+- [ ] **Step 9: Write `dashboard/README.md`**
 
 Cover, in this order: what the screen shows (paste a real capture, not the
 plan's mockup); the `quietStartup` requirement and `/dashboard setup`; that
@@ -2174,12 +2343,12 @@ that format; how another extension publishes a panel, with a code sample using
 `registerPanel`/`resetPanels`; and the known gap that command-less extensions
 are not listed. Match the voice of `worktree/README.md` — read it first.
 
-- [ ] **Step 7: Add a row to the root README table**
+- [ ] **Step 10: Add a row to the root README table**
 
 In `README.md`, add `dashboard` to the extension table, one line, matching the
 existing column format.
 
-- [ ] **Step 8: Full check and commit**
+- [ ] **Step 11: Full check and commit**
 
 ```bash
 npm run check
@@ -2188,7 +2357,7 @@ npm run check
 Expected: typecheck clean, every test file `PASS`, `ALL PASS`.
 
 ```bash
-git add dashboard/index.ts dashboard/README.md README.md tests/dashboard/wiring.test.mjs
+git add dashboard/settings.ts dashboard/index.ts dashboard/README.md README.md tests/dashboard/settings.test.mjs tests/dashboard/wiring.test.mjs
 git commit -m "dashboard: add /dashboard setup and document the extension"
 ```
 
