@@ -22,6 +22,10 @@ export interface DashboardModel {
 	contextFiles: string[];
 	prompts: string[];
 	extensions: string[];
+	/**
+	 * Pre-sorted by order then id; `listPanels()` from lib/panels.ts provides
+	 * this ordering. `renderDashboard` renders panels in the order it receives them.
+	 */
 	panels: Panel[];
 }
 
@@ -86,8 +90,7 @@ export function renderDashboard(model: DashboardModel, theme: MascotTheme, width
 	const build = (expanded: boolean): string[] => {
 		const lines = [...mascotLines(theme, model.version), ""];
 
-		const sortedPanels = [...model.panels].sort((a, b) => a.order - b.order || a.id.localeCompare(b.id));
-		for (const panel of sortedPanels) {
+		for (const panel of model.panels) {
 			lines.push(heading(theme, panel.title));
 			lines.push(...panel.render(width));
 			lines.push("");

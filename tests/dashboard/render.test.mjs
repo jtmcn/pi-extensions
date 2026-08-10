@@ -44,12 +44,44 @@ ok("collapsed hides extensions", !collapsed.includes("[Extensions]"));
 ok("expanded lists extensions", expanded.includes("[Extensions]") && expanded.includes("worktree"));
 ok("shows context files", collapsed.includes("AGENTS.md"));
 
-// Width invariant, with the identity theme so lengths are real.
+// Width invariant — skill names long enough that layoutRows truncates them,
+// so a full row lands at the target width. At width=60 (1 col, labelWidth=54)
+// the row is exactly 60; at width=90 (2 col, labelWidth=40) it is exactly 90;
+// at width=120 (3 col, labelWidth=35) it is 119. In all three cases widening
+// layoutRows's label slot by 10 produces a row that exceeds the target width,
+// so the truncation guard in render.ts is the only thing keeping longest<=width.
+const mkLongName = (prefix) => (prefix + "-").padEnd(70, "-");
+const superpowersPath = (id) =>
+	`/u/.pi/agent/git/github.com/obra/superpowers/skills/${id}/SKILL.md`;
+const widthModel = {
+	version: "1.0.0",
+	skillsAvailable: true,
+	skills: [
+		skill(mkLongName("alpha"), superpowersPath("a"), 1000),
+		skill(mkLongName("beta"), superpowersPath("b"), 2000),
+		skill(mkLongName("gamma"), superpowersPath("c"), 1500),
+	],
+	contextFiles: [],
+	prompts: [],
+	extensions: [],
+	panels: [],
+};
 for (const width of [120, 90, 60]) {
-	const rendered = renderDashboard(model, theme, width);
+	const rendered = renderDashboard(widthModel, theme, width);
 	const longest = Math.max(...[...rendered.collapsed, ...rendered.expanded].map((l) => l.length));
 	ok(`no rendered line exceeds ${width}`, longest <= width, `longest was ${longest}`);
 }
+
+// Property 2: panels may return arbitrarily long lines; render.ts must clip them.
+// This is the more direct test — no layout arithmetic, just an absurdly wide
+// panel line that the truncation guard at the bottom of renderDashboard catches.
+const widePanel = { id: "wide", owner: "t", title: "Wide", order: 5, render: () => ["x".repeat(200)] };
+const wideResult = renderDashboard({ ...model, panels: [widePanel] }, theme, 80);
+ok(
+	"render.ts truncates panel lines that exceed width",
+	wideResult.collapsed.every((l) => l.length <= 80),
+	`longest was ${Math.max(...wideResult.collapsed.map((l) => l.length))}`,
+);
 
 // Degradation
 const broken = renderDashboard({ ...model, skillsAvailable: false, skills: [] }, theme, 120);
@@ -62,13 +94,15 @@ const empty = renderDashboard(
 ok("no skills omits the section", !empty.collapsed.join("\n").includes("[Skills]"));
 ok("empty model still draws the mascot", empty.collapsed.join("\n").includes("█"));
 
-// Panels render in order
+// Panels render in the order they are given. Ordering derivation (sort by
+// order then id) is tested in panels.test.mjs against listPanels(); here we
+// only verify that renderDashboard preserves the order it receives.
 const ordered = renderDashboard(
 	{
 		...model,
 		panels: [
-			{ id: "b", owner: "x", title: "BEE", order: 30, render: () => ["  bee"] },
 			{ id: "a", owner: "x", title: "AY", order: 10, render: () => ["  ay"] },
+			{ id: "b", owner: "x", title: "BEE", order: 30, render: () => ["  bee"] },
 		],
 	},
 	theme,
