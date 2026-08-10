@@ -5,8 +5,9 @@
  * five lines, which is exactly why it is unreadable. Everything here truncates
  * to fit instead.
  *
- * Plain strings only — no theme, no ANSI. Colors are zero-width escapes that
- * make width arithmetic lie, so `render.ts` applies them after layout.
+ * ANSI SGR escapes are supported by `visibleWidth` and `truncateVisible`, which
+ * strip or preserve them so that colors added by the theme do not make width
+ * arithmetic lie.
  */
 
 export interface Cell {
@@ -98,10 +99,6 @@ export function layoutRows(cells: Cell[], width: number, indent: number): LaidOu
 			label: truncate(cell.label, labelWidth).padEnd(labelWidth),
 			bar: cell.bar,
 		}));
-		// The final cell of a row carries no trailing padding: a padded last
-		// column pushes the line past `width` for no visible gain.
-		const last = row[row.length - 1];
-		if (last) last.label = last.label.trimEnd();
 		rows.push(row);
 	}
 	return rows;

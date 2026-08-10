@@ -83,6 +83,17 @@ ok(
 	`longest was ${Math.max(...wideResult.collapsed.map((l) => l.length))}`,
 );
 
+// A panel whose render() throws must not take the whole header down. The other
+// panels and sections must still render. Mutation: remove the try/catch in
+// renderDashboard — the test fails because the render call throws instead of
+// returning lines.
+const throwingPanel = { id: "boom", owner: "t", title: "BOOM", order: 1, render: () => { throw new Error("oops"); } };
+const goodPanel = { id: "ok", owner: "t", title: "OK", order: 2, render: () => ["  good"] };
+const withThrower = renderDashboard({ ...model, panels: [throwingPanel, goodPanel] }, theme, 120);
+ok("throwing panel does not crash render", withThrower.collapsed.length > 0);
+ok("other panels still render after a throw", withThrower.collapsed.join("\n").includes("good"));
+ok("throwing panel shows a failure marker", withThrower.collapsed.join("\n").includes("panel failed"));
+
 // Degradation
 const broken = renderDashboard({ ...model, skillsAvailable: false, skills: [] }, theme, 120);
 ok("unparseable skills say so", broken.collapsed.join("\n").includes("unavailable"));
