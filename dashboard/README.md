@@ -15,9 +15,8 @@ in this collection want to report.
   pi v0.84.1
 
 [Location]
-  ~/Code/pi-extensions  ⑂ mellow-thicket  · 3 files dirty · ↑2
-  ◉ mellow-thicket
-  ◯ dashboard-task-9
+  ~/Code/pi-extensions  ⑂ dashboard-skill-list  · 2 files dirty
+  ◉ dashboard-skill-list
   ◯ main
 
 [MCP]
@@ -25,12 +24,18 @@ in this collection want to report.
   filesystem    ✓ 12
   brave-search  ✓ 3
 
-[Skills]  7 · ~15k tok if all read
-  superpowers (6)
-    brainstorming                       ▆  finish-pr                           █  finish-stack                        ▅
-    merge                               ▄  open-pr                             ▃  rebase                              ▃
-  personal (1)
-    coordinator                         ▄
+[Skills]  22 · ~43k tok if all read
+  superpowers (14)
+    brainstorming                  ▃  dispatching-parallel-agents    ▂  executing-plans                ▁
+    finishing-a-development-branch ▃  receiving-code-review          ▂  requesting-code-review         ▁
+    subagent-driven-development    █  systematic-debugging           ▃  test-driven-development        ▃
+    using-git-worktrees            ▂  using-superpowers              ▁  verification-before-completion ▂
+    writing-plans                  ▂  writing-skills                 █
+  personal (7)
+    coordinator  ▃  finish-pr    ▅  finish-stack ▂  merge        ▁  open-pr      ▁  rebase       ▁
+    worktree     ▂
+  pi-subagents (1)
+    pi-subagents ▁
 
 [Context]  /Users/joel/Code/pi-extensions/AGENTS.md
 [Prompts]  2 · /parallel-cleanup, /review
@@ -44,23 +49,54 @@ absolute size.
 Expanded view:
 
 ```
-[Skills]  7 · ~15k tok if all read
-  superpowers (6)
-    brainstorming ▆
-      explores intent before coding
-    finish-pr █
-      finish a PR for peer review
-    finish-stack ▅
-      finish a graphite stack
-    merge ▄
-      merge a PR
-    open-pr ▃
-      open a PR
-    rebase ▃
-      rebase a branch
-  personal (1)
-    coordinator ▄
+[Skills]  22 · ~43k tok if all read
+  superpowers (14)
+    brainstorming ▃
+      explore intent before implementation
+    dispatching-parallel-agents ▂
+      run agents in parallel
+    executing-plans ▁
+      execute a structured plan
+    finishing-a-development-branch ▃
+      finish a development branch
+    receiving-code-review ▂
+      receive a code review gracefully
+    requesting-code-review ▁
+      request a code review
+    subagent-driven-development █
+      build with subagents
+    systematic-debugging ▃
+      debug methodically
+    test-driven-development ▃
+      write tests first
+    using-git-worktrees ▂
+      work with git worktrees
+    using-superpowers ▁
+      invoke skills correctly
+    verification-before-completion ▂
+      verify before claiming done
+    writing-plans ▂
+      write implementation plans
+    writing-skills █
+      write a skill file
+  personal (7)
+    coordinator ▃
       orchestrate multiple worktree agents
+    finish-pr ▅
+      finish a PR for peer review
+    finish-stack ▂
+      finish a graphite stack
+    merge ▁
+      commit, rebase, and merge
+    open-pr ▁
+      open a PR
+    rebase ▁
+      rebase a branch
+    worktree ▂
+      manage worktrees
+  pi-subagents (1)
+    pi-subagents ▁
+      dispatch pi subagents
 
 [Context]
   /Users/joel/Code/pi-extensions/AGENTS.md
@@ -71,8 +107,9 @@ Expanded view:
   dashboard, mcp, worktree
 ```
 
-*Capture produced by calling `renderDashboard` directly with real panels from
-`mcpPanelLines` and `locationLines` — not hand-drawn.*
+*Capture produced by calling `renderDashboard` directly with real skill files
+stat'd from `~/.pi/agent/` and static panels matching the Location and MCP
+extensions — not hand-drawn.*
 
 ## The `quietStartup` requirement
 
@@ -95,18 +132,21 @@ The command leaves every other key in `settings.json` untouched. If the file
 cannot be parsed, it refuses to overwrite it and reports why — the user's entire
 configuration lives there and a rewrite would silently discard it.
 
-## Skills data and format stability
+## Skills data source
 
-Skills come from the system prompt, not from any extension API. `skills.ts`
-parses the `<available_skills>` block that pi injects; `sizes.ts` `stat`-s the
-SKILL.md files to estimate tokens.
+Skills come from `pi.getCommands()`, not the system prompt. The reason matters:
+the system-prompt approach used `formatSkillsForPrompt` internally, which drops
+every skill whose frontmatter has `disable-model-invocation: true`. On a real
+machine that silently hid four skills — `merge`, `open-pr`, `rebase`, and
+`worktree` — exactly the ones you invoke by name rather than ask the model to
+invoke. `getCommands()` returns the resource loader's list unfiltered, so the
+count on the dashboard matches what pi's own skill listing shows.
 
-That format is internal to pi and not a public contract. If it changes, the
-skills panel degrades gracefully: a block pi changed the shape of shows
-`[Skills]  unavailable (pi format changed)` rather than an error or empty
-screen. `tests/dashboard/skills.test.mjs` round-trips through pi's exported
-`formatSkillsForPrompt`, so a format change fails the test suite before it
-silently empties the panel in production.
+`sourceInfo.path` on each command entry points at the skill's SKILL.md file,
+which is what `sizes.ts` stats and what `skillScope` uses to place the skill in
+a group. Because `getCommands()` is a declared type in pi's `.d.ts` rather than
+free-form prompt text, there is no format-drift risk: a breaking change would
+surface as a TypeScript error before it could silently empty the panel.
 
 ## Publishing a panel
 
@@ -156,7 +196,7 @@ that only listen to events, do not appear there. This is a limitation of what
 
 ```
 dashboard/index.ts      wiring only: event handlers and the /dashboard command
-dashboard/skills.ts     recover loaded skills from the system prompt
+dashboard/skills.ts     skills from pi.getCommands(), context files from the system prompt
 dashboard/sizes.ts      estimate what each skill costs to read
 dashboard/layout.ts     multi-column rows that never wrap
 dashboard/render.ts     the screen itself — pure, easily testable
