@@ -43,12 +43,12 @@ ok("collapsed hides extensions", !collapsed.includes("[Extensions]"));
 ok("expanded lists extensions", expanded.includes("[Extensions]") && expanded.includes("worktree"));
 ok("shows context files", collapsed.includes("AGENTS.md"));
 
-// Width invariant — skill names long enough that layoutRows truncates them,
-// so a full row lands at the target width. At width=60 (1 col, labelWidth=54)
-// the row is exactly 60; at width=90 (2 col, labelWidth=40) it is exactly 90;
-// at width=120 (3 col, labelWidth=35) it is 119. In all three cases widening
-// layoutRows's label slot by 10 produces a row that exceeds the target width,
-// so the truncation guard in render.ts is the only thing keeping longest<=width.
+// Width invariant — skill names long enough that layoutRows truncates them.
+// With MAX_LABEL=40, names of 70 chars are capped: columnCount gives 2 cols at
+// 90 and 120 (cellWidth=42, fits two in each), 1 col at 60. The rows land at
+// exactly 90 at width=90, at 90 at width=120, and at 46 at width=60. The
+// truncation guard in render.ts is still the last line of defence for any line
+// that escapes layoutRows (panel lines, headings, etc.).
 const mkLongName = (prefix) => (prefix + "-").padEnd(70, "-");
 const superpowersPath = (id) =>
 	`/u/.pi/agent/git/github.com/obra/superpowers/skills/${id}/SKILL.md`;

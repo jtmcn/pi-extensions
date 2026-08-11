@@ -25,11 +25,30 @@ export interface LaidOutCell {
 const GUTTER = 2;
 /** A label, a space, and a one-column bar. */
 const BAR_SUFFIX = 2;
+/** One pathological name must not starve every other column. */
+const MAX_LABEL = 40;
+/** A very wide terminal should not become a wall of narrow columns. */
+const MAX_COLUMNS = 6;
 
-export function columnCount(width: number): number {
-	if (width >= 120) return 3;
-	if (width >= 90) return 2;
-	return 1;
+/** Width of the longest label, capped so one outlier cannot starve the rest. */
+function labelWidthFor(cells: readonly Cell[]): number {
+	const longest = Math.max(...cells.map((cell) => cell.label.length));
+	return Math.max(1, Math.min(longest, MAX_LABEL));
+}
+
+/**
+ * How many columns fit.
+ *
+ * Derived from the names rather than from the terminal alone: dividing a wide
+ * terminal into a fixed three columns padded every name to a third of the
+ * screen, so a bar sat up to 45 spaces from the name it belonged to and read
+ * as belonging to the next column.
+ */
+export function columnCount(cells: readonly Cell[], width: number, indent: number): number {
+	if (cells.length === 0) return 1;
+	const cellWidth = labelWidthFor(cells) + BAR_SUFFIX;
+	const fit = Math.floor((width - indent + GUTTER) / (cellWidth + GUTTER));
+	return Math.max(1, Math.min(MAX_COLUMNS, fit));
 }
 
 export function truncate(value: string, max: number): string {
@@ -88,10 +107,10 @@ export function truncateVisible(line: string, max: number): string {
 export function layoutRows(cells: Cell[], width: number, indent: number): LaidOutCell[][] {
 	if (cells.length === 0) return [];
 
-	const columns = columnCount(width);
+	const columns = columnCount(cells, width, indent);
 	const available = width - indent - GUTTER * (columns - 1);
-	// At least one character of label, however cramped the terminal.
-	const labelWidth = Math.max(1, Math.floor(available / columns) - BAR_SUFFIX);
+	// Honour the names, but never overflow the row.
+	const labelWidth = Math.max(1, Math.min(labelWidthFor(cells), Math.floor(available / columns) - BAR_SUFFIX));
 
 	const rows: LaidOutCell[][] = [];
 	for (let i = 0; i < cells.length; i += columns) {

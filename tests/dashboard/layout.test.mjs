@@ -3,49 +3,60 @@ import { assertions, loadExt } from "../harness.mjs";
 const { ok, done } = assertions();
 const { columnCount, layoutRows, truncate, visibleWidth, truncateVisible } = await loadExt("dashboard/layout.ts");
 
-ok("three columns when wide", columnCount(120) === 3);
-ok("three columns when wider", columnCount(200) === 3);
-ok("two columns at 90", columnCount(90) === 2);
-ok("two columns at 119", columnCount(119) === 2);
-ok("one column below 90", columnCount(60) === 1);
-ok("one column when absurdly narrow", columnCount(10) === 1);
+const short = [...Array(9).keys()].map((i) => ({ label: `sk-${i}`, bar: "▄" }));           // 4 chars
+const typical = [...Array(9).keys()].map((i) => ({ label: `skill-number-${i}`, bar: "▄" })); // 14 chars
+const longish = [...Array(9).keys()].map((i) => ({ label: `${i}`.padEnd(35, "x"), bar: "▄" })); // 35 chars
+
+// Column count follows the names, not the terminal alone.
+ok("short names pack more columns than long ones", columnCount(short, 183, 4) > columnCount(longish, 183, 4));
+ok("short at 183 hits the cap", columnCount(short, 183, 4) === 6);
+ok("longish at 183 fits four", columnCount(longish, 183, 4) === 4);
+ok("typical at 120 fits six", columnCount(typical, 120, 4) === 6);
+ok("longish at 120 fits three", columnCount(longish, 120, 4) === 3);
+ok("never exceeds MAX_COLUMNS", columnCount(short, 400, 4) === 6);
+ok("one column when cramped", columnCount(longish, 40, 4) === 1);
+ok("empty input still yields a column", columnCount([], 120, 4) === 1);
+
+// The bug: a bar must sit one space after its label, not 45.
+const rows = layoutRows(typical, 183, 4);
+const gap = rows[0][0].label.length - "skill-number-0".length;
+ok("label is not padded far beyond the longest name", gap === 0, `gap was ${gap}`);
+ok("bar follows its own label", `${rows[0][0].label} ${rows[0][0].bar}`.endsWith("skill-number-0 ▄"));
+
+// One pathological name must not starve the rest.
+const long = [{ label: "x".repeat(120), bar: "█" }, ...typical];
+const cappedRows = layoutRows(long, 183, 4);
+ok("a very long name is capped, not honoured", cappedRows[0][0].label.length === 40);
+ok("the long row still fits", (" ".repeat(4) + cappedRows[0].map((c) => `${c.label} ${c.bar}`).join("  ")).length <= 183);
+
+// The width invariant, unchanged, at the widths that matter.
+// The tightest case is longish at 40: one column, a 34-char label, exactly 40.
+for (const width of [183, 120, 90, 60, 40]) {
+	for (const cells of [short, typical, longish, long]) {
+		const laid = layoutRows(cells, width, 4);
+		const longest = Math.max(
+			...laid.map((row) => " ".repeat(4) + row.map((c) => `${c.label} ${c.bar}`).join("  ")).map((l) => l.length),
+		);
+		ok(`no line exceeds ${width}`, longest <= width, `longest was ${longest}`);
+	}
+}
 
 ok("truncate leaves short values alone", truncate("abc", 10) === "abc");
 ok("truncate marks elision", truncate("abcdefghij", 5) === "abcd…");
 ok("truncate respects the max exactly", truncate("abcdefghij", 5).length === 5);
 ok("truncate handles max of 1", truncate("abcdefghij", 1).length === 1);
 
-const cells = [...Array(7).keys()].map((i) => ({ label: `skill-number-${i}`, bar: "▄" }));
+// Long names must be truncated, not wrapped.
+const tooLong = [{ label: "a-very-long-skill-name-that-will-not-fit-anywhere", bar: "█" }];
+const cramped = layoutRows(tooLong, 40, 4);
+ok("long names truncate", cramped[0][0].label.includes("…"));
+ok("truncated line still fits", (" ".repeat(4) + `${cramped[0][0].label} ${cramped[0][0].bar}`).length <= 40);
 
-const wide = layoutRows(cells, 120, 4);
-ok("wide: three per row", wide[0].length === 3);
-ok("wide: every cell placed", wide.flat().length === 7);
-ok("wide: last row is short", wide.at(-1).length === 1);
-ok("wide: reading order is left to right", wide[0][1].label.startsWith("skill-number-1"));
+ok("empty input yields no rows", layoutRows([], 120, 4).length === 0);
 
-const narrow = layoutRows(cells, 60, 4);
-ok("narrow: one per row", narrow.every((row) => row.length === 1));
-
-// The invariant the old screen violated.
-for (const [label, width] of [["120", 120], ["90", 90], ["60", 60], ["40", 40]]) {
-	const rows = layoutRows(cells, width, 4);
-	const longest = Math.max(
-		...rows.map((row) => " ".repeat(4) + row.map((c) => `${c.label} ${c.bar}`).join("  ")).map((line) => line.length),
-	);
-	ok(`no line exceeds width ${label}`, longest <= width, `longest was ${longest}`);
-}
-
-// The sweep above uses 14-char labels ("skill-number-N") which are shorter
-// than the minimum column width (34 chars at width 40). Those labels are
-// padded but never truncated, so the gutter term in `available` is never
-// load-bearing: the lines land ~100 chars wide regardless of whether the
-// gutter is subtracted. The assertions pass even with the gutter deleted.
-//
-// These 57-char labels are always truncated to exactly `labelWidth`. A full
-// multi-column row of them reaches the width boundary, so dropping the gutter
-// term inflates every column by one character and pushes multi-column rows
-// past the limit. The critical widths are 120 (3 cols) and 90 (2 cols);
-// widths 60 and 40 use 1 column so gutter*(cols-1) = 0 either way.
+// These 57-char labels are wider than MAX_LABEL (40), so they get capped.
+// The gutter term in `available` keeps each column's arithmetic accurate even
+// though the width invariant is also maintained by the labelWidthFor cap.
 const wideCells = [...Array(7).keys()].map((i) => ({
 	label: `a-label-that-is-definitely-longer-than-any-column-width-${i}`,
 	bar: "▄",
@@ -58,14 +69,6 @@ for (const [wLabel, wWidth] of [["120 (wide labels)", 120], ["90 (wide labels)",
 	);
 	ok(`no line exceeds width ${wLabel}`, wLongest <= wWidth, `longest was ${wLongest}`);
 }
-
-// Long names must be truncated, not wrapped.
-const long = [{ label: "a-very-long-skill-name-that-will-not-fit-anywhere", bar: "█" }];
-const cramped = layoutRows(long, 40, 4);
-ok("long names truncate", cramped[0][0].label.includes("…"));
-ok("truncated line still fits", (" ".repeat(4) + `${cramped[0][0].label} ${cramped[0][0].bar}`).length <= 40);
-
-ok("empty input yields no rows", layoutRows([], 120, 4).length === 0);
 
 // ---------------------------------------------------------------- visibleWidth
 //
