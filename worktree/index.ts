@@ -34,12 +34,19 @@
 import { stat } from "node:fs/promises";
 import { basename } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { getRepoInfo, listWorktrees, type RepoInfo } from "../lib/git.ts";
+import { aheadBehind, countDirty, getRepoInfo, listWorktrees, type RepoInfo } from "../lib/git.ts";
 import { createHerdrReporter, type HerdrReporter, herdrTarget } from "../lib/herdr.ts";
 import { EMPTY_BRANCHES, listBranches } from "./branches.ts";
 import { createCommands } from "./commands.ts";
 import { DEFAULT_CONFIG, loadConfig } from "./config.ts";
 import { applyFocus } from "./focus.ts";
+import {
+	beginLocationCycle,
+	clearLocationPanel,
+	isCurrentLocationCycle,
+	publishLocationPanel,
+	readStack,
+} from "./panel.ts";
 import { createSession, FOCUS_ENTRY_TYPE, type WorktreeSession } from "./session.ts";
 import { createWorktreeTool } from "./tool.ts";
 import { createUi } from "./ui.ts";
@@ -120,8 +127,10 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		replaceSession(undefined);
+		clearLocationPanel();
 		commands.setKnown([]);
 		commands.setKnownBranches(EMPTY_BRANCHES);
+		const cycle = beginLocationCycle();
 
 		const repo = await getRepoInfo(pi, ctx.cwd);
 		if (!repo) {
@@ -180,6 +189,30 @@ export default function (pi: ExtensionAPI) {
 		}
 		active.paint(ctx);
 		active.prMonitor.refresh();
+
+		// Read git status after painting the footer so a git error here cannot
+		// prevent the footer from rendering. The focused worktree (if any) is the
+		// canonical head; fall back to the repo root for an unfocused session.
+		// countDirty and aheadBehind run concurrently to halve the serial latency.
+		// `ctx` is not touched inside the callback — publishing goes through the
+		// registry so no stale-context crash is possible.
+		const head = active.focus?.path ?? repo.worktreeRoot ?? ctx.cwd;
+		const branch = active.focus ? active.focus.branch : repo.branch;
+		try {
+			const [dirty, ab] = await Promise.all([
+				countDirty(pi, head),
+				aheadBehind(pi, head),
+			]);
+			if (!isCurrentLocationCycle(cycle)) return;
+			const location = { path: head, branch, dirty, ...(ab ?? {}) };
+			publishLocationPanel(location, { kind: "pending" });
+			void readStack(pi, head, branch).then((stack) => {
+				if (!isCurrentLocationCycle(cycle)) return;
+				publishLocationPanel(location, stack);
+			});
+		} catch {
+			// Git errors during startup do not affect the session.
+		}
 	});
 
 	/**
@@ -211,7 +244,10 @@ export default function (pi: ExtensionAPI) {
 		// silently dispose the newly created session. Workspace tokens have no TTL,
 		// so a half-finished clear leaves a stale branch on herdr's sidebar.
 		const retiring = reporter;
+		// Invalidate any in-flight readStack so its result cannot publish after shutdown.
+		beginLocationCycle();
 		replaceSession(undefined);
+		clearLocationPanel();
 		ui.clearAll(ctx);
 		// Cap the clear at 1s: pi sends SIGTERM and SIGKILLs 5s later; one wedged
 		// herdr call costs HERDR_TIMEOUT_MS (2s) and clear() can await up to four

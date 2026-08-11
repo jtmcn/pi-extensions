@@ -206,6 +206,23 @@ export function describeWorktree(worktree: Worktree): string {
 	return flags ? `${name} [${ref}] (${flags})` : `${name} [${ref}]`;
 }
 
+/**
+ * Commits ahead of and behind the upstream branch.
+ *
+ * `undefined` when there is no upstream — a branch nobody has pushed is the
+ * common case in a fresh worktree, not an error.
+ */
+export async function aheadBehind(
+	pi: GitRunner,
+	cwd: string,
+): Promise<{ ahead: number; behind: number } | undefined> {
+	const result = await git(pi, ["rev-list", "--left-right", "--count", "@{upstream}...HEAD"], cwd);
+	if (result.code !== 0) return undefined;
+	const [behind, ahead] = result.stdout.trim().split(/\s+/).map(Number);
+	if (!Number.isFinite(ahead) || !Number.isFinite(behind)) return undefined;
+	return { ahead, behind };
+}
+
 /** Convenience adapter so helpers can take the ExtensionAPI directly. */
 export function runner(pi: ExtensionAPI): GitRunner {
 	return { exec: (command, args, options) => pi.exec(command, args, options) };

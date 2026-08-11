@@ -21,6 +21,7 @@
 import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { inputSchema, selectTools, toAgentContent, toolDescription, toolName } from "./bridge.ts";
+import { clearMcpPanel, publishMcpPanel, type ServerStatus } from "./panel.ts";
 import { McpClient, type McpServerSpec } from "./client.ts";
 import {
 	DEFAULT_STARTUP_TIMEOUT_MS,
@@ -136,6 +137,29 @@ export default function mcpExtension(pi: ExtensionAPI) {
 		handlers.clear();
 	}
 
+	/**
+	 * Push current server state to the dashboard.
+	 *
+	 * Called from every point that changes it. Reaching the dashboard through
+	 * the panel registry rather than a `ctx` is deliberate: connects land
+	 * asynchronously and a superseded context would throw.
+	 */
+	function publishPanel(): void {
+		const statuses: ServerStatus[] = [...servers.values()].map((state) => ({
+			name: state.name,
+			state:
+				state.status === "ready"
+					? "connected"
+					: state.status === "connecting"
+						? "connecting"
+						: state.status,
+			toolCount: state.toolNames.length,
+			...(state.error ? { detail: state.error.split("\n")[0] } : {}),
+		}));
+		if (statuses.length === 0) clearMcpPanel();
+		else publishMcpPanel(statuses);
+	}
+
 	/** Register a pi tool that forwards to whatever handler is currently bound. */
 	function registerBridgedTool(piName: string, server: string, remoteDescription: string, schema: Record<string, unknown>): void {
 		if (registered.has(piName)) return;
@@ -241,6 +265,7 @@ export default function mcpExtension(pi: ExtensionAPI) {
 		const cycle = beginCycle();
 		closeAll();
 		servers.clear();
+		clearMcpPanel();
 
 		const { config, sources, warnings } = await loadConfig({
 			cwd: ctx.cwd,
@@ -258,6 +283,9 @@ export default function mcpExtension(pi: ExtensionAPI) {
 				toolNames: [],
 			});
 		}
+		// Show "… connecting" immediately so the dashboard is informative before
+		// handshakes complete.
+		publishPanel();
 
 		// Connect in parallel without blocking session startup. `before_agent_start`
 		// gates the first turn on these, so nothing races the initial tool list.
@@ -266,20 +294,25 @@ export default function mcpExtension(pi: ExtensionAPI) {
 			const state = servers.get(name);
 			if (!state) continue;
 			connecting.push(
-				connect(state, ctx, cycle).catch((error: Error) => {
-					// A close *we* initiated rejects whatever handshake was in flight.
-					// Both close paths (session_shutdown, /mcp restart) bump the cycle
-					// first, so a stale cycle here means teardown rather than a server
-					// problem. Reporting it anyway ended every `pi -p` run with a warning
-					// about a server that was working, and did it through a `ctx` that
-					// shutdown had already made stale.
-					if (cycle !== generation) return;
-					state.status = "failed";
-					state.error = error.message;
-					state.client?.close();
-					state.client = undefined;
-					warn(ctx, `mcp: ${name} failed — ${error.message.split("\n")[0]}`);
-				}),
+				connect(state, ctx, cycle)
+					.then(() => {
+						if (cycle === generation) publishPanel();
+					})
+					.catch((error: Error) => {
+						// A close *we* initiated rejects whatever handshake was in flight.
+						// Both close paths (session_shutdown, /mcp restart) bump the cycle
+						// first, so a stale cycle here means teardown rather than a server
+						// problem. Reporting it anyway ended every `pi -p` run with a warning
+						// about a server that was working, and did it through a `ctx` that
+						// shutdown had already made stale.
+						if (cycle !== generation) return;
+						state.status = "failed";
+						state.error = error.message;
+						state.client?.close();
+						state.client = undefined;
+						warn(ctx, `mcp: ${name} failed — ${error.message.split("\n")[0]}`);
+						publishPanel();
+					}),
 			);
 		}
 	});
@@ -293,6 +326,7 @@ export default function mcpExtension(pi: ExtensionAPI) {
 	pi.on("session_shutdown", () => {
 		beginCycle();
 		closeAll();
+		clearMcpPanel();
 	});
 
 	pi.registerCommand("mcp", {
@@ -306,16 +340,24 @@ export default function mcpExtension(pi: ExtensionAPI) {
 					if (state.status === "disabled") continue;
 					state.status = "connecting";
 					connecting.push(
-						connect(state, ctx, cycle).catch((error: Error) => {
-							// Same guard: a restart or shutdown that superseded this attempt
-							// closed it, and the state object it would write to has been
-							// replaced.
-							if (cycle !== generation) return;
-							state.status = "failed";
-							state.error = error.message;
-						}),
+						connect(state, ctx, cycle)
+							.then(() => {
+								if (cycle === generation) publishPanel();
+							})
+							.catch((error: Error) => {
+								// Same guard: a restart or shutdown that superseded this attempt
+								// closed it, and the state object it would write to has been
+								// replaced.
+								if (cycle !== generation) return;
+								state.status = "failed";
+								state.error = error.message;
+								publishPanel();
+							}),
 					);
 				}
+				// Paint the "… connecting" state immediately so the dashboard updates
+				// without waiting for handshakes.
+				publishPanel();
 				tell(ctx, "mcp: reconnecting");
 				return;
 			}
