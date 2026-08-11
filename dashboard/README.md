@@ -52,51 +52,51 @@ Expanded view:
 [Skills]  22 · ~43k tok if all read
   superpowers (14)
     brainstorming ▃
-      explore intent before implementation
+      You MUST use this before any creative work - creating features, building components, adding functionality, or modi
     dispatching-parallel-agents ▂
-      run agents in parallel
+      Use when facing 2+ independent tasks that can be worked on without shared state or sequential dependencies
     executing-plans ▁
-      execute a structured plan
+      Use when you have a written implementation plan to execute in a separate session with review checkpoints
     finishing-a-development-branch ▃
-      finish a development branch
+      Use when implementation is complete, all tests pass, and you need to decide how to integrate the work
     receiving-code-review ▂
-      receive a code review gracefully
+      Use when receiving code review feedback, before implementing suggestions, especially if feedback seems unclear or 
     requesting-code-review ▁
-      request a code review
+      Use when completing tasks, implementing major features, or before merging to verify work meets requirements
     subagent-driven-development █
-      build with subagents
+      Use when executing implementation plans with independent tasks in the current session
     systematic-debugging ▃
-      debug methodically
+      Use when encountering any bug, test failure, or unexpected behavior, before proposing fixes
     test-driven-development ▃
-      write tests first
+      Use when implementing any feature or bugfix, before writing implementation code
     using-git-worktrees ▂
-      work with git worktrees
+      Use when starting feature work that needs isolation from current workspace or before executing implementation plan
     using-superpowers ▁
-      invoke skills correctly
+      Use when starting any conversation - establishes how to find and use skills, requiring skill invocation before ANY
     verification-before-completion ▂
-      verify before claiming done
+      Use when about to claim work is complete, fixed, or passing, before committing or creating PRs - requires running 
     writing-plans ▂
-      write implementation plans
+      Use when you have a spec or requirements for a multi-step task, before touching code
     writing-skills █
-      write a skill file
+      Use when creating new skills, editing existing skills, or verifying skills work before deployment
   personal (7)
     coordinator ▃
-      orchestrate multiple worktree agents
+      Orchestrate multiple worktree agents. Spawn, monitor, communicate, and merge.
     finish-pr ▅
-      finish a PR for peer review
+      Finish a PR for peer review — run an adversarial review→fix loop (Codex or pi subagent reviewer), auto-fix blockin
     finish-stack ▂
-      finish a graphite stack
+      Run the finish-pr adversarial review loop across an entire Graphite stack, bottom-up — restacking between branches
     merge ▁
-      commit, rebase, and merge
+      Commit, rebase, and merge the current branch.
     open-pr ▁
-      open a PR
+      Write a PR description using conversation context and open PR creation in browser.
     rebase ▁
-      rebase a branch
+      Rebase the current branch with smart conflict resolution.
     worktree ▂
-      manage worktrees
+      Launch one or more tasks in new git worktrees using workmux.
   pi-subagents (1)
     pi-subagents ▁
-      dispatch pi subagents
+      Delegate work to builtin or custom subagents with single-agent, chain, parallel, async, forked-context, and interc
 
 [Context]
   /Users/joel/Code/pi-extensions/AGENTS.md
@@ -107,9 +107,11 @@ Expanded view:
   dashboard, mcp, worktree
 ```
 
-*Capture produced by calling `renderDashboard` directly with real skill files
-stat'd from `~/.pi/agent/` and static panels matching the Location and MCP
-extensions — not hand-drawn.*
+*Both captures produced by calling `renderDashboard` directly with real skill
+files stat'd from `~/.pi/agent/`. The collapsed view uses static Location and
+MCP panels. Descriptions in the expanded view are verbatim SKILL.md frontmatter,
+truncated at width 120 — the descriptions dominate the line and are cut at the
+edge, which is the most important visual fact the expanded view shows.*
 
 ## The `quietStartup` requirement
 
@@ -147,6 +149,8 @@ which is what `sizes.ts` stats and what `skillScope` uses to place the skill in
 a group. Because `getCommands()` is a declared type in pi's `.d.ts` rather than
 free-form prompt text, there is no format-drift risk: a breaking change would
 surface as a TypeScript error before it could silently empty the panel.
+`[Context]` is the one exception: it is still parsed out of the system prompt
+by `parseContextFiles`, and that regex is not covered by the type guarantee.
 
 ## Publishing a panel
 

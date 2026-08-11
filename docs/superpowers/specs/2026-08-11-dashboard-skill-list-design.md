@@ -75,7 +75,8 @@ columns   = clamp(1, MAX_COLUMNS, floor((width - indent + GUTTER) / (cellWidth +
 `MAX_LABEL = 40` keeps one pathological name from starving the rest;
 `MAX_COLUMNS = 6` keeps a very wide terminal from becoming a wall of narrow
 columns. At 183 columns with ~30-character names that yields five tight
-columns; at 120 it still yields three; below 90, one.
+columns; at 120 it still yields three; two columns as narrow as 70
+(`floor((70−2)/34) = 2`), and one only below 70.
 
 `columnCount(width)` loses its meaning as a pure function of width and is
 replaced by a helper taking the cells as well. The width invariant is

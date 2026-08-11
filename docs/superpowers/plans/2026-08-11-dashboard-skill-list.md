@@ -326,6 +326,12 @@ and in `layoutRows`, replace the first three geometry lines with:
 
 The rest of `layoutRows` is unchanged.
 
+> **Superseded by `adcbf3a`:** the `available` arithmetic above and the
+> mutation in Step 6 that targets `- GUTTER * (columns - 1)` are both inert
+> once `columnCount` sizes the columns to fit. The shipped implementation
+> dropped `available` entirely. If re-executing this plan, mutate
+> `columnCount`’s denominator (`cellWidth + GUTTER`) instead.
+
 - [ ] **Step 4: Update `render.test.mjs` where it assumes three columns**
 
 Run `node tests/dashboard/render.test.mjs` and fix any assertion that encoded the old geometry (for example one expecting a specific number of rendered rows at width 120). Do not weaken a width-invariant assertion to make it pass — if one fails, the geometry is wrong, not the assertion.
