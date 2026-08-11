@@ -51,9 +51,9 @@ const commands = () => [
 	{ name: "worktree", source: "extension", sourceInfo: { path: "/x/worktree/index.ts", source: "auto", scope: "user", origin: "top-level" } },
 	{ name: "mcp", source: "extension", sourceInfo: { path: "/x/mcp/index.ts", source: "pi-pkg@0.38.0", scope: "user", origin: "package" } },
 	{ name: "parallel-cleanup", source: "prompt", sourceInfo: { path: "/x/p.md", source: "user", scope: "user", origin: "top-level" } },
-	{ name: "skill:brainstorming", description: "explores intent", source: "skill", sourceInfo: { path: skillPath, source: "user", scope: "user", origin: "top-level" } },
+	{ name: "skill:brainstorming", description: "explores intent", source: "skill", sourceInfo: { path: skillPath, source: "local", scope: "user", origin: "top-level", baseDir: dir } },
 	// disable-model-invocation: absent from the systemPrompt fixture, present here.
-	{ name: "skill:merge", description: "Commit, rebase, and merge.", source: "skill", sourceInfo: { path: mergePath, source: "user", scope: "user", origin: "top-level" } },
+	{ name: "skill:merge", description: "Commit, rebase, and merge.", source: "skill", sourceInfo: { path: mergePath, source: "local", scope: "user", origin: "top-level", baseDir: dir } },
 ];
 
 const harness = (overrides = {}) =>
@@ -121,7 +121,7 @@ for (const mode of ["print", "json", "rpc"]) {
 
 	// Switch to a different command set before the second session starts.
 	currentCommandList = [
-		{ name: "skill:coordinator", description: "orchestrates agents", source: "skill", sourceInfo: { path: coordinatorPath } },
+		{ name: "skill:coordinator", description: "orchestrates agents", source: "skill", sourceInfo: { path: coordinatorPath, source: "local", scope: "user", origin: "top-level", baseDir: dir } },
 	];
 	await h.fire("session_start"); // model = { coordinator }
 	const componentAfterSecond = h.header();

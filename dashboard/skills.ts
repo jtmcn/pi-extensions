@@ -42,6 +42,13 @@ export function skillsFromCommands(commands: readonly SkillCommand[]): ParsedSki
 		const location = command.sourceInfo?.path;
 		// A skill we cannot locate cannot be measured or scoped; listing it
 		// without either would be worse than omitting it.
+		//
+		// Asymmetry note: `SlashCommandInfo.sourceInfo` is required and
+		// `SourceInfo.path` is typed `string`, so this guard is unreachable
+		// through the declared API. It is kept anyway because the failure mode
+		// — a skill vanishing from the list and the count, silently — is the
+		// exact class of bug this branch exists to fix. Removing a defence
+		// whose cost is one `continue` is not worth the risk.
 		if (!location) continue;
 		skills.push({
 			name: command.name.replace(/^skill:/, ""),
