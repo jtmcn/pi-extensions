@@ -55,8 +55,8 @@ ok("truncated line still fits", (" ".repeat(4) + `${cramped[0][0].label} ${cramp
 ok("empty input yields no rows", layoutRows([], 120, 4).length === 0);
 
 // These 57-char labels are wider than MAX_LABEL (40), so they get capped.
-// The gutter term in `available` keeps each column's arithmetic accurate even
-// though the width invariant is also maintained by the labelWidthFor cap.
+// The width-40 case catches removal of Math.min from labelWidth in layoutRows:
+// without it, a 1-column row becomes indent+40+BAR_SUFFIX=46 > 40.
 const wideCells = [...Array(7).keys()].map((i) => ({
 	label: `a-label-that-is-definitely-longer-than-any-column-width-${i}`,
 	bar: "▄",

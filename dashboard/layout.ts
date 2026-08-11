@@ -108,9 +108,10 @@ export function layoutRows(cells: Cell[], width: number, indent: number): LaidOu
 	if (cells.length === 0) return [];
 
 	const columns = columnCount(cells, width, indent);
-	const available = width - indent - GUTTER * (columns - 1);
-	// Honour the names, but never overflow the row.
-	const labelWidth = Math.max(1, Math.min(labelWidthFor(cells), Math.floor(available / columns) - BAR_SUFFIX));
+	// columnCount already sized the columns to fit; the only case it cannot
+	// satisfy is its own clamp to a single column on a terminal too narrow for
+	// even one name, so that is the only case left to cap.
+	const labelWidth = Math.max(1, Math.min(labelWidthFor(cells), width - indent - BAR_SUFFIX));
 
 	const rows: LaidOutCell[][] = [];
 	for (let i = 0; i < cells.length; i += columns) {
