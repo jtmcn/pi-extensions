@@ -1,42 +1,43 @@
-import { assertions, loadExt, piEntry } from "../harness.mjs";
+import { assertions, loadExt } from "../harness.mjs";
 
 const { ok, done } = assertions();
-const { parseSkills, parseContextFiles, skillScope } = await loadExt("dashboard/skills.ts");
-const { formatSkillsForPrompt } = await import(await piEntry());
+const { skillsFromCommands, parseContextFiles, skillScope } = await loadExt("dashboard/skills.ts");
 
-// --- Round-trip against pi's own formatter ---
-const fixtures = [
+const commands = [
 	{
-		name: "brainstorming",
-		description: "Explores user intent & requirements <before> \"work\"",
-		filePath: "/Users/x/.pi/agent/git/github.com/obra/superpowers/skills/brainstorming/SKILL.md",
-		disableModelInvocation: false,
+		name: "skill:brainstorming",
+		description: "Explores intent before implementation",
+		source: "skill",
+		sourceInfo: { path: "/u/.pi/agent/git/github.com/obra/superpowers/skills/brainstorming/SKILL.md" },
 	},
 	{
-		name: "coordinator",
-		description: "Orchestrate multiple worktree agents.",
-		filePath: "/Users/x/.pi/agent/skills/coordinator/SKILL.md",
-		disableModelInvocation: false,
+		// disable-model-invocation: absent from the system prompt, present here.
+		name: "skill:merge",
+		description: "Commit, rebase, and merge the current branch.",
+		source: "skill",
+		sourceInfo: { path: "/u/.pi/agent/skills/merge/SKILL.md" },
 	},
+	{ name: "parallel-cleanup", description: "a prompt", source: "prompt", sourceInfo: { path: "/u/p.md" } },
+	{ name: "worktree", description: "an extension", source: "extension", sourceInfo: { path: "/u/worktree/index.ts" } },
 ];
-const prompt = `You are pi.${formatSkillsForPrompt(fixtures)}\n\nMore prompt.`;
-const parsed = parseSkills(prompt);
 
-ok("round-trip: block detected", parsed.present);
-ok("round-trip: every skill recovered", parsed.skills.length === 2);
-ok("round-trip: names", parsed.skills.map((s) => s.name).join(",") === "brainstorming,coordinator");
+const skills = skillsFromCommands(commands);
+ok("only skill commands become skills", skills.length === 2);
+ok("strips the skill: prefix", skills[0].name === "brainstorming");
+ok("keeps the description", skills[0].description === "Explores intent before implementation");
+ok("uses sourceInfo.path as the location", skills[0].location.endsWith("brainstorming/SKILL.md"));
 ok(
-	"round-trip: XML entities decoded",
-	parsed.skills[0].description === 'Explores user intent & requirements <before> "work"',
+	"includes a skill the model cannot invoke",
+	skills.some((s) => s.name === "merge"),
 );
-ok("round-trip: locations", parsed.skills[1].location === fixtures[1].filePath);
-
-// --- Degradation ---
-ok("no block: not present", parseSkills("plain prompt").present === false);
-ok("no block: no skills", parseSkills("plain prompt").skills.length === 0);
-const truncated = "<available_skills>\n  <skill>\n    <name>half</name>";
-ok("malformed block: present", parseSkills(truncated).present === true);
-ok("malformed block: yields nothing", parseSkills(truncated).skills.length === 0);
+ok("preserves order", skills.map((s) => s.name).join(",") === "brainstorming,merge");
+ok("empty input yields no skills", skillsFromCommands([]).length === 0);
+ok("a skill with no sourceInfo is dropped", skillsFromCommands([{ name: "skill:x", source: "skill" }]).length === 0);
+ok(
+	"a missing description becomes empty, not undefined",
+	skillsFromCommands([{ name: "skill:y", source: "skill", sourceInfo: { path: "/y/SKILL.md" } }])[0].description === "",
+);
+ok("scope still derives from the location", skillScope(skills[1].location) === "personal");
 
 // --- Scope derivation ---
 const scopes = [

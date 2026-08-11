@@ -17,8 +17,6 @@ export type { MascotTheme };
 export interface DashboardModel {
 	version: string;
 	skills: SizedSkill[];
-	/** false when the prompt held a skills block this could not parse. */
-	skillsAvailable: boolean;
 	contextFiles: string[];
 	prompts: string[];
 	extensions: string[];
@@ -56,9 +54,6 @@ function groupByScope(skills: SizedSkill[]): Map<string, SizedSkill[]> {
 }
 
 function renderSkills(model: DashboardModel, theme: MascotTheme, width: number, expanded: boolean): string[] {
-	if (!model.skillsAvailable) {
-		return [heading(theme, "Skills", "unavailable (pi format changed)")];
-	}
 	if (model.skills.length === 0) return [];
 
 	const total = totalTokens(model.skills);

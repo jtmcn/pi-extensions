@@ -10,7 +10,6 @@ const theme = { fg: (_color, text) => text, bold: (text) => text };
 const skill = (name, location, tokens) => ({ name, description: `does ${name}`, location, tokens });
 const model = {
 	version: "0.84.1",
-	skillsAvailable: true,
 	skills: [
 		skill("brainstorming", "/u/.pi/agent/git/github.com/obra/superpowers/skills/brainstorming/SKILL.md", 2500),
 		skill("writing-plans", "/u/.pi/agent/git/github.com/obra/superpowers/skills/writing-plans/SKILL.md", 1700),
@@ -55,7 +54,6 @@ const superpowersPath = (id) =>
 	`/u/.pi/agent/git/github.com/obra/superpowers/skills/${id}/SKILL.md`;
 const widthModel = {
 	version: "1.0.0",
-	skillsAvailable: true,
 	skills: [
 		skill(mkLongName("alpha"), superpowersPath("a"), 1000),
 		skill(mkLongName("beta"), superpowersPath("b"), 2000),
@@ -95,10 +93,8 @@ ok("other panels still render after a throw", withThrower.collapsed.join("\n").i
 ok("throwing panel shows a failure marker", withThrower.collapsed.join("\n").includes("panel failed"));
 
 // Degradation
-const broken = renderDashboard({ ...model, skillsAvailable: false, skills: [] }, theme, 120);
-ok("unparseable skills say so", broken.collapsed.join("\n").includes("unavailable"));
 const empty = renderDashboard(
-	{ version: "1", skills: [], skillsAvailable: true, contextFiles: [], prompts: [], extensions: [], panels: [] },
+	{ version: "1", skills: [], contextFiles: [], prompts: [], extensions: [], panels: [] },
 	theme,
 	120,
 );

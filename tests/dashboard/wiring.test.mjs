@@ -21,6 +21,9 @@ process.env.PI_CODING_AGENT_DIR = agentDir;
 const skillPath = join(dir, "SKILL.md");
 await writeFile(skillPath, "x".repeat(4000));
 
+const mergePath = join(dir, "merge-SKILL.md");
+await writeFile(mergePath, "m".repeat(2000));
+
 const systemPrompt = `You are pi.
 
 <available_skills>
@@ -37,18 +40,9 @@ rules
 </project_instructions>
 </project_context>`;
 
-// A second prompt whose skill does not overlap with the first.
+// Used in the multi-session live-model test as the second session's skill.
 const coordinatorPath = join(dir, "coordinator.md");
 await writeFile(coordinatorPath, "y".repeat(3000));
-const alternatePrompt = `You are pi.
-
-<available_skills>
-  <skill>
-    <name>coordinator</name>
-    <description>orchestrates agents</description>
-    <location>${coordinatorPath}</location>
-  </skill>
-</available_skills>`;
 
 // Commands that reflect what pi really emits: source="auto" for filesystem
 // extensions, not the extension's name. A package-origin command has
@@ -57,7 +51,9 @@ const commands = () => [
 	{ name: "worktree", source: "extension", sourceInfo: { path: "/x/worktree/index.ts", source: "auto", scope: "user", origin: "top-level" } },
 	{ name: "mcp", source: "extension", sourceInfo: { path: "/x/mcp/index.ts", source: "pi-pkg@0.38.0", scope: "user", origin: "package" } },
 	{ name: "parallel-cleanup", source: "prompt", sourceInfo: { path: "/x/p.md", source: "user", scope: "user", origin: "top-level" } },
-	{ name: "brainstorming", source: "skill", sourceInfo: { path: skillPath, source: "user", scope: "user", origin: "top-level" } },
+	{ name: "brainstorming", description: "explores intent", source: "skill", sourceInfo: { path: skillPath, source: "user", scope: "user", origin: "top-level" } },
+	// disable-model-invocation: absent from the systemPrompt fixture, present here.
+	{ name: "skill:merge", description: "Commit, rebase, and merge.", source: "skill", sourceInfo: { path: mergePath, source: "user", scope: "user", origin: "top-level" } },
 ];
 
 const harness = (overrides = {}) =>
@@ -73,6 +69,7 @@ const harness = (overrides = {}) =>
 	ok("sets a header", header !== undefined);
 	const lines = header.render(120).join("\n");
 	ok("renders skills", lines.includes("brainstorming"));
+	ok("renders a skill the system prompt omits", lines.includes("merge"));
 	ok("renders a bar", /brainstorming\s+[▁▂▃▄▅▆▇█]/.test(lines));
 	ok("renders context", lines.includes("AGENTS.md"));
 	ok("renders prompts", lines.includes("/parallel-cleanup"));
@@ -108,18 +105,24 @@ for (const mode of ["print", "json", "rpc"]) {
 // model was already correct at that point — so mutation 2 passed for the wrong
 // reason. With the eager factory, h.header() returns the component stored at
 // setHeader time, and the assertion is a direct check on live-model reads.
+//
+// Skills now come from getCommands(), so the commands list (not the system
+// prompt) is varied between sessions to produce different skill sets.
 {
 	panels.resetPanels("dashboard");
-	let currentPrompt = systemPrompt;
-	const h = createFakePi({ cwd: dir, mode: "tui", systemPrompt: () => currentPrompt, commands });
+	let currentCommandList = commands();
+	const dynamicCommands = () => currentCommandList;
+	const h = createFakePi({ cwd: dir, mode: "tui", systemPrompt, commands: dynamicCommands });
 	extension(h.pi);
 
-	await h.fire("session_start"); // model = { brainstorming }
+	await h.fire("session_start"); // model = { brainstorming, merge }
 	const componentAfterFirst = h.header();
 	ok("first session renders brainstorming", componentAfterFirst.render(120).join("\n").includes("brainstorming"));
 
-	// Switch to the alternate prompt before the second session starts.
-	currentPrompt = alternatePrompt;
+	// Switch to a different command set before the second session starts.
+	currentCommandList = [
+		{ name: "skill:coordinator", description: "orchestrates agents", source: "skill", sourceInfo: { path: coordinatorPath } },
+	];
 	await h.fire("session_start"); // model = { coordinator }
 	const componentAfterSecond = h.header();
 	const secondLines = componentAfterSecond.render(120).join("\n");
@@ -227,15 +230,6 @@ for (const mode of ["print", "json", "rpc"]) {
 		panels.listPanels().filter((p) => p.owner === "dashboard").length === 0,
 	);
 }
-
-// --- A skills block pi changed the shape of ---
-{
-	const h = harness({ systemPrompt: "<available_skills>\n<thing/>\n</available_skills>" });
-	extension(h.pi);
-	await h.fire("session_start");
-	ok("unparseable block degrades", h.header().render(120).join("\n").includes("unavailable"));
-}
-
 
 // --- /dashboard setup: usage notice and first-run notification ---
 //

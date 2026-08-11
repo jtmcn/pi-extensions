@@ -12,7 +12,7 @@
  *
  * This file is wiring only:
  *
- *   skills.ts   what pi loaded, recovered from the system prompt
+ *   skills.ts   what pi loaded, from getCommands()
  *   sizes.ts    what each skill costs to read
  *   layout.ts   columns that never wrap
  *   render.ts   the screen itself
@@ -30,7 +30,7 @@ import { listPanels, subscribe } from "../lib/panels.ts";
 import { type DashboardModel, renderDashboard } from "./render.ts";
 import { defaultSettingsPath, enableQuietStartup, readQuietStartup } from "./settings.ts";
 import { measureSkills } from "./sizes.ts";
-import { parseContextFiles, parseSkills } from "./skills.ts";
+import { parseContextFiles, skillsFromCommands } from "./skills.ts";
 
 /**
  * Derive a display name for an extension command.
@@ -64,13 +64,12 @@ export default function (pi: ExtensionAPI) {
 		if (ctx.mode !== "tui") return;
 
 		const prompt = ctx.getSystemPrompt();
-		const parsed = parseSkills(prompt);
 		const commands = pi.getCommands();
+		const skills = skillsFromCommands(commands);
 
 		model = {
 			version: VERSION,
-			skills: await measureSkills(parsed.skills),
-			skillsAvailable: !parsed.present || parsed.skills.length > 0,
+			skills: await measureSkills(skills),
 			contextFiles: parseContextFiles(prompt),
 			prompts: commands.filter((c) => c.source === "prompt").map((c) => `/${c.name}`),
 			extensions: [

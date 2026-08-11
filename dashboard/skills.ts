@@ -1,14 +1,13 @@
 /**
- * Recover the loaded skills and context files from the system prompt.
+ * Skills and context files from pi's resource loader.
  *
- * `ExtensionContext` exposes no resource loader, so what pi lists in its own
- * startup sections is not directly available. The system prompt is the only
- * route — and it carries descriptions and absolute paths, which is more than
- * the built-in listing shows.
- *
- * This parses a format pi never promised. `tests/dashboard/skills.test.mjs`
- * round-trips through pi's exported `formatSkillsForPrompt` so a format change
- * fails the suite rather than silently emptying the panel.
+ * Skills come from `pi.getCommands()`, not the system prompt. The system-prompt
+ * approach used `formatSkillsForPrompt`, which drops every skill whose
+ * frontmatter has `disable-model-invocation: true` (core/skills.js:258). On a
+ * real machine that silently hid four skills — `merge`, `open-pr`, `rebase`,
+ * and `worktree` — exactly the ones invoked by name. `getCommands()` returns
+ * the resource loader's list unfiltered, with `sourceInfo.path` pointing at
+ * each skill's SKILL.md, which is what `measureSkills` and `skillScope` need.
  */
 
 export interface ParsedSkill {
@@ -17,43 +16,40 @@ export interface ParsedSkill {
 	location: string;
 }
 
-export interface SkillsBlock {
-	/** Whether the prompt contained an `<available_skills>` block at all. */
-	present: boolean;
-	skills: ParsedSkill[];
-}
-
-const SKILL_BLOCK = /<available_skills>([\s\S]*?)<\/available_skills>/;
-const SKILL_ENTRY = /<skill>\s*<name>([\s\S]*?)<\/name>\s*<description>([\s\S]*?)<\/description>\s*<location>([\s\S]*?)<\/location>\s*<\/skill>/g;
 const CONTEXT_PATH = /<project_instructions\s+path="([^"]*)"/g;
 
-/** Inverse of pi's `escapeXml`. Order matters: `&amp;` must go last. */
-function unescapeXml(value: string): string {
-	return value
-		.replace(/&lt;/g, "<")
-		.replace(/&gt;/g, ">")
-		.replace(/&quot;/g, '"')
-		.replace(/&apos;/g, "'")
-		.replace(/&amp;/g, "&");
+/** The shape of `pi.getCommands()` entries this module needs. */
+interface SkillCommand {
+	name: string;
+	description?: string;
+	source: string;
+	sourceInfo?: { path?: string };
 }
 
-export function parseSkills(systemPrompt: string): SkillsBlock {
-	const block = SKILL_BLOCK.exec(systemPrompt);
-	// An unterminated block still means pi tried: report present so the caller
-	// can say "unavailable" rather than "no skills".
-	const present = block !== null || systemPrompt.includes("<available_skills>");
-	if (!block) return { present, skills: [] };
-
+/**
+ * The loaded skills, from `pi.getCommands()`.
+ *
+ * Not from the system prompt: `formatSkillsForPrompt` drops every skill with
+ * `disable-model-invocation: true` (`core/skills.js:258`), so parsing the
+ * prompt silently hid the skills you invoke by name. `getCommands()` reports
+ * the resource loader's list unfiltered, and `sourceInfo.path` is the skill's
+ * SKILL.md — which is what `measureSkills` and `skillScope` need.
+ */
+export function skillsFromCommands(commands: readonly SkillCommand[]): ParsedSkill[] {
 	const skills: ParsedSkill[] = [];
-	SKILL_ENTRY.lastIndex = 0;
-	for (const match of block[1].matchAll(SKILL_ENTRY)) {
+	for (const command of commands) {
+		if (command.source !== "skill") continue;
+		const location = command.sourceInfo?.path;
+		// A skill we cannot locate cannot be measured or scoped; listing it
+		// without either would be worse than omitting it.
+		if (!location) continue;
 		skills.push({
-			name: unescapeXml(match[1].trim()),
-			description: unescapeXml(match[2].trim()),
-			location: unescapeXml(match[3].trim()),
+			name: command.name.replace(/^skill:/, ""),
+			description: command.description ?? "",
+			location,
 		});
 	}
-	return { present, skills };
+	return skills;
 }
 
 export function parseContextFiles(systemPrompt: string): string[] {
