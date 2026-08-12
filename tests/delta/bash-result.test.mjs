@@ -81,14 +81,34 @@ const build = ({ ready } = {}) => {
 		timing: { label: "Took", ms: 1234 },
 	});
 	const lines = component.render(100);
-	ok("falls back to pi's styling", lines.some((l) => l.includes("PI(diff text)")), JSON.stringify(lines));
-	ok(
-		"warning line matches pi's format",
-		lines.some((l) => l === "<warning>[Full output: /tmp/x. Truncated: showing 5 of 90 lines]"),
-		JSON.stringify(lines),
-	);
-	ok("timing line present", lines.some((l) => l === "<muted>Took 1.2s"), JSON.stringify(lines));
+	// Exact ordered-line assertion: blank + body, blank + warning, blank + timing.
+	// A missing blank line must fail this assertion.
+	const expected = [
+		"",
+		"PI(diff text)",
+		"",
+		"<warning>[Full output: /tmp/x. Truncated: showing 5 of 90 lines]",
+		"",
+		"<muted>Took 1.2s",
+	];
+	ok("exact line sequence: blank+body, blank+warning, blank+timing", JSON.stringify(lines) === JSON.stringify(expected), JSON.stringify(lines));
 	ok("engine asked at the render width", widths.at(-1) === 100);
+}
+
+// ---- warning and timing with no body
+
+{
+	const { component } = build({ ready: undefined });
+	component.update({
+		body: "",
+		warnings: ["Some warning"],
+		expanded: false,
+		timing: { label: "Elapsed", ms: 500 },
+	});
+	const lines = component.render(80);
+	// No body block, but warning and timing still get their own blank-line spacers.
+	const expected = ["", "<warning>[Some warning]", "", "<muted>Elapsed 0.5s"];
+	ok("exact line sequence: blank+warning, blank+timing (no body)", JSON.stringify(lines) === JSON.stringify(expected), JSON.stringify(lines));
 }
 
 // ---- empty output renders nothing but the extras
@@ -109,9 +129,11 @@ ok(
 	source.includes(`const BASH_PREVIEW_LINES = ${PREVIEW_LINES};`),
 	"pi changed BASH_PREVIEW_LINES; update delta/bash-result.ts",
 );
+const fmtStart = source.indexOf("function formatDuration(");
+const fmtBlock = source.slice(fmtStart, source.indexOf("\n}", fmtStart) + 2);
 ok(
 	"duration format still matches pi's formatDuration",
-	source.includes("return `${(ms / 1000).toFixed(1)}s`;"),
+	fmtBlock.includes("return `${(ms / 1000).toFixed(1)}s`;"),
 	"pi changed formatDuration; update delta/bash-result.ts",
 );
 

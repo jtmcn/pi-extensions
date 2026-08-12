@@ -90,10 +90,10 @@ export function createBashResult(deps: BashResultDeps): BashResult {
 			}
 
 			if (input.warnings.length > 0) {
-				lines.push(deps.theme.fg("warning", `[${input.warnings.join(". ")}]`));
+				lines.push("", deps.theme.fg("warning", `[${input.warnings.join(". ")}]`));
 			}
 			if (input.timing) {
-				lines.push(deps.theme.fg("muted", `${input.timing.label} ${formatDuration(input.timing.ms)}`));
+				lines.push("", deps.theme.fg("muted", `${input.timing.label} ${formatDuration(input.timing.ms)}`));
 			}
 
 			return lines;
