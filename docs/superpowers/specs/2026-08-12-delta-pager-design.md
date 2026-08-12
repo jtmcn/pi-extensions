@@ -66,6 +66,17 @@ These drove most of the design and are worth stating before the architecture.
 8. **`edit` results carry `details.patch`**, a standard unified patch with
    `diff --git` headers — the right input for delta, because it names the file
    and so enables syntax highlighting.
+9. **`Container`/`Text` are not re-exported from the package entry**, but pi
+   accepts duck-typed components — `{ render(width): string[], invalidate() }` —
+   as both children (`bash.js` adds one) and render-slot returns.
+   `dashboard/index.ts` already uses this shape. It also means a component learns
+   the **real render width**, rather than guessing from `process.stdout.columns`.
+10. **Calling `context.invalidate()` asynchronously is sanctioned.** The built-in
+    bash renderer drives a `setInterval` that calls it once a second to update
+    its elapsed-time line.
+11. **Delta emits erase-in-line (`\x1b[0K`) sequences** to extend background
+    colour to the width of the line. Inside a TUI-managed frame those must be
+    stripped, along with carriage returns, or they clear frame content pi drew.
 
 ## Architecture
 
@@ -77,6 +88,7 @@ delta/
 ├── cache.ts      pure: LRU keyed by hash:width:configVersion, positive + negative, in-flight set
 ├── run.ts        subprocess: probe() and run(text, width, cfg); spawn injected
 ├── footer.ts     pure: splitBashFooter(text, details) → { body, footer }
+├── ansi.ts       pure: sanitize(deltaOutput) — strip erase-in-line and CR (constraint 11)
 ├── render.ts     the render slots, from injected { cache, run, fallback } — no pi import
 └── README.md
 ```
@@ -115,6 +127,15 @@ When delta is unavailable, the settled diff falls back to `renderDiff`
 
 Cache key: `hash(diffText) : width : configVersion`.
 
+Width differs per tool, because of what each one can see:
+
+- **`edit`/`write`** own their component, so width is the real `render(width)`
+  argument. A resize re-renders at the new width, misses the cache, and re-runs
+  delta at the correct width.
+- **`bash`** substitutes text into pi's component before any width is known, so
+  it uses `process.stdout.columns`. Delta's box decorations may be a column or
+  two off, which is invisible in practice.
+
 - **Hit** — use delta's output.
 - **Miss** — return the fallback rendering immediately, spawn delta in the
   background, then store the result and call `context.invalidate()` to repaint.
@@ -146,9 +167,10 @@ dropped without touching the callback, and the call is defensive regardless.
 
 ### Accepted limitations
 
-- **Resize does not re-layout.** Width comes from `process.stdout.columns` when
-  delta runs. Existing diffs keep their original layout and pi wraps them, the
-  way real pager scrollback behaves.
+- **Resize does not re-layout bash diffs.** They keep the layout delta produced
+  at the previous width and pi wraps them, the way real pager scrollback
+  behaves. `edit`/`write` diffs do re-layout, briefly showing the fallback
+  rendering until delta re-runs at the new width.
 - **Oversized diffs skip delta.** Above `maxBytes` (default 256 KB) the built-in
   rendering is used, so a huge `git show` cannot burn a subprocess and CPU for
   output that appears as eight collapsed lines.
@@ -194,6 +216,8 @@ what makes command matching (rather than sniffing output shape) tolerable.
 - **`footer.test.mjs`** — footer split/re-append round-trips; output that
   legitimately ends in `]` with no footer; truncation details present but footer
   absent.
+- **`ansi.test.mjs`** — erase-in-line and CR stripped; colour and OSC 8 escapes
+  preserved; asserted against real delta output captured as a fixture.
 - **`cache.test.mjs`** — LRU eviction, width change producing a miss, negative
   entries preventing respawn, in-flight de-duplication.
 - **`render.test.mjs`** — with a fake runner: first call returns fallback and
