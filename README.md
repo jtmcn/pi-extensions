@@ -20,6 +20,18 @@ extensions/
 ├── package.json        private; exists only to give the checks one entry point
 ├── lib/                shared helpers — NOT an extension (no index.ts, never loaded)
 │   └── git.ts          git plumbing: layout detection, worktree listing, dirt checks
+├── delta/              an extension (loaded via delta/index.ts)
+│   ├── index.ts
+│   ├── ansi.ts
+│   ├── bash-result.ts
+│   ├── body.ts
+│   ├── cache.ts
+│   ├── config.ts
+│   ├── detect.ts
+│   ├── engine.ts
+│   ├── footer.ts
+│   ├── run.ts
+│   └── README.md
 ├── mcp/                an extension (loaded via mcp/index.ts)
 │   ├── index.ts
 │   ├── client.ts
@@ -65,6 +77,7 @@ extension means adding a directory and a test file — no script to edit.
 | Name | What it does |
 |---|---|
 | [`dashboard`](dashboard/README.md) | Startup screen: mascot, location and Graphite stack, loaded skills grouped by source with size bars, and MCP server health. Run `/dashboard setup` once to suppress pi's built-in listing. |
+| [`delta`](delta/README.md) | Renders `git diff` output and `edit` diffs with the delta pager instead of pi's built-in diff styling. |
 | [`mcp`](mcp/README.md) | MCP client: spawn stdio MCP servers and expose their tools as native pi tools. |
 | [`worktree`](worktree/README.md) | Manage git worktrees; optionally redirect the agent's tool calls into one without restarting the session. Shows the branch's PR in the status bar. |
 
