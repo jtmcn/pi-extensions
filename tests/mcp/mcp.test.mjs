@@ -338,7 +338,12 @@ async function extHarness(servers, { hasUI = true, startupTimeoutMs = 10_000 } =
 	const root = await mkdtemp(join(tmpdir(), "pi-mcp-ext-"));
 	const agentDir = join(root, "agent");
 	await mkdir(agentDir, { recursive: true });
-	await writeFile(join(agentDir, "mcp.json"), JSON.stringify({ servers, startupTimeoutMs }));
+	const configPath = join(agentDir, "mcp.json");
+	// `servers === null` leaves the file absent, which is a different state from a
+	// file that declares no servers — the status command has to tell them apart.
+	const writeConfig = (next, raw) =>
+		writeFile(configPath, raw ?? JSON.stringify({ servers: next, startupTimeoutMs }));
+	if (servers !== null) await writeConfig(servers);
 
 	const previous = process.env.PI_CODING_AGENT_DIR;
 	process.env.PI_CODING_AGENT_DIR = agentDir;
@@ -350,6 +355,9 @@ async function extHarness(servers, { hasUI = true, startupTimeoutMs = 10_000 } =
 	return {
 		...h,
 		root,
+		configPath,
+		/** Rewrite mcp.json mid-session, to be picked up by `/mcp restart`. */
+		writeConfig,
 		/** Invoke `/mcp <args>`. */
 		command: (args = "") => h.command("mcp", args),
 		cleanup: async () => {
@@ -418,6 +426,99 @@ async function extHarness(servers, { hasUI = true, startupTimeoutMs = 10_000 } =
 	);
 
 	await h.fire("session_shutdown");
+	await h.cleanup();
+}
+
+// ------------------------------------------------- restart re-reads config ---
+
+{
+	// The bug this fixes: a server added to mcp.json mid-session was invisible to
+	// `/mcp restart`, because restart reconnected the in-memory map and only
+	// session_start ever read the file. Edit config, restart, and the answer was
+	// still "no servers configured" — naming the file you had just edited.
+	const h = await extHarness({});
+	await h.fire("session_start");
+	await h.fire("before_agent_start");
+	ok("restart-reload: nothing is configured to begin with", h.names().length === 0, h.names().join());
+
+	await h.writeConfig({ fake: { command: process.execPath, args: [FAKE], timeoutMs: 5000 } });
+	await h.command("restart");
+	await h.settle();
+
+	const status = await statusText(h);
+	ok("restart-reload: a server added to the file connects", /fake v9\.9\.9 \[ready\]/.test(status), status);
+	ok("restart-reload: its tools are registered", h.names().includes("fake_echo"), h.names().join());
+	const echoed = await h.call("fake_echo", { message: "added" });
+	ok(
+		"restart-reload: the newly added tool is callable",
+		echoed?.content[0]?.text === "echo: added",
+		JSON.stringify(echoed),
+	);
+
+	await h.fire("session_shutdown");
+	await h.cleanup();
+}
+
+{
+	// The mirror image: a server deleted from the file must not survive a restart,
+	// or the map drifts from the config in the other direction.
+	const h = await extHarness({ fake: { command: process.execPath, args: [FAKE], timeoutMs: 5000 } });
+	await h.fire("session_start");
+	await h.fire("before_agent_start");
+	ok("restart-reload: the server starts out ready", /\[ready\]/.test(await statusText(h)));
+
+	await h.writeConfig({});
+	await h.command("restart");
+	await h.settle();
+
+	const status = await statusText(h);
+	// Assert on the name, not the version: `closeAll` drops `state.client`, so a
+	// server left in the map by a missing `servers.clear()` prints without its
+	// version and slips past a /fake v9\.9\.9/ check. That is how this test first
+	// passed against an implementation that never cleared the map at all.
+	ok("restart-reload: a removed server is gone from the status", !/fake/.test(status), status);
+	ok("restart-reload: an emptied config reports nothing configured", /no servers in/.test(status), status);
+	const dead = await h.call("fake_echo", { message: "gone" });
+	ok(
+		"restart-reload: its orphaned tool answers rather than throwing",
+		/not connected/.test(dead?.content[0]?.text ?? ""),
+		JSON.stringify(dead),
+	);
+
+	await h.fire("session_shutdown");
+	await h.cleanup();
+}
+
+{
+	// Malformed JSON must warn, not throw: a restart that takes down the session
+	// over a stray comma is worse than the stale config it was trying to fix.
+	const h = await extHarness({});
+	await h.fire("session_start");
+	await h.writeConfig(null, "{ not json");
+	await h.command("restart");
+	await h.settle();
+
+	const text = h.messages().join("\n");
+	ok("restart-reload: bad JSON is reported as a warning", /invalid JSON/.test(text), text);
+	ok(
+		"restart-reload: bad JSON leaves the session alive",
+		h.notices.some((n) => n.level === "warning"),
+		JSON.stringify(h.notices),
+	);
+	await h.cleanup();
+}
+
+{
+	// Restarting with nothing configured used to claim "reconnecting", which reads
+	// as success. Say what actually happened.
+	const h = await extHarness({});
+	await h.fire("session_start");
+	await h.command("restart");
+	await h.settle();
+
+	const text = h.messages().join("\n");
+	ok("restart-reload: an empty config does not claim to be reconnecting", !/reconnecting/.test(text), text);
+	ok("restart-reload: an empty config says there is nothing to start", /no servers in/.test(text), text);
 	await h.cleanup();
 }
 
@@ -557,15 +658,25 @@ async function extHarness(servers, { hasUI = true, startupTimeoutMs = 10_000 } =
 // ---------------------------------------------------------- /mcp status ---
 
 {
-	const h = await extHarness({});
-	await h.fire("session_start");
-	await h.command();
-	ok(
-		"status: says when nothing is configured",
-		h.messages().some((m) => /no servers configured/.test(m)),
-		JSON.stringify(h.notices),
-	);
-	await h.cleanup();
+	// Two ways to have no servers, and they need different advice. "no servers
+	// configured (~/.pi/agent/mcp.json)" was printed for both — and, worst, for a
+	// file the user had just correctly edited, since only session_start read it.
+	const missing = await extHarness(null);
+	await missing.fire("session_start");
+	await missing.command();
+	const missingText = missing.messages().join("\n");
+	ok("status: reports an absent config file as absent", /no config file/.test(missingText), missingText);
+	ok("status: names the path it looked for", missingText.includes(missing.configPath), missingText);
+	await missing.cleanup();
+
+	const empty = await extHarness({});
+	await empty.fire("session_start");
+	await empty.command();
+	const emptyText = empty.messages().join("\n");
+	ok("status: reports a file that declares no servers differently", /no servers in/.test(emptyText), emptyText);
+	ok("status: names the file it read", emptyText.includes(empty.configPath), emptyText);
+	ok("status: does not call a present file absent", !/no config file/.test(emptyText), emptyText);
+	await empty.cleanup();
 }
 
 {

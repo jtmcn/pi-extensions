@@ -89,6 +89,9 @@ export default function mcpExtension(pi: ExtensionAPI) {
 	/** In-flight connects, awaited once before the first turn of a session. */
 	let connecting: Promise<unknown>[] = [];
 	let startupTimeoutMs = DEFAULT_STARTUP_TIMEOUT_MS;
+	/** Config files actually read, and the locations considered. Reset per session. */
+	let configSources: string[] = [];
+	let configCandidates: string[] = [];
 
 	/**
 	 * Wait for pending connects, but never longer than the configured budget.
@@ -260,21 +263,31 @@ export default function mcpExtension(pi: ExtensionAPI) {
 		}
 	}
 
-	pi.on("session_start", async (_event, ctx) => {
-		// Reload/fork/resume re-fire this. Drop the previous generation first.
-		const cycle = beginCycle();
-		closeAll();
-		servers.clear();
-		clearMcpPanel();
-
-		const { config, sources, warnings } = await loadConfig({
+	/**
+	 * Read the config and connect everything it declares.
+	 *
+	 * Shared by `session_start` and `/mcp restart`, which is the whole point:
+	 * restart used to reconnect the in-memory map, so a server added to `mcp.json`
+	 * mid-session was invisible and the command reported "no servers configured"
+	 * while naming the file the user had just edited. Restart is the natural place
+	 * to pick config changes up, so it re-reads.
+	 *
+	 * The caller owns `beginCycle()` and `closeAll()`: teardown differs between the
+	 * two paths, and the cycle guards below compare against the caller's generation.
+	 */
+	async function startServers(ctx: ExtensionContext, cycle: number): Promise<void> {
+		const { config, sources, candidates, warnings } = await loadConfig({
 			cwd: ctx.cwd,
 			projectTrusted: ctx.isProjectTrusted(),
 		});
+		// Replaced, never merged: a restart may load a different file set, and these
+		// describe the config now in force.
+		configSources = sources;
+		configCandidates = candidates;
 		for (const warning of warnings) warn(ctx, `mcp: ${warning}`);
-		if (sources.length === 0) return; // Not configured; stay silent.
 		startupTimeoutMs = config.startupTimeoutMs;
 
+		servers.clear();
 		for (const [name, server] of Object.entries(config.servers)) {
 			servers.set(name, {
 				name,
@@ -284,7 +297,7 @@ export default function mcpExtension(pi: ExtensionAPI) {
 			});
 		}
 		// Show "… connecting" immediately so the dashboard is informative before
-		// handshakes complete.
+		// handshakes complete. With no servers this clears the panel instead.
 		publishPanel();
 
 		// Connect in parallel without blocking session startup. `before_agent_start`
@@ -315,6 +328,32 @@ export default function mcpExtension(pi: ExtensionAPI) {
 					}),
 			);
 		}
+	}
+
+	/**
+	 * What to say when the server map is empty. An absent file and a file that
+	 * declares no servers need different advice, and conflating them meant the
+	 * message named a path the user had already fixed.
+	 */
+	function nothingConfiguredMessage(): string {
+		if (configSources.length === 0) {
+			return `mcp: no config file — create ${configCandidates.join(" or ")}, then /mcp restart`;
+		}
+		return `mcp: no servers in ${configSources.join(", ")} (/mcp restart re-reads it)`;
+	}
+
+	pi.on("session_start", async (_event, ctx) => {
+		// Reload/fork/resume re-fire this. Drop the previous generation first.
+		const cycle = beginCycle();
+		closeAll();
+		// Cleared here as well as in `startServers` so a config load that throws
+		// cannot leave the previous session's servers reported as ready.
+		servers.clear();
+		clearMcpPanel();
+
+		// `configSources`/`configCandidates` need no reset: this assigns both before
+		// anything can read them.
+		await startServers(ctx, cycle);
 	});
 
 	// Awaited by pi, so this is the one place a turn can be held back until the
@@ -335,30 +374,11 @@ export default function mcpExtension(pi: ExtensionAPI) {
 			if (args.trim() === "restart") {
 				const cycle = beginCycle();
 				closeAll();
-				connecting = [];
-				for (const state of servers.values()) {
-					if (state.status === "disabled") continue;
-					state.status = "connecting";
-					connecting.push(
-						connect(state, ctx, cycle)
-							.then(() => {
-								if (cycle === generation) publishPanel();
-							})
-							.catch((error: Error) => {
-								// Same guard: a restart or shutdown that superseded this attempt
-								// closed it, and the state object it would write to has been
-								// replaced.
-								if (cycle !== generation) return;
-								state.status = "failed";
-								state.error = error.message;
-								publishPanel();
-							}),
-					);
-				}
-				// Paint the "… connecting" state immediately so the dashboard updates
-				// without waiting for handshakes.
-				publishPanel();
-				tell(ctx, "mcp: reconnecting");
+				// Re-reads mcp.json, so this reconnects live servers *and* picks up ones
+				// added, removed, or edited since session start. Tool names stay stable
+				// across the cycle because they are derived from the config in order.
+				await startServers(ctx, cycle);
+				tell(ctx, servers.size === 0 ? nothingConfiguredMessage() : "mcp: reconnecting");
 				return;
 			}
 
@@ -370,7 +390,7 @@ export default function mcpExtension(pi: ExtensionAPI) {
 			await awaitConnections();
 
 			if (servers.size === 0) {
-				tell(ctx, "mcp: no servers configured (~/.pi/agent/mcp.json)");
+				tell(ctx, nothingConfiguredMessage());
 				return;
 			}
 

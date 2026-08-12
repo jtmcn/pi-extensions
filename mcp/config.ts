@@ -66,6 +66,12 @@ export interface LoadedConfig {
 	config: McpConfig;
 	/** Config files found and applied, in precedence order. */
 	sources: string[];
+	/**
+	 * The config file locations considered, whether or not they exist. Lets
+	 * "nothing is configured" name the file to create instead of hardcoding
+	 * `~/.pi/agent/mcp.json`, which is wrong under `PI_CODING_AGENT_DIR`.
+	 */
+	candidates: string[];
 	/** Non-fatal problems: malformed JSON, bad field types, unusable entries. */
 	warnings: string[];
 }
@@ -114,7 +120,7 @@ export async function loadConfig(options: LoadConfigOptions): Promise<LoadedConf
 		mergeServers(servers, raw, file, options, home, warnings);
 	}
 
-	return { config: { servers, startupTimeoutMs }, sources, warnings };
+	return { config: { servers, startupTimeoutMs }, sources, candidates, warnings };
 }
 
 /** Servers that should actually be started. */

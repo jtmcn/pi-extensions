@@ -56,13 +56,17 @@ feed both pi and Claude Code:
 
 ```
 /mcp            server status: state, tool count, tool names, last error
-/mcp restart    tear down every server and reconnect
+/mcp restart    re-read mcp.json, tear down every server and reconnect
 ```
 
 `/mcp` waits for any handshake still in flight before reporting, bounded by
 `startupTimeoutMs`, so it describes what is actually running rather than a
 snapshot of "connecting". A server that never answers is reported as still
 connecting once that budget is spent.
+
+**`/mcp restart` re-reads the config**, so editing `mcp.json` and restarting
+picks up servers you added, removed, or changed — no `/reload` or new session
+needed. Malformed JSON is warned about and leaves the running servers alone.
 
 ## Tool naming
 
@@ -94,6 +98,14 @@ prompt. This is the strongest practical argument against MCP, so:
   docs forbid background resources in the factory, which also runs for
   `--list-models` and `--help`. Getting this wrong leaks a child process per
   invocation.
+- **`session_start` and `/mcp restart` share one start path.** Restart used to
+  reconnect the in-memory server map, which only `session_start` ever populated:
+  a server added to `mcp.json` mid-session was invisible, and `/mcp` answered
+  "no servers configured" while naming the file that had just been edited
+  correctly. Both paths now call the same loader.
+- **"Nothing configured" distinguishes an absent file from an empty one**, and
+  names the paths it read or looked for rather than hardcoding
+  `~/.pi/agent/mcp.json`, which is wrong under `PI_CODING_AGENT_DIR`.
 - **The first turn waits for connections**, bounded by `startupTimeoutMs`.
   Tools are advertised as part of the request, so a tool registered mid-turn is
   invisible until the next one — without the gate a fast first prompt races the
