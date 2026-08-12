@@ -85,7 +85,7 @@ export function createRunner(deps: { config: () => DeltaConfig; spawn?: SpawnFn 
 		available() {
 			// One probe per session: PATH does not change under us, and a missing
 			// binary must not cost a process per diff.
-			probe ??= run(deps.config().command, ["--version"], "", 2000).then((result) => result.code === 0);
+			probe ??= run(deps.config().command, ["--version"], "", 2000).then((result) => result.code === 0 && !result.timedOut);
 			return probe;
 		},
 		async render(text, width) {

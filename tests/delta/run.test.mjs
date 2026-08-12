@@ -108,13 +108,24 @@ if (!deltaInstalled) {
 	ok("real delta emits colour into a pipe", /\x1b\[[0-9;]*m/.test(rendered ?? ""));
 	ok("real output carries no erase sequences", !/\x1b\[[0-2]?[KJ]/.test(rendered ?? ""));
 	ok("real output mentions the file", (rendered ?? "").includes("f.txt"));
-	// Width sensitivity: unified mode is not width-sensitive after sanitize()
-	// removes the erase-to-line-end sequences that carry width in that mode.
-	// Side-by-side mode IS width-sensitive because each column gets half the
-	// terminal width; that is what makes the cache key on width load-bearing.
-	const defWide = await real.render(WIDE_PATCH, 200);
-	ok("unified mode is width-independent once erase sequences are stripped", (await real.render(WIDE_PATCH, 80)) === defWide);
-	const sbsRunner = createRunner({ config: () => ({ ...DEFAULT_CONFIG, args: ["--side-by-side"] }) });
+	// Width sensitivity: delta's built-in file-decoration-style is "underline",
+	// which draws a rule spanning the full terminal width. That rule carries
+	// width even in unified mode — so on machines without a [delta] git config
+	// section width IS observable in unified mode. The cache key on width is
+	// therefore load-bearing for default installs, not only for side-by-side.
+	//
+	// --file-decoration-style=none removes the rule, making the assertion
+	// environment-independent. Do not remove that flag: without it the assertion
+	// passes only on machines whose git config happens to override the rule style.
+	const noDecoRunner = createRunner({ config: () => ({ ...DEFAULT_CONFIG, args: ["--no-gitconfig", "--file-decoration-style=none"] }) });
+	ok(
+		"unified mode without file decoration is width-independent",
+		(await noDecoRunner.render(WIDE_PATCH, 80)) === (await noDecoRunner.render(WIDE_PATCH, 200)),
+	);
+	// Side-by-side mode IS width-sensitive: each column gets half the terminal
+	// width, so longer lines wrap at narrow widths but not at wide ones. This
+	// is the primary justification for keying the render cache on width.
+	const sbsRunner = createRunner({ config: () => ({ ...DEFAULT_CONFIG, args: ["--no-gitconfig", "--side-by-side"] }) });
 	const sbsNarrow = await sbsRunner.render(WIDE_PATCH, 80);
 	const sbsWide = await sbsRunner.render(WIDE_PATCH, 200);
 	ok("width changes the rendering in side-by-side mode", sbsNarrow !== sbsWide);
