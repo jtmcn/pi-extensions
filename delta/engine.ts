@@ -10,7 +10,10 @@
  *   - negative entries, so a failure is not retried on every later frame;
  *   - a generation counter, so a run that finishes after its session was
  *     replaced never touches the stale `invalidate` — that throws "extension
- *     ctx is stale" and takes the process down.
+ *     ctx is stale" and takes the process down — and never calls
+ *     `onUnavailable` into a session it does not belong to, consuming that
+ *     session's once-per-session warning for a binary check nobody asked it
+ *     to make.
  */
 
 import { type Cache, cacheKey } from "./cache.ts";
@@ -63,7 +66,11 @@ export function createEngine(deps: EngineDeps): Engine {
 				try {
 					if (await deps.runner.available()) {
 						output = await deps.runner.render(text, width);
-					} else if (!warned) {
+					} else if (started === generation && !warned) {
+						// The generation check has to gate this call too, not just
+						// `invalidate()` below: a run whose session was replaced while it
+						// was checking availability must not warn into the new session
+						// and consume its once-per-session flag.
 						warned = true;
 						deps.onUnavailable?.();
 					}

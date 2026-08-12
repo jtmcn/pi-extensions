@@ -10,8 +10,10 @@
  * `extensionDefinition.renderX ?? builtInDefinition.renderX`, and there is no
  * renderer-only registration API. Registering a tool named `bash` is the only
  * way to reach that slot — which means an extension that routes bash somewhere
- * else (containers, SSH) must not be combined with this one. `enabled: false` in
- * `delta.json` is the escape hatch.
+ * else (containers, SSH) must not be combined with this one. Registration
+ * happens unconditionally at factory time, before any config is loaded, so
+ * `enabled: false` cannot help here: it only stops text reaching delta. The
+ * only way to avoid the conflict is to not load this extension.
  *
  * `write` is not wrapped: it has no diff. Its `execute` returns
  * `details: undefined` and its result renders only errors.
@@ -41,23 +43,19 @@ interface RenderTheme {
 	bold(text: string): string;
 }
 
-/** Minimal shape of the render context pi hands a renderer. */
-interface RenderContext {
-	args: Record<string, unknown> | undefined;
-	cwd: string;
-	invalidate: () => void;
-	state: Record<string, unknown>;
-	isError: boolean;
-	lastComponent: unknown;
-	executionStarted: boolean;
-}
-
 export default function deltaExtension(pi: ExtensionAPI): void {
 	let config: DeltaConfig = { ...DEFAULT_CONFIG };
 	let version = configVersion(DEFAULT_CONFIG);
 	let patterns: RegExp[] = [];
 	/** The live session, for the one notice this extension can emit. */
 	let session: ExtensionContext | undefined;
+	/**
+	 * Bumped synchronously at the top of every `session_start`. A handler's
+	 * continuation compares its own snapshot against this after the `await`;
+	 * a mismatch means a newer session has already started, and the older
+	 * handler must not assign module state or touch its (now stale) `ctx`.
+	 */
+	let sessionGeneration = 0;
 
 	const cache = createCache();
 	const runner = createRunner({ config: () => config });
@@ -68,12 +66,11 @@ export default function deltaExtension(pi: ExtensionAPI): void {
 		version: () => version,
 		onUnavailable: () => {
 			const ctx = session;
-			if (!ctx?.hasUI) return;
+			if (!ctx) return;
 			try {
-				ctx.ui.notify(
-					`delta: ${config.command} is not on PATH; using pi's built-in diff rendering.`,
-					"warning",
-				);
+				const message = `delta: ${config.command} is not on PATH; using pi's built-in diff rendering.`;
+				if (ctx.hasUI) ctx.ui.notify(message, "warning");
+				else if (ctx.mode === "print") process.stdout.write(`${message}\n`);
 			} catch {
 				// The session was replaced between scheduling and this callback.
 			}
@@ -82,11 +79,19 @@ export default function deltaExtension(pi: ExtensionAPI): void {
 
 	pi.on("session_start", async (_event, ctx) => {
 		// Everything below is per-session: a resumed or forked session re-fires
-		// this against a different transcript and must not inherit state.
+		// this against a different transcript and must not inherit state. The
+		// generation snapshot guards the *other* half of that: a session_start
+		// whose config load is still in flight when a newer one starts must not
+		// assign config/version/patterns or touch `ctx` after the newer session
+		// has already superseded it — that ctx is stale by then.
+		sessionGeneration += 1;
+		const generation = sessionGeneration;
 		session = ctx;
 		engine.reset();
 
 		const loaded = await loadConfig({ projectRoot: ctx.cwd, projectTrusted: ctx.isProjectTrusted() });
+		if (generation !== sessionGeneration) return;
+
 		config = loaded.config;
 		version = loaded.version;
 
@@ -162,6 +167,20 @@ export default function deltaExtension(pi: ExtensionAPI): void {
 	});
 
 	// ---- edit: header while pending, delta diff once settled ---------------
+	//
+	// pi keeps the call and result renderer components separate
+	// (`callRendererComponent` / `resultRendererComponent` in
+	// tool-execution.js's `ToolExecutionComponent`): each slot gets its own
+	// `lastComponent`, and once a result exists pi paints *both* into the same
+	// container. `context.state`, in contrast, is one object shared by both
+	// slots for the whole tool call. So our one on-screen component has to live
+	// in `context.state`, not `lastComponent` — a component built from
+	// `lastComponent` in the result slot never sees the call slot's component,
+	// and a real session then shows the header (and, once settled, the diff)
+	// twice. pi's own built-in `edit` definition solves this the same way:
+	// `context.state.callComponent`, mutated from `renderResult`, with
+	// `renderResult` itself returning nothing to display
+	// (`core/tools/edit.js`'s `formatEditResult`/`getEditCallRenderComponent`).
 
 	const edit = createEditToolDefinition(process.cwd());
 	type EditSlots = typeof edit;
@@ -183,13 +202,14 @@ export default function deltaExtension(pi: ExtensionAPI): void {
 		error?: string;
 	}
 
-	const editComponent = (context: RenderContext, theme: RenderTheme): EditComponent => {
-		const existing = context.lastComponent as EditComponent | undefined;
+	/** The one component both slots share, reached through `context.state`. */
+	const editComponent = (state: Record<string, unknown>, theme: RenderTheme, invalidate: () => void): EditComponent => {
+		const existing = state.editComponent as EditComponent | undefined;
 		if (existing) return existing;
 		const body = createDiffBody({
 			engine,
 			fallback: (diff) => renderDiff(diff),
-			invalidate: context.invalidate,
+			invalidate,
 		});
 		const component: EditComponent = {
 			head: "",
@@ -203,11 +223,12 @@ export default function deltaExtension(pi: ExtensionAPI): void {
 				return [component.head, ...body.render(width)];
 			},
 		};
+		state.editComponent = component;
 		return component;
 	};
 
 	const editRenderCall: NonNullable<EditSlots["renderCall"]> = (args, theme, context) => {
-		const component = editComponent(context as unknown as RenderContext, theme);
+		const component = editComponent(context.state, theme, context.invalidate);
 		component.head = header(args as Record<string, unknown>, theme, context.cwd);
 		// pi re-renders the call slot while arguments stream, and can render it
 		// again after the result. Clearing unconditionally would blank a settled
@@ -217,7 +238,7 @@ export default function deltaExtension(pi: ExtensionAPI): void {
 	};
 
 	const editRenderResult: NonNullable<EditSlots["renderResult"]> = (result, _options, theme, context) => {
-		const component = editComponent(context as unknown as RenderContext, theme);
+		const component = editComponent(context.state, theme, context.invalidate);
 		component.head = header(context.args as Record<string, unknown>, theme, context.cwd);
 		component.settled = true;
 		if (context.isError) {
@@ -226,12 +247,15 @@ export default function deltaExtension(pi: ExtensionAPI): void {
 				.map((part) => part.text ?? "")
 				.join("\n");
 			component.body.set(undefined, undefined);
-			return component;
+		} else {
+			const details = result.details as { diff?: string; patch?: string } | undefined;
+			component.error = undefined;
+			component.body.set(details?.patch, details?.diff);
 		}
-		const details = result.details as { diff?: string; patch?: string } | undefined;
-		component.error = undefined;
-		component.body.set(details?.patch, details?.diff);
-		return component;
+		// The shared component above (reached through context.state) carries all
+		// the content; the result slot itself must paint nothing, or a real
+		// session shows the header and diff twice — once from each slot.
+		return { render: () => [], invalidate() {} };
 	};
 
 	pi.registerTool({

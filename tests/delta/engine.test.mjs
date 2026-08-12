@@ -163,6 +163,34 @@ const build = (overrides = {}) => {
 	ok("stale session is not painted", painted === 0, String(painted));
 }
 
+// ---- a superseded session must not warn either
+//
+// The generation check has to gate `onUnavailable()`, not just `invalidate()`:
+// a run that was still checking availability when its session was replaced
+// must not fire the missing-binary warning into the new session and consume
+// its once-per-session flag.
+
+{
+	let release;
+	const gate = new Promise((resolve) => {
+		release = resolve;
+	});
+	const runner = {
+		available: async () => {
+			await gate;
+			return false;
+		},
+		render: async () => "DELTA",
+		reset: () => {},
+	};
+	const { engine, unavailable } = build({ runner });
+	engine.lookup("patch", 80, () => {});
+	engine.reset(); // the session is replaced while the availability check is still pending
+	release();
+	await settle();
+	ok("a stale run does not warn", unavailable.length === 0, String(unavailable.length));
+}
+
 // ---- a throwing invalidate must not escape
 
 {

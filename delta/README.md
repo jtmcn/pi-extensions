@@ -54,7 +54,10 @@ Two consequences worth knowing:
 
 - **Do not combine it with an extension that routes `bash` elsewhere** (a
   container or SSH router). Both register the same name and the last one wins.
-  Set `enabled: false`, or don't load this extension, in that setup.
+  Registration happens unconditionally when the extension loads, before any
+  config is read, so `enabled: false` cannot prevent the conflict — it only
+  stops text reaching delta once registered. The only fix is to not load this
+  extension in that setup.
 - **`edit` shows no pending preview.** Pi computes that preview with an
   unexported helper; reproducing it would be a fork that breaks on upgrades. You
   see `edit <path>` while the edit is in flight and the delta diff once it lands.
