@@ -56,7 +56,10 @@ export function createDiffBody(deps: DiffBodyDeps): DiffBody {
 		},
 		render(width) {
 			const rendered = patch ? deps.engine.lookup(patch, width, deps.invalidate) : undefined;
-			const raw = rendered ?? (diff ? deps.fallback(diff) : undefined);
+			// `rendered` went through sanitize() (see run.ts), which now strips pre-
+			// existing U+E000. The fallback (pi's renderDiff) has not, so strip here
+			// before fill() can mistake content glyphs for erase-in-line sentinels.
+			const raw = rendered ?? (diff ? deps.fallback(diff).replace(/\uE000/g, "") : undefined);
 			if (!raw) return [];
 			const text = deps.fill(raw, width);
 			// The leading blank line matches pi's own Spacer before a diff.

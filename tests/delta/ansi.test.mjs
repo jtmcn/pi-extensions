@@ -128,4 +128,83 @@ for (const sample of [
 	ok(`matches pi's stripAnsi: ${JSON.stringify(sample)}`, plain(sample) === piStripAnsi(sample).replace(/\r/g, ""));
 }
 
+// ---- sentinel collision: U+E000 in input content is stripped before fill() can expand it
+//
+// U+E000 is the first code point of the Unicode Private Use Area, exactly
+// where Nerd Fonts and Powerline put their glyphs. A diff of a file that
+// contains such glyphs would otherwise have them treated as fill sentinels:
+// fill() would insert padding at each glyph's position, corrupting the output.
+// The fix: sanitize() and plain() strip any pre-existing U+E000 before
+// inserting (or returning text destined for) fill().
+
+{
+	// sanitize(): pre-existing U+E000 (e.g. a Nerd Font glyph in diff content)
+	// must be stripped before the erase-in-line sentinel is inserted.
+	const glyphLine = `alpha${FILL_SENTINEL}beta`; // U+E000 in content, no erase sequence
+
+	const sanitized = sanitize(glyphLine);
+	ok(
+		"sanitize strips pre-existing U+E000 from content before inserting its own",
+		!sanitized.includes(FILL_SENTINEL),
+		JSON.stringify([...sanitized].map((c) => c.codePointAt(0).toString(16))),
+	);
+	const filled = fill(sanitized, 40, visibleWidth);
+	ok(
+		"fill on sanitized content-only U+E000 adds no extra padding (equals its input)",
+		filled === sanitized,
+		JSON.stringify(filled),
+	);
+}
+
+{
+	// plain(): same guarantee for tool-result text arriving on the bash fallback path.
+	const glyphLine = `alpha${FILL_SENTINEL}beta`; // U+E000 in content
+
+	const p = plain(glyphLine);
+	ok(
+		"plain strips pre-existing U+E000 from content",
+		!p.includes(FILL_SENTINEL),
+		JSON.stringify([...p].map((c) => c.codePointAt(0).toString(16))),
+	);
+	const filled = fill(p, 40, visibleWidth);
+	ok(
+		"fill on plain content-only U+E000 adds no extra padding (equals its input)",
+		filled === p,
+		JSON.stringify(filled),
+	);
+}
+
+{
+	// A real delta line (erase-in-line present) plus a stray U+E000 in its
+	// content: the stray glyph must be stripped (gone), not expanded into
+	// padding (which would displace the real erase-in-line's fill position).
+	//
+	// Pre-fix: sanitize() leaves the glyph as a sentinel; fill() then sees two
+	// sentinels and inserts padding at the glyph's position — the bg SGR ends
+	// up AFTER the spaces instead of before them, so the terminal paints them
+	// in the default colour, not the diff's background colour.
+	// Post-fix: the glyph is stripped first; one sentinel remains at the real
+	// erase position; the output matches the same line without the glyph.
+	//
+	// Note: the width assertion also passes pre-fix (both produce a 20-wide
+	// line). The equality assertion is what fails pre-fix.
+	const bgSgr = "\x1b[48;2;40;59;77m";
+	const width = 20;
+	const lineWithGlyph = `alpha${FILL_SENTINEL}${bgSgr}\x1b[0K`;
+	const lineWithout = `alpha${bgSgr}\x1b[0K`;
+
+	const filledWith = fill(sanitize(lineWithGlyph), width, visibleWidth);
+	const filledWithout = fill(sanitize(lineWithout), width, visibleWidth);
+	ok(
+		"real erase-in-line still pads to exactly the render width when content had a stray U+E000",
+		visibleWidth(filledWith) === width,
+		String(visibleWidth(filledWith)),
+	);
+	ok(
+		"output with stray U+E000 equals the same line without it: glyph is gone, not expanded into misplaced padding",
+		filledWith === filledWithout,
+		JSON.stringify({ with: filledWith, without: filledWithout }),
+	);
+}
+
 done();

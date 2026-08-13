@@ -37,16 +37,29 @@ const ERASE_DISPLAY = /\x1b\[[0-2]?J/g;
 
 /**
  * Stands in for an erase-in-line until `fill()` knows the render width and can
- * expand it into real padding. A Unicode Private Use Area code point: it will
- * not occur in real delta output, and is never itself a valid escape sequence,
- * so a sentinel that somehow survives unexpanded is inert rather than dangerous
- * — `fill()` still strips it defensively, but nothing upstream of that can
- * mistake it for a cursor or erase command.
+ * expand it into real padding. A Unicode Private Use Area code point — chosen
+ * because PUA code points are never valid escape sequences, so a sentinel that
+ * somehow survives unexpanded is inert rather than dangerous, and `fill()`
+ * still strips it defensively.
+ *
+ * Trade-off: U+E000 is the first code point of the PUA, which is exactly where
+ * Nerd Fonts and Powerline put their glyphs. A diff of a file that contains
+ * such glyphs will have them stripped — by `sanitize()` before it inserts its
+ * own sentinels, and by `plain()` on the bash fallback path. The loss is a
+ * rare cosmetic one; the alternative (corrupted padding and dropped characters
+ * everywhere a PUA glyph appears) is worse.
  */
 export const FILL_SENTINEL = "\uE000";
 
 export function sanitize(text: string): string {
-	return text.replace(ERASE_LINE, FILL_SENTINEL).replace(ERASE_DISPLAY, "").replace(/\r/g, "");
+	// Strip any pre-existing U+E000 (Nerd Fonts, Powerline glyphs) before
+	// inserting our own sentinels, so fill() can never confuse content with a
+	// real erase-in-line marker. See FILL_SENTINEL's comment for the trade-off.
+	return text
+		.replace(/\uE000/g, "")
+		.replace(ERASE_LINE, FILL_SENTINEL)
+		.replace(ERASE_DISPLAY, "")
+		.replace(/\r/g, "");
 }
 
 /**
@@ -112,5 +125,7 @@ const ANSI = new RegExp(
 
 /** A tool result's text as pi would style it: no escapes, no carriage returns. */
 export function plain(text: string): string {
-	return text.replace(ANSI, "").replace(/\r/g, "");
+	// Strip any pre-existing U+E000 so fill() cannot mistake content glyphs for
+	// real erase-in-line sentinels. See FILL_SENTINEL's comment for the trade-off.
+	return text.replace(/\uE000/g, "").replace(ANSI, "").replace(/\r/g, "");
 }
