@@ -9,11 +9,17 @@
  *   node tests/delta/bash-result.test.mjs
  */
 
-import { assertions, loadExt, piEntry } from "../harness.mjs";
+import { assertions, loadExt, piEntry, piTuiEntry } from "../harness.mjs";
 import { readFile } from "node:fs/promises";
 
 const { ok, done } = assertions();
 const { createBashResult, PREVIEW_LINES, formatDuration } = await loadExt("delta/bash-result.ts");
+
+const { truncateToVisualLines } = await import(`file://${await piEntry()}`);
+const { visibleWidth } = await import(`file://${await piTuiEntry()}`);
+
+/** Exactly the wrapper index.ts injects. */
+const realWrap = (text, width) => truncateToVisualLines(text, Number.MAX_SAFE_INTEGER, width).visualLines;
 
 const theme = { fg: (color, text) => `<${color}>${text}` };
 const hintFor = (skipped) => `<hint:${skipped}>`;
@@ -25,7 +31,10 @@ const truncate = (text, maxLines) => {
 	};
 };
 
-const build = ({ ready } = {}) => {
+/** The identity "wrap" the shape assertions below use: one line stays one line. */
+const wrap = (text) => text.split("\n");
+
+const build = ({ ready, ...overrides } = {}) => {
 	const widths = [];
 	const engine = {
 		lookup: (_text, width) => {
@@ -41,6 +50,8 @@ const build = ({ ready } = {}) => {
 		invalidate: () => {},
 		truncate,
 		expandHint: hintFor,
+		wrap,
+		...overrides,
 	});
 	return { component, widths };
 };
@@ -117,6 +128,46 @@ const build = ({ ready } = {}) => {
 	const { component } = build({ ready: undefined });
 	component.update({ body: "", warnings: [], expanded: false });
 	ok("no body renders no lines", JSON.stringify(component.render(80)) === "[]");
+}
+
+// ---- no emitted line may exceed the render width
+//
+// pi's renderer throws "Rendered line N exceeds terminal width" and stops the
+// TUI; `Box.render` pads but never clips. Every line this component emits — the
+// expanded body, the collapsed preview's hint, the warning, the timing — has to
+// be wrapped to the width it was handed, not just the body pi's own
+// `truncateToVisualLines` happens to wrap for us.
+
+{
+	const long = "x".repeat(200);
+	const { component } = build({
+		ready: `\x1b[32m+${long}\x1b[0m`,
+		truncate: truncateToVisualLines,
+		expandHint: (skipped) => `... (${skipped} earlier lines, ${"press ctrl+r ".repeat(4)}to expand)`,
+		wrap: realWrap,
+		theme: { fg: (_color, text) => text },
+	});
+
+	component.update({
+		body: "diff",
+		warnings: [`Full output: /tmp/${"nested/".repeat(30)}out.txt`],
+		expanded: true,
+		timing: { label: "Took", ms: 1234 },
+	});
+	const expanded = component.render(60);
+	ok(
+		"expanded lines are wrapped to the render width",
+		expanded.length > 0 && expanded.every((line) => visibleWidth(line) <= 60),
+		JSON.stringify(expanded.map((line) => visibleWidth(line))),
+	);
+
+	component.update({ body: "diff", warnings: [], expanded: false });
+	const collapsed = component.render(30);
+	ok(
+		"collapsed lines, hint included, are wrapped to the render width",
+		collapsed.length > 0 && collapsed.every((line) => visibleWidth(line) <= 30),
+		JSON.stringify(collapsed.map((line) => visibleWidth(line))),
+	);
 }
 
 // ---- the pinned copies

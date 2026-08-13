@@ -24,6 +24,16 @@ export interface DiffBodyDeps {
 	fallback: (diff: string) => string;
 	/** Ask pi to repaint this tool row. */
 	invalidate: () => void;
+	/**
+	 * Wrap text to `width`, ANSI-aware, one array entry per visual line.
+	 *
+	 * Not cosmetic: pi's renderer throws "Rendered line N exceeds terminal width"
+	 * and stops the TUI when a component hands back a line wider than the width it
+	 * was given, and nothing downstream clips for us. Neither delta (which is told
+	 * a width but may still emit a longer line) nor pi's own `renderDiff` (which
+	 * is not told one at all) can be trusted to fit.
+	 */
+	wrap: (text: string, width: number) => string[];
 }
 
 export function createDiffBody(deps: DiffBodyDeps): DiffBody {
@@ -43,7 +53,7 @@ export function createDiffBody(deps: DiffBodyDeps): DiffBody {
 			const text = rendered ?? (diff ? deps.fallback(diff) : undefined);
 			if (!text) return [];
 			// The leading blank line matches pi's own Spacer before a diff.
-			return ["", ...text.split("\n")];
+			return ["", ...deps.wrap(text, width)];
 		},
 	};
 }

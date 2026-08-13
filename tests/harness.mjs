@@ -58,6 +58,18 @@ async function nestedEntry(piPkg, name) {
 	return join(dir, entry);
 }
 
+/**
+ * Entry file of the pi-tui package nested inside pi.
+ *
+ * Tests that assert a component never emits a line wider than its render width
+ * need pi's own `visibleWidth`; re-implementing ANSI-aware width measurement per
+ * test file is how those assertions end up wrong.
+ */
+export async function piTuiEntry() {
+	const entry = await piEntry();
+	return nestedEntry(entry.replace(/\/dist\/index\.js$/, ""), "@earendil-works/pi-tui");
+}
+
 let jitiPromise;
 
 /**

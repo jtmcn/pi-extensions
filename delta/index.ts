@@ -28,6 +28,7 @@ import {
 	renderDiff,
 	truncateToVisualLines,
 } from "@earendil-works/pi-coding-agent";
+import { plain } from "./ansi.ts";
 import { createBashResult } from "./bash-result.ts";
 import { createDiffBody } from "./body.ts";
 import { createCache } from "./cache.ts";
@@ -56,6 +57,19 @@ export default function deltaExtension(pi: ExtensionAPI): void {
 	 * handler must not assign module state or touch its (now stale) `ctx`.
 	 */
 	let sessionGeneration = 0;
+
+	/**
+	 * Wrap text to a render width, ANSI-aware.
+	 *
+	 * pi's renderer throws "Rendered line N exceeds terminal width" and stops the
+	 * TUI when a component emits a line wider than the width it was handed;
+	 * `Box.render` pads but never clips. pi's own renderers avoid this by putting
+	 * text in a `Text`, which wraps — and `truncateToVisualLines` is a `Text`
+	 * render underneath, so with an unbounded line budget it is exactly that
+	 * wrapper.
+	 */
+	const wrap = (text: string, width: number): string[] =>
+		truncateToVisualLines(text, Number.MAX_SAFE_INTEGER, width).visualLines;
 
 	const cache = createCache();
 	const runner = createRunner({ config: () => config });
@@ -105,6 +119,10 @@ export default function deltaExtension(pi: ExtensionAPI): void {
 
 	pi.on("session_shutdown", () => {
 		session = undefined;
+		// The shutdown window is another chance for an in-flight run to land in a
+		// session that no longer exists: bump the generation here too, so anything
+		// still running is dropped rather than cached or painted.
+		engine.reset();
 	});
 
 	// ---- bash: our own result component, for diff commands only ------------
@@ -113,24 +131,41 @@ export default function deltaExtension(pi: ExtensionAPI): void {
 	type BashSlots = typeof bash;
 	const bashRenderResult: NonNullable<BashSlots["renderResult"]> = (result, options, theme, context) => {
 		const command = String((context.args as { command?: unknown } | undefined)?.command ?? "");
+		// pi's bash `execute` calls `onUpdate` immediately, so a diff command's
+		// partial result is rendered — by us — before an error can arrive, and
+		// `lastComponent` is then ours. pi's built-in does
+		// `context.lastComponent ?? new BashResultRenderComponent()` and then
+		// `component.clear()`, so handing it our component throws a TypeError
+		// inside pi's renderer; pi catches that and dumps the whole untruncated
+		// output with no preview, hint, warning, or timing.
+		// `git diff --exit-code`, `git diff --quiet`, `git show <bad-ref>` and
+		// `git diff` outside a repo all take this path.
+		const previous = context.lastComponent as ReturnType<typeof createBashResult> | undefined;
+		const ours = typeof (previous as { update?: unknown } | undefined)?.update === "function";
+
 		// Errors keep pi's rendering: the text is a message, not a diff.
 		if (context.isError || !isDiffCommand(command, patterns)) {
-			return bash.renderResult!(result, options, theme, context);
+			return bash.renderResult!(result, options, theme, ours ? { ...context, lastComponent: undefined } : context);
 		}
 
 		const state = context.state as { startedAt?: number; endedAt?: number };
 		if (!options.isPartial) state.endedAt ??= Date.now();
 
 		const details = result.details as Parameters<typeof bashWarnings>[0];
-		const text = result.content
-			.filter((part): part is { type: "text"; text: string } => part.type === "text")
-			.map((part) => part.text ?? "")
-			.join("\n")
-			.trim();
+		// `plain` matches pi's `getTextOutput`, which strips ANSI and carriage
+		// returns before styling. Without it, `git -c color.ui=always diff` feeds
+		// its own escapes to delta and to the fallback styler, and a CRLF repo puts
+		// raw `\r` into pi's frame.
+		const text = plain(
+			result.content
+				.filter((part): part is { type: "text"; text: string } => part.type === "text")
+				.map((part) => part.text ?? "")
+				.join("\n"),
+		).trim();
 		const { body } = splitBashFooter(text, details);
 
 		const component =
-			(context.lastComponent as ReturnType<typeof createBashResult> | undefined) ??
+			(ours ? previous : undefined) ??
 			createBashResult({
 				engine,
 				theme,
@@ -141,6 +176,7 @@ export default function deltaExtension(pi: ExtensionAPI): void {
 						.join("\n"),
 				invalidate: context.invalidate,
 				truncate: (value, maxLines, width) => truncateToVisualLines(value, maxLines, width),
+				wrap,
 				// Same wording as pi's own hint (bash.js), minus its width clamp:
 				// the hint is short enough that truncating it never applies.
 				expandHint: (skipped) =>
@@ -210,6 +246,7 @@ export default function deltaExtension(pi: ExtensionAPI): void {
 			engine,
 			fallback: (diff) => renderDiff(diff),
 			invalidate,
+			wrap,
 		});
 		const component: EditComponent = {
 			head: "",
@@ -217,10 +254,13 @@ export default function deltaExtension(pi: ExtensionAPI): void {
 			settled: false,
 			invalidate() {},
 			render(width: number): string[] {
+				// Every line goes through `wrap`: an unwrapped header (a long path) or
+				// error message is as fatal to pi's renderer as an unwrapped diff.
+				const head = wrap(component.head, width);
 				if (component.error !== undefined) {
-					return [component.head, "", theme.fg("error", component.error)];
+					return [...head, "", ...wrap(theme.fg("error", component.error), width)];
 				}
-				return [component.head, ...body.render(width)];
+				return [...head, ...body.render(width)];
 			},
 		};
 		state.editComponent = component;

@@ -80,6 +80,23 @@ const build = (overrides = {}) => {
 	ok("width is passed through", runner.calls[1].width === 120);
 }
 
+{
+	// The config version is the other half of the key: editing delta.json (say,
+	// adding `--side-by-side` to `args`) must not serve renderings made with the
+	// old settings. Without this case, dropping `deps.version()` from the key
+	// would pass every other assertion in this file.
+	let version = "v1";
+	const { engine, runner } = build({ version: () => version });
+	engine.lookup("patch", 80, () => {});
+	await settle();
+	ok("a cached rendering is reused while the config is unchanged", engine.lookup("patch", 80, () => {}) === "DELTA");
+	ok("an unchanged config does not re-run delta", runner.calls.length === 1, String(runner.calls.length));
+	version = "v2";
+	ok("a config change is a miss", engine.lookup("patch", 80, () => {}) === undefined);
+	await settle();
+	ok("a config change re-runs delta", runner.calls.length === 2, String(runner.calls.length));
+}
+
 // ---- failures are remembered
 
 {
@@ -189,6 +206,46 @@ const build = (overrides = {}) => {
 	release();
 	await settle();
 	ok("a stale run does not warn", unavailable.length === 0, String(unavailable.length));
+}
+
+// ---- a stale run must not write into the next session's cache
+//
+// `reset()` clears the cache, but a run scheduled by the *previous* session is
+// still out there. If it stores its result afterwards it lands in the new
+// session's cache — and because a failed run stores `{kind:"failed"}`, one
+// unlucky replacement permanently suppresses delta for that diff.
+
+{
+	let release;
+	const gate = new Promise((resolve) => {
+		release = resolve;
+	});
+	const calls = [];
+	const runner = {
+		available: async () => true,
+		render: async (text) => {
+			calls.push(text);
+			// The first run belongs to the session that is about to be replaced, and
+			// it also *fails* — the worst case, because a failure is cached
+			// negatively and suppresses delta for that diff for good.
+			if (calls.length > 1) return "DELTA";
+			await gate;
+			return undefined;
+		},
+		reset: () => {},
+	};
+	const { engine, cache } = build({ runner });
+	engine.lookup("patch", 80, () => {});
+	await settle(); // let the run reach the gate
+	engine.reset(); // the session is replaced while delta is still running
+	release();
+	await settle();
+
+	ok("a stale run writes nothing into the cache", cache.size() === 0, String(cache.size()));
+	ok("the new session treats the diff as a miss", engine.lookup("patch", 80, () => {}) === undefined);
+	await settle();
+	ok("the new session gets delta's answer", engine.lookup("patch", 80, () => {}) === "DELTA");
+	ok("the new session really re-ran delta", calls.length === 2, String(calls.length));
 }
 
 // ---- a throwing invalidate must not escape

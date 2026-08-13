@@ -78,12 +78,19 @@ export function createEngine(deps: EngineDeps): Engine {
 					output = undefined;
 				}
 
+				// Nothing this run produces belongs to a session that has already been
+				// replaced. `reset()` cleared the cache and the in-flight set, so a
+				// write here would install this run's result — possibly a negative
+				// entry, which suppresses delta for that diff for the rest of the new
+				// session — into a cache that never asked for it.
+				if (started !== generation) return;
+
 				deps.cache.clearInFlight(key);
 				// The negative entry is what stops the next frame from starting this
 				// run over again, for the rest of the session.
 				deps.cache.set(key, output === undefined ? { kind: "failed" } : { kind: "ready", text: output });
 
-				if (started !== generation || output === undefined) return;
+				if (output === undefined) return;
 				try {
 					invalidate();
 				} catch {

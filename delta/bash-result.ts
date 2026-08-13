@@ -61,6 +61,17 @@ export interface BashResultDeps {
 	truncate: TruncateFn;
 	/** pi's expand hint, which needs the keybinding registry. */
 	expandHint: (skipped: number) => string;
+	/**
+	 * Wrap text to `width`, ANSI-aware, one array entry per visual line.
+	 *
+	 * pi's renderer throws "Rendered line N exceeds terminal width" and stops the
+	 * TUI when a component emits a line wider than its render width. `truncate`
+	 * already wraps the collapsed preview; the expanded body, the hint, the
+	 * warning line, and the timing line all need this. (pi's own bash renderer
+	 * truncates its hint instead; wrapping keeps the whole hint readable and is
+	 * equally safe.)
+	 */
+	wrap: (text: string, width: number) => string[];
 }
 
 export function createBashResult(deps: BashResultDeps): BashResult {
@@ -80,20 +91,23 @@ export function createBashResult(deps: BashResultDeps): BashResult {
 
 			if (text) {
 				if (input.expanded) {
-					lines.push("", ...text.split("\n"));
+					lines.push("", ...deps.wrap(text, width));
 				} else {
 					const preview = deps.truncate(text, PREVIEW_LINES, width);
 					lines.push("");
-					if (preview.skippedCount > 0) lines.push(deps.expandHint(preview.skippedCount));
+					if (preview.skippedCount > 0) lines.push(...deps.wrap(deps.expandHint(preview.skippedCount), width));
 					lines.push(...preview.visualLines);
 				}
 			}
 
 			if (input.warnings.length > 0) {
-				lines.push("", deps.theme.fg("warning", `[${input.warnings.join(". ")}]`));
+				lines.push("", ...deps.wrap(deps.theme.fg("warning", `[${input.warnings.join(". ")}]`), width));
 			}
 			if (input.timing) {
-				lines.push("", deps.theme.fg("muted", `${input.timing.label} ${formatDuration(input.timing.ms)}`));
+				lines.push(
+					"",
+					...deps.wrap(deps.theme.fg("muted", `${input.timing.label} ${formatDuration(input.timing.ms)}`), width),
+				);
 			}
 
 			return lines;
