@@ -66,11 +66,24 @@ try {
 	await writeFile(local, JSON.stringify(["shellPath"]));
 	ok("a non-object settings file is ignored", (await load()).shellPath === "/bin/zsh");
 
-	await writeFile(local, JSON.stringify({ shellPath: 42, shellCommandPrefix: "" }));
+	await writeFile(local, JSON.stringify({ shellPath: 42 }));
 	{
 		const settings = await load();
 		ok("a wrongly typed shellPath is ignored", settings.shellPath === "/bin/zsh", JSON.stringify(settings));
-		ok("an empty prefix is ignored", settings.commandPrefix === "source ~/.env", JSON.stringify(settings));
+	}
+
+	// ---- empty string is an explicit override, not an absent value
+
+	await writeFile(local, JSON.stringify({ shellCommandPrefix: "" }));
+	{
+		const settings = await load();
+		ok("an empty prefix clears the global prefix", settings.commandPrefix === "", JSON.stringify(settings));
+	}
+
+	await writeFile(local, JSON.stringify({ shellPath: "" }));
+	{
+		const settings = await load();
+		ok("an empty shellPath clears the global shellPath", settings.shellPath === "", JSON.stringify(settings));
 	}
 
 	// ---- tilde expansion, which pi does with an unexported helper
@@ -91,6 +104,8 @@ try {
 		shellSettingsKey("/a", { shellPath: "x" }) !== shellSettingsKey("/a", { commandPrefix: "x" }),
 	);
 	ok("the same inputs give the same key", shellSettingsKey("/a", { shellPath: "z" }) === shellSettingsKey("/a", { shellPath: "z" }));
+	ok("the key distinguishes absent commandPrefix from empty string", shellSettingsKey("/a", {}) !== shellSettingsKey("/a", { commandPrefix: "" }));
+	ok("the key distinguishes absent shellPath from empty string", shellSettingsKey("/a", {}) !== shellSettingsKey("/a", { shellPath: "" }));
 } finally {
 	await rm(root, { recursive: true, force: true });
 }

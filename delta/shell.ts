@@ -68,14 +68,16 @@ export async function loadShellSettings(options: LoadShellSettingsOptions): Prom
 		const raw = await readJsonObject(file);
 		if (!raw) continue;
 		const prefix = raw.shellCommandPrefix;
-		if (typeof prefix === "string" && prefix) settings.commandPrefix = prefix;
+		if (typeof prefix === "string") settings.commandPrefix = prefix;
 		const shellPath = raw.shellPath;
-		if (typeof shellPath === "string" && shellPath) settings.shellPath = expandTilde(shellPath);
+		if (typeof shellPath === "string") settings.shellPath = shellPath ? expandTilde(shellPath) : shellPath;
 	}
 	return settings;
 }
 
 /** Identity of a settings set, for memoizing the tool definition built from it. */
 export function shellSettingsKey(cwd: string, settings: ShellSettings): string {
-	return `${cwd}\u0000${settings.shellPath ?? ""}\u0000${settings.commandPrefix ?? ""}`;
+	// Use \u0001 as a sentinel for "absent" so that an explicit empty string
+	// (a project clearing a global prefix) is not confused with "not configured".
+	return `${cwd}\u0000${settings.shellPath ?? "\u0001"}\u0000${settings.commandPrefix ?? "\u0001"}`;
 }
