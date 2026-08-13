@@ -13,7 +13,7 @@ import { assertions, loadExt, piEntry, piTuiEntry } from "../harness.mjs";
 import { readFile } from "node:fs/promises";
 
 const { ok, done } = assertions();
-const { createBashResult, PREVIEW_LINES, formatDuration } = await loadExt("delta/bash-result.ts");
+const { createBashResult, collapsedPreview, PREVIEW_LINES, formatDuration } = await loadExt("delta/bash-result.ts");
 const { fill, FILL_SENTINEL } = await loadExt("delta/ansi.ts");
 
 const { truncateToVisualLines } = await import(`file://${await piEntry()}`);
@@ -196,5 +196,89 @@ ok(
 	fmtBlock.includes("return `${(ms / 1000).toFixed(1)}s`;"),
 	"pi changed formatDuration; update delta/bash-result.ts",
 );
+
+// ---- collapsed preview starts at a logical-line boundary
+//
+// Delta will not wrap its own output when stdout is a pipe (`--width` and
+// `--wrap-max-lines` both defeated, verified against real 0.19.2), so this
+// extension's own `wrap` turns one long diff line into several visual rows.
+// The naive "last N visual rows" cut (pi's own `truncateToVisualLines`, no
+// memory of logical-line starts) can land inside one of those continuations
+// — the reported bug: a preview beginning mid-line, with no gutter, because
+// the gutter was drawn on the row above the cut.
+//
+// `wrapMarked` fakes delta's non-wrapping behaviour under control: logical
+// line "B" always wraps to 5 visual rows ("B0".."B4"), "HUGE" to 10 ("H0".."H9"),
+// and everything else stays one row — enough to place the naive cut inside a
+// wrapped line on purpose.
+{
+	const wrapMarked = (text) =>
+		text.split("\n").flatMap((line) => {
+			if (line === "B") return ["B0", "B1", "B2", "B3", "B4"];
+			if (line === "HUGE") return Array.from({ length: 10 }, (_, i) => `H${i}`);
+			return [line];
+		});
+	const truncateMarked = (text, maxLines) => {
+		const all = wrapMarked(text);
+		if (all.length <= maxLines) return { visualLines: all, skippedCount: 0 };
+		return { visualLines: all.slice(-maxLines), skippedCount: all.length - maxLines };
+	};
+
+	// A: 1 row, B: 5 rows, C: 1 row -> naive last-5 cut lands on B's second row.
+	const preview = collapsedPreview("A\nB\nC", 5, 80, wrapMarked, truncateMarked);
+	ok(
+		"drops forward to the next logical line's first row",
+		JSON.stringify(preview.visualLines) === '["C"]',
+		JSON.stringify(preview),
+	);
+	ok("skipped count matches what was actually dropped (all of A and B)", preview.skippedCount === 6, String(preview.skippedCount));
+
+	// The naive cut already lands on a logical-line start: no adjustment needed.
+	const aligned = collapsedPreview("A\nB\nC\nD\nE\nF", 3, 80, wrapMarked, truncateMarked);
+	ok(
+		"a cut that already starts a logical line is left alone",
+		JSON.stringify(aligned.visualLines) === '["D","E","F"]',
+		JSON.stringify(aligned),
+	);
+
+	// Degenerate case: the cut lands inside the very last logical line, which is
+	// huge, and there is nothing after it to drop forward to. Keep the
+	// continuation rather than showing an empty preview.
+	const degenerate = collapsedPreview("HUGE", 5, 80, wrapMarked, truncateMarked);
+	ok(
+		"a single enormous logical line keeps its continuation instead of showing nothing",
+		degenerate.visualLines.length === 5 && degenerate.visualLines[0] === "H5",
+		JSON.stringify(degenerate),
+	);
+
+	// Nothing skipped: the whole naive result is returned untouched.
+	const nothingSkipped = collapsedPreview("A\nB\nC", 100, 80, wrapMarked, truncateMarked);
+	ok("nothing skipped needs no adjustment", nothingSkipped.skippedCount === 0);
+
+	// ---- the same fix, wired through the real component
+	{
+		const { component } = build({
+			ready: "A\nB\nC",
+			wrap: wrapMarked,
+			truncate: truncateMarked,
+		});
+		component.update({ body: "diff", warnings: [], expanded: false });
+		const lines = component.render(80);
+		ok("collapsed preview's first content row is a logical-line start", lines.includes("C"), JSON.stringify(lines));
+		ok("no continuation row (B1..B4) leaks into the collapsed preview", !lines.some((l) => /^B[1-4]$/.test(l)), JSON.stringify(lines));
+		ok("the hint reflects the actual dropped count, not the naive one", lines.includes("<hint:6>"), JSON.stringify(lines));
+	}
+
+	{
+		const { component } = build({ ready: "HUGE", wrap: wrapMarked, truncate: truncateMarked });
+		component.update({ body: "diff", warnings: [], expanded: false });
+		const lines = component.render(80);
+		ok(
+			"the degenerate single-huge-line case still renders a non-empty preview",
+			lines.some((l) => /^H\d$/.test(l)),
+			JSON.stringify(lines),
+		);
+	}
+}
 
 done();

@@ -80,6 +80,60 @@ export interface BashResultDeps {
 	wrap: (text: string, width: number) => string[];
 }
 
+/**
+ * A collapsed preview whose first row starts a logical ("\n"-separated) line,
+ * never in the middle of one delta did not wrap itself.
+ *
+ * Delta will not wrap its own output when stdout is a pipe (`--width` and
+ * `--wrap-max-lines` are both defeated, verified against real 0.19.2), so this
+ * extension's own `wrap` step turns one long diff line into several visual
+ * rows. `truncate` (pi's `truncateToVisualLines`) picks the last `maxVisualLines`
+ * *visual* rows with no memory of where a logical line began, so its naive cut
+ * can land mid-continuation — the reported bug: a preview starting inside a
+ * wrapped line, gutter and all, on the row above.
+ *
+ * The fix re-derives, from the same `wrap`, which visual row starts each
+ * logical line, and if the naive cut is not one of them, drops forward to the
+ * next one — shrinking what's shown, never growing it. `skippedCount` grows by
+ * exactly what was dropped, so the `... (N earlier lines, …)` hint stays
+ * truthful. If no later logical-line start exists before the end (one
+ * enormous single line with nothing after it), the naive cut is kept rather
+ * than dropping to an empty preview.
+ */
+export function collapsedPreview(
+	text: string,
+	maxVisualLines: number,
+	width: number,
+	wrap: (text: string, width: number) => string[],
+	truncate: TruncateFn,
+): { visualLines: string[]; skippedCount: number } {
+	const naive = truncate(text, maxVisualLines, width);
+	if (naive.skippedCount === 0) return naive;
+
+	// Row count per logical line: how many visual rows `wrap` turns it into.
+	// A blank logical line still occupies one (empty) visual row when it sits
+	// inside a larger text — `wrap`'s underlying `truncateToVisualLines`
+	// special-cases an empty *whole* input to zero rows, which does not apply to
+	// one blank line among others, hence the explicit `1` below.
+	const lines = text.split("\n");
+	const starts = new Set<number>();
+	let index = 0;
+	for (const line of lines) {
+		starts.add(index);
+		index += line === "" ? 1 : Math.max(1, wrap(line, width).length);
+	}
+	const total = index;
+
+	if (starts.has(naive.skippedCount)) return naive;
+
+	let next = naive.skippedCount + 1;
+	while (next < total && !starts.has(next)) next += 1;
+	if (next >= total) return naive;
+
+	const all = wrap(text, width);
+	return { visualLines: all.slice(next), skippedCount: next };
+}
+
 export function createBashResult(deps: BashResultDeps): BashResult {
 	let input: BashResultInput = { body: "", warnings: [], expanded: false };
 
@@ -100,7 +154,7 @@ export function createBashResult(deps: BashResultDeps): BashResult {
 				if (input.expanded) {
 					lines.push("", ...deps.wrap(text, width));
 				} else {
-					const preview = deps.truncate(text, PREVIEW_LINES, width);
+					const preview = collapsedPreview(text, PREVIEW_LINES, width, deps.wrap, deps.truncate);
 					lines.push("");
 					if (preview.skippedCount > 0) lines.push(...deps.wrap(deps.expandHint(preview.skippedCount), width));
 					lines.push(...preview.visualLines);
