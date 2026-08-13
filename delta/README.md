@@ -48,7 +48,14 @@ session.
 
 Pi has no renderer-only extension point, so this registers tools named `bash` and
 `edit` that spread pi's built-in definitions and replace only the render slots.
-Execution, schemas, and prompt metadata are pi's, untouched.
+Schemas and prompt metadata are pi's, untouched, and so is execution — but not
+for free: an extension tool *replaces* the built-in in pi's execution registry,
+and pi builds its own definitions with the session's working directory and your
+`shellPath` / `shellCommandPrefix` settings applied. So `execute` here delegates
+to a definition built per call from pi's own context, and reads those two
+settings back out of `settings.json` (global, plus `<project>/.pi/settings.json`
+in a trusted project). Any *other* bash option a future pi version grows will not
+be picked up until this extension learns about it.
 
 Two consequences worth knowing:
 

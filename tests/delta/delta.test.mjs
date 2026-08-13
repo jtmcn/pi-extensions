@@ -5,7 +5,7 @@
  *   node tests/delta/delta.test.mjs
  */
 
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFakePi } from "../fake-pi.mjs";
@@ -46,6 +46,47 @@ try {
 		ok("bash keeps its parameters schema", h.tools.get("bash").parameters !== undefined);
 		ok("bash keeps its prompt snippet", typeof h.tools.get("bash").promptSnippet === "string");
 		ok("edit defines both render slots", typeof h.tools.get("edit").renderCall === "function" && typeof h.tools.get("edit").renderResult === "function");
+	}
+
+	// ---- execution runs with the session's cwd and the user's shell settings
+	//
+	// An extension tool *replaces* the built-in in pi's execution registry, so our
+	// definition's `execute` is what runs. pi builds its own with
+	// `createAllToolDefinitions(this._cwd, { bash: { commandPrefix, shellPath } })`;
+	// a definition built at factory time has the process's cwd and no settings,
+	// which silently drops the user's configured shell and runs commands in the
+	// wrong directory.
+
+	{
+		await writeFile(join(agentDir, "settings.json"), JSON.stringify({ shellCommandPrefix: "export DELTA_PREFIX_RAN=yes" }));
+		const h = createFakePi({ cwd: project, projectTrusted: true });
+		extension(h.pi);
+		await h.fire("session_start");
+		const ctx = h.ctx();
+		const bash = h.tools.get("bash");
+
+		const text = (result) =>
+			result.content
+				.filter((part) => part.type === "text")
+				.map((part) => part.text)
+				.join("\n");
+
+		const cwdResult = await bash.execute("call-cwd", { command: "pwd" }, undefined, undefined, ctx);
+		ok("bash runs in the session's cwd", text(cwdResult).includes(project), JSON.stringify(text(cwdResult)));
+
+		const prefixResult = await bash.execute("call-prefix", { command: 'echo "$DELTA_PREFIX_RAN"' }, undefined, undefined, ctx);
+		ok("bash honours shellCommandPrefix", text(prefixResult).includes("yes"), JSON.stringify(text(prefixResult)));
+
+		// edit takes no shell options, but the cwd decides which file a relative
+		// path resolves to — and pi reports paths relative to it.
+		await writeFile(join(project, "edited.txt"), "before\n");
+		const editResult = await h.tools
+			.get("edit")
+			.execute("call-edit", { path: "edited.txt", edits: [{ oldText: "before", newText: "after" }] }, undefined, undefined, ctx);
+		ok("edit resolves relative paths against the session's cwd", !editResult.isError, JSON.stringify(editResult));
+		ok("edit actually edited the session's file", (await readFile(join(project, "edited.txt"), "utf8")).trim() === "after");
+
+		await rm(join(agentDir, "settings.json"), { force: true });
 	}
 
 	// ---- config warnings surface as notices

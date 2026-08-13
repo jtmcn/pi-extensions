@@ -1,10 +1,19 @@
 /**
  * Delta-rendered diffs for pi.
  *
- * Wraps two built-in tools for *rendering only*: `execute`, `parameters`, and
- * prompt metadata are the built-in definition's, spread through untouched, so
- * the model sees no difference and result shapes are unchanged. What changes is
- * the component pi paints.
+ * Wraps two built-in tools for *rendering only*: `parameters` and prompt
+ * metadata are the built-in definition's, spread through untouched, and
+ * `execute` delegates to a built-in definition built per call, so the model sees
+ * no difference and result shapes are unchanged. What changes is the component
+ * pi paints.
+ *
+ * Delegation, rather than spreading the built-in `execute` too: an extension
+ * tool *replaces* the built-in in pi's execution registry, and pi builds its own
+ * definitions with the session's cwd and the user's shell settings
+ * (`createAllToolDefinitions(cwd, { bash: { commandPrefix, shellPath } })` in
+ * agent-session.js). A definition built at factory time has the process's cwd
+ * and no settings, so `execute` resolves them from the `ExtensionContext` it is
+ * handed on every call instead. See `shell.ts`.
  *
  * Why a wrapper at all: pi resolves each render slot as
  * `extensionDefinition.renderX ?? builtInDefinition.renderX`, and there is no
@@ -37,6 +46,7 @@ import { compilePatterns, isDiffCommand } from "./detect.ts";
 import { createEngine } from "./engine.ts";
 import { bashWarnings, splitBashFooter } from "./footer.ts";
 import { createRunner } from "./run.ts";
+import { loadShellSettings, shellSettingsKey } from "./shell.ts";
 
 /** Minimal shape of the theme pi hands a renderer. */
 interface RenderTheme {
@@ -91,6 +101,34 @@ export default function deltaExtension(pi: ExtensionAPI): void {
 		},
 	});
 
+	// ---- execution: pi's tools, built for the session rather than the process --
+	//
+	// The factory-time definitions below are only good for their render slots and
+	// their schema/prompt metadata. Executing through them would pin the cwd to
+	// whatever the process had when the extension loaded and drop the user's
+	// `shellPath`/`shellCommandPrefix`, so `execute` builds (and memoizes) a
+	// definition from the ExtensionContext it is handed instead.
+
+	let bashDefinition: { key: string; tool: ReturnType<typeof createBashToolDefinition> } | undefined;
+	let editDefinition: { key: string; tool: ReturnType<typeof createEditToolDefinition> } | undefined;
+
+	const bashFor = async (ctx: ExtensionContext) => {
+		const settings = await loadShellSettings({ projectRoot: ctx.cwd, projectTrusted: ctx.isProjectTrusted() });
+		const key = shellSettingsKey(ctx.cwd, settings);
+		if (bashDefinition?.key !== key) {
+			bashDefinition = { key, tool: createBashToolDefinition(ctx.cwd, settings) };
+		}
+		return bashDefinition.tool;
+	};
+
+	const editFor = (ctx: ExtensionContext) => {
+		// `createEditToolDefinition` takes no shell options; only the cwd matters.
+		if (editDefinition?.key !== ctx.cwd) {
+			editDefinition = { key: ctx.cwd, tool: createEditToolDefinition(ctx.cwd) };
+		}
+		return editDefinition.tool;
+	};
+
 	pi.on("session_start", async (_event, ctx) => {
 		// Everything below is per-session: a resumed or forked session re-fires
 		// this against a different transcript and must not inherit state. The
@@ -102,6 +140,9 @@ export default function deltaExtension(pi: ExtensionAPI): void {
 		const generation = sessionGeneration;
 		session = ctx;
 		engine.reset();
+		// Built from the previous session's cwd and settings; both can differ now.
+		bashDefinition = undefined;
+		editDefinition = undefined;
 
 		const loaded = await loadConfig({ projectRoot: ctx.cwd, projectTrusted: ctx.isProjectTrusted() });
 		if (generation !== sessionGeneration) return;
@@ -129,6 +170,8 @@ export default function deltaExtension(pi: ExtensionAPI): void {
 
 	const bash = createBashToolDefinition(process.cwd());
 	type BashSlots = typeof bash;
+	const bashExecute: BashSlots["execute"] = (toolCallId, params, signal, onUpdate, ctx) =>
+		bashFor(ctx).then((tool) => tool.execute(toolCallId, params, signal, onUpdate, ctx));
 	const bashRenderResult: NonNullable<BashSlots["renderResult"]> = (result, options, theme, context) => {
 		const command = String((context.args as { command?: unknown } | undefined)?.command ?? "");
 		// pi's bash `execute` calls `onUpdate` immediately, so a diff command's
@@ -199,6 +242,7 @@ export default function deltaExtension(pi: ExtensionAPI): void {
 	};
 	pi.registerTool({
 		...bash,
+		execute: bashExecute,
 		renderResult: bashRenderResult,
 	});
 
@@ -220,6 +264,8 @@ export default function deltaExtension(pi: ExtensionAPI): void {
 
 	const edit = createEditToolDefinition(process.cwd());
 	type EditSlots = typeof edit;
+	const editExecute: EditSlots["execute"] = (toolCallId, params, signal, onUpdate, ctx) =>
+		editFor(ctx).execute(toolCallId, params, signal, onUpdate, ctx);
 
 	/** `edit <path>`, in pi's colours. */
 	const header = (args: Record<string, unknown> | undefined, theme: RenderTheme, cwd: string): string => {
@@ -300,6 +346,7 @@ export default function deltaExtension(pi: ExtensionAPI): void {
 
 	pi.registerTool({
 		...edit,
+		execute: editExecute,
 		// No preview: computing one means forking pi's unexported computeEditsDiff,
 		// and it would only be visible for the moment between the arguments
 		// finishing and the edit landing.
