@@ -33,7 +33,11 @@ export interface DeltaConfig {
 export const DEFAULT_CONFIG: DeltaConfig = {
 	enabled: true,
 	command: "delta",
-	args: [],
+	// Suppress delta's line-level background fills (dark navy minus, dark maroon plus) so
+	// they don't clash with pi's toolSuccessBg frame. Syntax highlighting, the red/green
+	// line-number gutter, and word-level emphasis backgrounds are preserved. A user can
+	// restore the banded look with "args": [] in delta.json.
+	args: ["--minus-style", "syntax normal", "--plus-style", "syntax normal"],
 	timeoutMs: 2000,
 	maxBytes: 262_144,
 	extraCommands: [],

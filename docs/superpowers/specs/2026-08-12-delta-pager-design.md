@@ -219,7 +219,7 @@ dropped without touching the callback, and the call is defensive regardless.
 |---|---|---|
 | `enabled` | `true` | Master switch |
 | `command` | `"delta"` | Binary to run |
-| `args` | `[]` | Appended last, so these override gitconfig |
+| `args` | `["--minus-style", "syntax normal", "--plus-style", "syntax normal"]` | Appended last, so these override gitconfig. The default suppresses delta's line-level background fills, which clash with pi's `toolSuccessBg` frame; `"args": []` restores banded rendering. |
 | `timeoutMs` | `2000` | Per-invocation timeout |
 | `maxBytes` | `262144` | Skip delta above this input size |
 | `extraCommands` | `[]` | Regex sources added to the bash matcher |

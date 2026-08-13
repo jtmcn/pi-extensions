@@ -29,7 +29,7 @@ keep the reduced framing described below, and you get one warning per session.
 {
   "enabled": true,
   "command": "delta",
-  "args": [],
+  "args": ["--minus-style", "syntax normal", "--plus-style", "syntax normal"],
   "timeoutMs": 2000,
   "maxBytes": 262144,
   "extraCommands": ["^jj\\s+diff"]
@@ -40,10 +40,19 @@ keep the reduced framing described below, and you get one warning per session.
 |---|---|---|
 | `enabled` | `true` | Master switch |
 | `command` | `"delta"` | Binary to run |
-| `args` | `[]` | Extra delta flags, appended last so they win over git config |
+| `args` | `["--minus-style", "syntax normal", "--plus-style", "syntax normal"]` | Extra delta flags, appended last so they win over git config |
 | `timeoutMs` | `2000` | Per-invocation timeout |
 | `maxBytes` | `262144` | Diffs larger than this skip delta |
 | `extraCommands` | `[]` | Regexes added to the bash command matcher |
+
+The default `args` suppress delta's line-level background fills (dark navy on
+removed lines, dark maroon on added lines). Pi paints its tool results in a green
+tinted frame (`toolSuccessBg`), and delta's full-width colour bands clash with
+that frame — dark bands on green, with green showing through on context lines.
+Suppressing the line backgrounds keeps syntax highlighting, the red/green
+line-number gutter, and word-level emphasis on changed tokens, which is
+everything delta is for. To restore delta's classic banded rendering, set
+`"args": []` in `delta.json`.
 
 ## How it works, and what that costs
 

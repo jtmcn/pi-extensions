@@ -28,6 +28,8 @@ const defaults = await load(false);
 ok("defaults when no file exists", defaults.config.command === "delta" && defaults.config.enabled === true);
 ok("defaults record no sources", defaults.sources.length === 0);
 ok("defaults produce no warnings", defaults.warnings.length === 0);
+ok("default args suppress line backgrounds (--minus-style present)", DEFAULT_CONFIG.args[0] === "--minus-style");
+ok("default args suppress line backgrounds (--plus-style present)", DEFAULT_CONFIG.args.includes("--plus-style"));
 
 await writeGlobal(JSON.stringify({ command: "/opt/homebrew/bin/delta", timeoutMs: 500 }));
 const global = await load(false);
@@ -37,13 +39,18 @@ ok("global source recorded", global.sources.length === 1 && global.sources[0].en
 
 await writeProject(JSON.stringify({ args: ["--side-by-side"], enabled: false }));
 const untrusted = await load(false);
-ok("untrusted project file ignored", untrusted.config.enabled === true && untrusted.config.args.length === 0);
+ok("untrusted project file ignored", untrusted.config.enabled === true && JSON.stringify(untrusted.config.args) === JSON.stringify(DEFAULT_CONFIG.args));
 
 const trusted = await load(true);
 ok("trusted project file applied", trusted.config.enabled === false);
 ok("project args applied", JSON.stringify(trusted.config.args) === '["--side-by-side"]');
 ok("project file does not clobber global", trusted.config.command === "/opt/homebrew/bin/delta");
 ok("both sources recorded", trusted.sources.length === 2, JSON.stringify(trusted.sources));
+
+// Escape hatch: "args": [] in a trusted project file restores delta's own banded rendering.
+await writeProject(JSON.stringify({ args: [] }));
+const escaped = await load(true);
+ok("args:[] in trusted config resets to empty (escape hatch)", escaped.config.args.length === 0);
 
 await writeProject("{ not json");
 const broken = await load(true);

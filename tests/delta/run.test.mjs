@@ -144,6 +144,30 @@ if (!deltaInstalled) {
 	const absent = createRunner({ config: () => ({ ...DEFAULT_CONFIG, command: "delta-does-not-exist" }) });
 	ok("absent binary is unavailable", (await absent.available()) === false);
 
+	// Default args (--minus-style "syntax normal" --plus-style "syntax normal") should suppress
+	// line-level background SGRs that clash with pi's tool box frame, while args:[] restores
+	// delta's full banded rendering. --no-gitconfig ensures the developer's own [delta] config
+	// cannot change the outcome.
+	const countBgLines = (str) => str.split("\n").filter((l) => /\x1b\[48;2;/.test(l)).length;
+	const defaultNogit = createRunner({
+		config: () => ({ ...DEFAULT_CONFIG, args: [...DEFAULT_CONFIG.args, "--no-gitconfig"] }),
+	});
+	const bandedNogit = createRunner({
+		config: () => ({ ...DEFAULT_CONFIG, args: ["--no-gitconfig"] }),
+	});
+	const defaultOut = await defaultNogit.render(PATCH, 80) ?? "";
+	const bandedOut = await bandedNogit.render(PATCH, 80) ?? "";
+	ok(
+		"default args produce fewer background-SGR lines than args:[] (banded)",
+		countBgLines(defaultOut) < countBgLines(bandedOut),
+		`default: ${countBgLines(defaultOut)} bg lines, banded: ${countBgLines(bandedOut)} bg lines`,
+	);
+	ok(
+		"default args still carry foreground colour",
+		/\x1b\[38;2;/.test(defaultOut),
+		"expected truecolour foreground in default rendering",
+	);
+
 	// A real timeout. `sh -c 'sleep 5'` ignores stdin and outlives the timeout;
 	// the forced flags land after `-c sleep 5` as harmless positional parameters.
 	const hang = createRunner({
