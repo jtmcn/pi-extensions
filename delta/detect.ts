@@ -2,9 +2,15 @@
  * Which bash commands produce a diff worth handing to delta.
  *
  * Matching the command, not the output: output that merely looks like a diff — a
- * heredoc, a `.patch` fixture, `rg 'diff --git'` — must not be recoloured, and
- * the command is the only signal available before the output exists. The cost is
- * that unusual tools need `extraCommands` in config.
+ * `.patch` fixture, `rg 'diff --git'` — must not be recoloured, and the command
+ * is the only signal available before the output exists. The cost is that
+ * unusual tools need `extraCommands` in config.
+ *
+ * The matcher is not a shell parser. `segments` splits on newlines as well as
+ * `;`, `|`, `&&` and `||`, so a `git diff` line inside a heredoc *is* treated as
+ * a command and matches. Recolouring that output is the failure mode we accept:
+ * a false positive costs a subprocess and some colour, a false negative costs
+ * the feature.
  */
 
 /** Flags that turn a diff command into a summary, which delta cannot render. */

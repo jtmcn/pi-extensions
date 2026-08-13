@@ -37,6 +37,8 @@ const rejects = [
 	"git diff --name-only",
 	"git diff --name-status",
 	"git diff --shortstat",
+	"git diff --compact-summary",
+	"git show --compact-summary HEAD",
 	"git show --stat HEAD",
 	"git log",
 	"git log --oneline -20",
@@ -51,6 +53,16 @@ const rejects = [
 	"   ",
 ];
 for (const command of rejects) ok(`rejects: ${command || "(empty)"}`, isDiffCommand(command) === false);
+
+// A documented limitation, pinned so a change to it is deliberate: `segments`
+// splits on newlines as well as `;`, `|`, `&&` and `||`, so a `git diff` written
+// inside a heredoc is treated as a command and its output is recoloured. The
+// matcher is not a shell parser; a false positive here costs a subprocess and
+// some colour.
+ok(
+	"a heredoc line still matches (known limitation)",
+	isDiffCommand("cat <<'EOF' > note.txt\ngit diff\nEOF") === true,
+);
 
 // extraCommands is the escape hatch that makes command matching tolerable.
 const extra = compilePatterns(["^jj\\s+diff"], []);

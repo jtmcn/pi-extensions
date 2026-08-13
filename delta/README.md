@@ -17,8 +17,9 @@ diffs in pi look like diffs in your pager. This extension only forces
 
 ## Requirements
 
-`delta` on `PATH`. Without it you get pi's built-in rendering and one warning per
-session.
+`delta` on `PATH`. Without it, `bash` diffs look like pi's built-in bash output
+(this extension reproduces it), `edit` diffs fall back to pi's `renderDiff` but
+keep the reduced framing described below, and you get one warning per session.
 
 ## Config
 
@@ -65,9 +66,15 @@ Two consequences worth knowing:
   config is read, so `enabled: false` cannot prevent the conflict — it only
   stops text reaching delta once registered. The only fix is to not load this
   extension in that setup.
-- **`edit` shows no pending preview.** Pi computes that preview with an
-  unexported helper; reproducing it would be a fork that breaks on upgrades. You
-  see `edit <path>` while the edit is in flight and the delta diff once it lands.
+- **The `edit` row is more sparsely framed than pi's.** Pi's `edit` renders
+  itself (`renderShell: "self"`) into a `Box` with one column of padding, a
+  blank line above and below, and a background colour that tracks state — amber
+  while pending, green on success, red on error. This extension's replacement
+  returns plain lines, so an `edit` row has no padding and no background colour;
+  a failed edit shows its message in the error colour instead. It also shows
+  **no pending preview**: pi computes that with an unexported helper, and
+  reproducing it would be a fork that breaks on upgrades. You see `edit <path>`
+  while the edit is in flight and the delta diff once it lands.
 
 Delta runs asynchronously, so a diff appears in pi's own styling for one frame
 before delta's rendering replaces it. Results are cached per diff, width, and

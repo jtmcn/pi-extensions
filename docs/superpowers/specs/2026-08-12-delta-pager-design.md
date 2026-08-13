@@ -95,8 +95,10 @@ delta/
 ├── detect.ts     pure: isDiffCommand(command, extraPatterns) → boolean
 ├── cache.ts      pure: LRU keyed by hash:width:configVersion, positive + negative, in-flight set
 ├── run.ts        subprocess: probe() and run(text, width, cfg); spawn injected
+├── shell.ts      pi's shellPath/shellCommandPrefix, read back out of settings.json
 ├── footer.ts     pure: splitBashFooter(text, details) → { body, footer }
-├── ansi.ts       pure: sanitize(deltaOutput) — strip erase-in-line and CR (constraint 12)
+├── ansi.ts       pure: sanitize(deltaOutput) — strip erase-in-line and CR (constraint 12);
+│                 plain(toolText) — strip ANSI and CR the way pi's getTextOutput does
 ├── engine.ts     lookup(text, width, invalidate) → cached delta output or undefined; owns scheduling
 ├── body.ts       the diff body component: render(width) → lines, delta or fallback
 ├── bash-result.ts the forked bash result component: preview, expand, warnings, timing
@@ -133,8 +135,22 @@ the warning line is rendered from `details` instead.
 
 ### Edit
 
-`renderCall` returns a header only (`edit <path>`, no preview). `renderResult`
-paints the header plus the delta-rendered `details.patch`.
+*As built.* `renderCall` returns a header only (`edit <path>`, no preview), and
+`renderResult` does **not** paint: it updates the same component and returns an
+empty one.
+
+The reason is that pi keeps the two slots' components separate but shares one
+`context.state` between them (`callRendererComponent` / `resultRendererComponent`
+in `tool-execution.js`), and once a result exists it paints *both* into the same
+container. A component built from `lastComponent` in the result slot therefore
+never sees the call slot's component, and every settled edit shows its header
+twice. So the one on-screen component lives in `context.state`, `renderResult`
+mutates it with the delta-rendered `details.patch`, and returns `{ render: () =>
+[] }`. pi's own `edit` solves it the same way (`state.callComponent`, mutated
+from `renderResult`).
+
+The consequence is that the delta-rendered diff appears in the *call* slot's
+component, which is where pi puts its own edit diff too.
 
 This drops the pending preview. The alternative — forking `computeEditsDiff` and
 the call-component bookkeeping (constraint 5) so the pending view stays
@@ -164,8 +180,10 @@ delta at the correct width.
 - **Bounded** — LRU of ~64 entries.
 
 Delta is invoked with the user's git config inherited (delta reads `[delta]`
-itself), plus forced `--paging never`, forced colour, and `--width`. Config
-`args` are appended last so they win over both gitconfig and defaults.
+itself), plus forced `--paging never` and `--width` — and nothing else: delta
+already emits colour when its stdout is a pipe, which `run.test.mjs` checks
+against the real binary. Config `args` are appended last so they win over both
+gitconfig and defaults.
 
 ### Failure and absence
 
@@ -250,6 +268,9 @@ what makes command matching (rather than sniffing output shape) tolerable.
   fails here.
 - **`run.test.mjs`** — against real delta when it is on `PATH`, skipped
   otherwise; timeout and nonzero-exit paths driven by a fake binary.
+- **`shell.test.mjs`** — settings resolution against temp files: global, project
+  overriding it, project ignored when untrusted, and malformed or wrongly typed
+  settings ignored rather than thrown.
 - **`delta.test.mjs`** — `fake-pi.mjs` wiring: `bash` and `edit` register; a
   superseded session's late delta completion does not write through the stale
   `ctx`; a missing binary warns exactly once; config warnings surface as notices.
