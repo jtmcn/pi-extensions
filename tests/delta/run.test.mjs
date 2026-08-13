@@ -12,6 +12,7 @@ import { assertions, loadExt, pexec } from "../harness.mjs";
 const { ok, skip, done } = assertions();
 const { createRunner, nodeSpawn } = await loadExt("delta/run.ts");
 const { DEFAULT_CONFIG } = await loadExt("delta/config.ts");
+const { FILL_SENTINEL } = await loadExt("delta/ansi.ts");
 
 const PATCH = [
 	"diff --git a/f.txt b/f.txt",
@@ -68,8 +69,15 @@ ok("timeout yields nothing", (await timedOut.render(PATCH, 80)) === undefined);
 const empty = createRunner({ config, spawn: fake({ code: 0, stdout: "   \n", timedOut: false }) });
 ok("blank output yields nothing", (await empty.render(PATCH, 80)) === undefined);
 
+// Erase-in-line is not dropped, it becomes `fill()`'s sentinel: this is how
+// the caller (delta/body.ts, delta/bash-result.ts) expands it back into the
+// background padding delta used it for, once the render width is known.
 const dirty = createRunner({ config, spawn: fake({ code: 0, stdout: "a\x1b[0Kb\n", timedOut: false }) });
-ok("output is sanitized", (await dirty.render(PATCH, 80)) === "ab");
+ok(
+	"output is sanitized, with the erase turned into the fill sentinel",
+	(await dirty.render(PATCH, 80)) === `a${FILL_SENTINEL}b`,
+	JSON.stringify(await dirty.render(PATCH, 80)),
+);
 
 const probeCalls = [];
 const probed = createRunner({

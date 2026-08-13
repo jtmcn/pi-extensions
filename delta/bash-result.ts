@@ -62,6 +62,12 @@ export interface BashResultDeps {
 	/** pi's expand hint, which needs the keybinding registry. */
 	expandHint: (skipped: number) => string;
 	/**
+	 * Expand `sanitize`'s erase-in-line sentinel (see `delta/ansi.ts`) into the
+	 * padding delta used it for, width-aware. A no-op on text with no sentinel,
+	 * so it is safe to call on delta's output and pi's fallback text alike.
+	 */
+	fill: (text: string, width: number) => string;
+	/**
 	 * Wrap text to `width`, ANSI-aware, one array entry per visual line.
 	 *
 	 * pi's renderer throws "Rendered line N exceeds terminal width" and stops the
@@ -87,7 +93,8 @@ export function createBashResult(deps: BashResultDeps): BashResult {
 		render(width) {
 			const lines: string[] = [];
 			const rendered = input.body ? deps.engine.lookup(input.body, width, deps.invalidate) : undefined;
-			const text = rendered ?? (input.body ? deps.fallback(input.body) : "");
+			const raw = rendered ?? (input.body ? deps.fallback(input.body) : "");
+			const text = raw ? deps.fill(raw, width) : "";
 
 			if (text) {
 				if (input.expanded) {

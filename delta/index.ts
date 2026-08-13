@@ -37,7 +37,8 @@ import {
 	renderDiff,
 	truncateToVisualLines,
 } from "@earendil-works/pi-coding-agent";
-import { plain } from "./ansi.ts";
+import { visibleWidth } from "@earendil-works/pi-tui";
+import { fill, plain } from "./ansi.ts";
 import { createBashResult } from "./bash-result.ts";
 import { createDiffBody } from "./body.ts";
 import { createCache } from "./cache.ts";
@@ -80,6 +81,14 @@ export default function deltaExtension(pi: ExtensionAPI): void {
 	 */
 	const wrap = (text: string, width: number): string[] =>
 		truncateToVisualLines(text, Number.MAX_SAFE_INTEGER, width).visualLines;
+
+	/**
+	 * Expand `sanitize`'s erase-in-line sentinel into the padding delta used it
+	 * for. `visibleWidth` is pi's ANSI-aware width measurement, needed to know
+	 * how much padding a coloured line is actually short of a full row; `fill`
+	 * itself stays free of a `pi` import (see `delta/ansi.ts`).
+	 */
+	const fillWidth = (text: string, width: number): string => fill(text, width, visibleWidth);
 
 	const cache = createCache();
 	const runner = createRunner({ config: () => config });
@@ -219,6 +228,7 @@ export default function deltaExtension(pi: ExtensionAPI): void {
 						.join("\n"),
 				invalidate: context.invalidate,
 				truncate: (value, maxLines, width) => truncateToVisualLines(value, maxLines, width),
+				fill: fillWidth,
 				wrap,
 				// Same wording as pi's own hint (bash.js), minus its width clamp:
 				// the hint is short enough that truncating it never applies.
@@ -292,6 +302,7 @@ export default function deltaExtension(pi: ExtensionAPI): void {
 			engine,
 			fallback: (diff) => renderDiff(diff),
 			invalidate,
+			fill: fillWidth,
 			wrap,
 		});
 		const component: EditComponent = {

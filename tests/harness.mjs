@@ -75,9 +75,9 @@ let jitiPromise;
 /**
  * A jiti importer with pi and its nested deps aliased.
  *
- * Built once per process and shared: extension entry points import typebox and
- * pi-ai, which live inside the pi package, and resolving those costs a few file
- * reads per call.
+ * Built once per process and shared: extension entry points import typebox,
+ * pi-ai, and pi-tui, all of which live inside the pi package, and resolving
+ * those costs a few file reads per call.
  */
 async function importer() {
 	if (!jitiPromise) {
@@ -89,6 +89,7 @@ async function importer() {
 					"@earendil-works/pi-coding-agent": entry,
 					typebox: await nestedEntry(piPkg, "typebox"),
 					"@earendil-works/pi-ai": await nestedEntry(piPkg, "@earendil-works/pi-ai"),
+					"@earendil-works/pi-tui": await nestedEntry(piPkg, "@earendil-works/pi-tui"),
 				},
 			});
 		})();

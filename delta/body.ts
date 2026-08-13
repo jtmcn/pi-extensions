@@ -25,6 +25,12 @@ export interface DiffBodyDeps {
 	/** Ask pi to repaint this tool row. */
 	invalidate: () => void;
 	/**
+	 * Expand `sanitize`'s erase-in-line sentinel (see `delta/ansi.ts`) into the
+	 * padding delta used it for, width-aware. A no-op on text with no sentinel,
+	 * so it is safe to call on delta's output and pi's fallback text alike.
+	 */
+	fill: (text: string, width: number) => string;
+	/**
 	 * Wrap text to `width`, ANSI-aware, one array entry per visual line.
 	 *
 	 * Not cosmetic: pi's renderer throws "Rendered line N exceeds terminal width"
@@ -50,8 +56,9 @@ export function createDiffBody(deps: DiffBodyDeps): DiffBody {
 		},
 		render(width) {
 			const rendered = patch ? deps.engine.lookup(patch, width, deps.invalidate) : undefined;
-			const text = rendered ?? (diff ? deps.fallback(diff) : undefined);
-			if (!text) return [];
+			const raw = rendered ?? (diff ? deps.fallback(diff) : undefined);
+			if (!raw) return [];
+			const text = deps.fill(raw, width);
 			// The leading blank line matches pi's own Spacer before a diff.
 			return ["", ...deps.wrap(text, width)];
 		},

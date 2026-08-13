@@ -10,12 +10,16 @@ import { assertions, loadExt, piEntry, piTuiEntry } from "../harness.mjs";
 
 const { ok, done } = assertions();
 const { createDiffBody } = await loadExt("delta/body.ts");
+const { fill, FILL_SENTINEL } = await loadExt("delta/ansi.ts");
 
 const { truncateToVisualLines } = await import(`file://${await piEntry()}`);
 const { visibleWidth } = await import(`file://${await piTuiEntry()}`);
 
 /** Exactly the wrapper index.ts injects. */
 const wrap = (text, width) => truncateToVisualLines(text, Number.MAX_SAFE_INTEGER, width).visualLines;
+
+/** Exactly the wrapper index.ts injects. */
+const fillWidth = (text, width) => fill(text, width, visibleWidth);
 
 /** An engine whose answer the test flips, recording the widths it was asked for. */
 const fakeEngine = () => {
@@ -39,6 +43,7 @@ const body = createDiffBody({
 	engine,
 	fallback: (diff) => `PI:${diff}`,
 	invalidate: () => {},
+	fill: fillWidth,
 	wrap,
 });
 
@@ -62,11 +67,11 @@ ok(
 body.render(120);
 ok("a resize asks at the new width", engine.widths.at(-1) === 120);
 
-const noPatch = createDiffBody({ engine, fallback: (diff) => `PI:${diff}`, invalidate: () => {}, wrap });
+const noPatch = createDiffBody({ engine, fallback: (diff) => `PI:${diff}`, invalidate: () => {}, fill: fillWidth, wrap });
 noPatch.set(undefined, "DIFF");
 ok("no patch still renders pi's diff", JSON.stringify(painted(noPatch, 80)) === '["","PI:DIFF"]', JSON.stringify(noPatch.render(80)));
 
-const nothing = createDiffBody({ engine, fallback: (diff) => `PI:${diff}`, invalidate: () => {}, wrap });
+const nothing = createDiffBody({ engine, fallback: (diff) => `PI:${diff}`, invalidate: () => {}, fill: fillWidth, wrap });
 nothing.set(undefined, undefined);
 ok("nothing to show renders no lines", JSON.stringify(nothing.render(80)) === "[]");
 
@@ -89,7 +94,7 @@ ok(
 {
 	const long = "x".repeat(200);
 	const wide = fakeEngine();
-	const deltaBody = createDiffBody({ engine: wide, fallback: (diff) => diff, invalidate: () => {}, wrap });
+	const deltaBody = createDiffBody({ engine: wide, fallback: (diff) => diff, invalidate: () => {}, fill: fillWidth, wrap });
 	deltaBody.set("PATCH", `-${long}\n+${long}`);
 
 	const fallbackLines = deltaBody.render(60);
@@ -112,6 +117,32 @@ ok(
 	// pi's wrapper pads the last one, so compare on the plain text.)
 	const plain = deltaLines.join("").replace(/\x1b\[[\d;]*m/g, "").trimEnd();
 	ok("wrapping keeps the whole line", plain === `+${long}`, JSON.stringify(plain.length));
+}
+
+// ---- delta's background fill survives, instead of stopping where text does
+//
+// Real delta output ends a themed content line with erase-in-line to extend
+// its background to the edge of the terminal (see delta/ansi.ts's doc
+// comment for the real escape sequence). Before this fix, `sanitize` dropped
+// that erase outright, so the rendered row's background stopped at the end of
+// the text instead of filling the row — a themed diff read as ragged colour
+// blocks floating inside pi's tool box.
+
+{
+	const engineWithSentinel = fakeEngine();
+	const body = createDiffBody({ engine: engineWithSentinel, fallback: (diff) => diff, invalidate: () => {}, fill: fillWidth, wrap });
+	body.set("PATCH", "DIFF");
+	engineWithSentinel.ready(`\x1b[48;2;40;59;77malpha${FILL_SENTINEL}\x1b[0m`);
+
+	const rendered = body.render(60);
+	const contentLine = rendered.find((line) => line.includes("alpha"));
+	ok("delta's line survives the render", contentLine !== undefined, JSON.stringify(rendered));
+	ok("no sentinel escapes to the rendered frame", !rendered.some((line) => line.includes(FILL_SENTINEL)), JSON.stringify(rendered));
+	ok(
+		"the background-filled line is padded to exactly the render width",
+		visibleWidth(contentLine) === 60,
+		String(visibleWidth(contentLine)),
+	);
 }
 
 done();

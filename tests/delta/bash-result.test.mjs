@@ -14,12 +14,19 @@ import { readFile } from "node:fs/promises";
 
 const { ok, done } = assertions();
 const { createBashResult, PREVIEW_LINES, formatDuration } = await loadExt("delta/bash-result.ts");
+const { fill, FILL_SENTINEL } = await loadExt("delta/ansi.ts");
 
 const { truncateToVisualLines } = await import(`file://${await piEntry()}`);
 const { visibleWidth } = await import(`file://${await piTuiEntry()}`);
 
 /** Exactly the wrapper index.ts injects. */
 const realWrap = (text, width) => truncateToVisualLines(text, Number.MAX_SAFE_INTEGER, width).visualLines;
+
+/** Exactly the wrapper index.ts injects. */
+const realFill = (text, width) => fill(text, width, visibleWidth);
+
+/** Identity fill: no sentinel in these fixtures, so a no-op is exactly right. */
+const noopFill = (text) => text;
 
 const theme = { fg: (color, text) => `<${color}>${text}` };
 const hintFor = (skipped) => `<hint:${skipped}>`;
@@ -50,6 +57,7 @@ const build = ({ ready, ...overrides } = {}) => {
 		invalidate: () => {},
 		truncate,
 		expandHint: hintFor,
+		fill: noopFill,
 		wrap,
 		...overrides,
 	});
@@ -144,6 +152,7 @@ const build = ({ ready, ...overrides } = {}) => {
 		ready: `\x1b[32m+${long}\x1b[0m`,
 		truncate: truncateToVisualLines,
 		expandHint: (skipped) => `... (${skipped} earlier lines, ${"press ctrl+r ".repeat(4)}to expand)`,
+		fill: realFill,
 		wrap: realWrap,
 		theme: { fg: (_color, text) => text },
 	});
