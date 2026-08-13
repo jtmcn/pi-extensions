@@ -7,6 +7,9 @@
  *   node tests/delta/run.test.mjs
  */
 
+import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { assertions, loadExt, pexec } from "../harness.mjs";
 
 const { ok, skip, done } = assertions();
@@ -168,14 +171,62 @@ if (!deltaInstalled) {
 		"expected truecolour foreground in default rendering",
 	);
 
-	// A real timeout. `sh -c 'sleep 5'` ignores stdin and outlives the timeout;
-	// the forced flags land after `-c sleep 5` as harmless positional parameters.
-	const hang = createRunner({
-		config: () => ({ ...DEFAULT_CONFIG, command: "sh", args: ["-c", "sleep 5"], timeoutMs: 100 }),
-	});
-	const started = Date.now();
-	ok("hanging command times out", (await hang.render(PATCH, 80)) === undefined);
-	ok("timeout is enforced quickly", Date.now() - started < 2000, `${Date.now() - started}ms`);
+	// A real timeout, driven by a script that ignores its arguments.
+	//
+	// The previous version of this test used `command: "sh", args: ["-c", "sleep 5"]`
+	// on the theory that the forced flags would land as harmless positional
+	// parameters. They do not: `render` appends config args *after* its own, so the
+	// command was `sh --paging never --width 80 -c 'sleep 5'`, and `sh` rejects
+	// `--paging` and exits non-zero immediately. `render` then returned undefined
+	// because of the exit code, never the timeout, and the elapsed-time assertion
+	// (`< 2000ms`) held trivially — the test passed with the timeout removed
+	// entirely. Asserting the *lower* bound is what makes it load-bearing.
+	const scriptDir = await mkdtemp(join(tmpdir(), "delta-run-"));
+	try {
+		const sleeper = join(scriptDir, "sleeper");
+		await writeFile(sleeper, "#!/bin/sh\nsleep 5\n", { mode: 0o755 });
+		const hang = createRunner({
+			config: () => ({ ...DEFAULT_CONFIG, command: sleeper, args: [], timeoutMs: 300 }),
+		});
+		const started = Date.now();
+		const hangResult = await hang.render(PATCH, 80);
+		const elapsed = Date.now() - started;
+		ok("a hanging command yields no rendering", hangResult === undefined);
+		ok("the timeout is actually waited out, not short-circuited", elapsed >= 250, `${elapsed}ms`);
+		ok("the process is killed rather than run to completion", elapsed < 3000, `${elapsed}ms`);
+
+		// Killing the immediate child is not enough: a `command` pointing at a
+		// wrapper script leaves the wrapper's own children running after we have
+		// given up and fallen back. The grandchild here outlives the timeout and
+		// writes a marker, so its survival is observable.
+		//
+		// The timing is the whole test. A shell needs a surprising amount of wall
+		// clock to start up and reach its first fork — measured at somewhere between
+		// 100ms and 300ms on macOS — so a short timeout kills the wrapper *before* the
+		// grandchild exists and nothing leaks no matter how the kill is implemented.
+		// That is how the first version of this test passed against a plain
+		// `child.kill()`. `forked` pins the race down: it is written immediately after
+		// the fork, so if it is missing the run proved nothing and says so.
+		const marker = join(scriptDir, "leaked");
+		const forked = join(scriptDir, "forked");
+		const spawner = join(scriptDir, "spawner");
+		await writeFile(
+			spawner,
+			`#!/bin/sh\n( sleep 1; echo leaked > '${marker}' ) &\necho forked > '${forked}'\nsleep 5\n`,
+			{ mode: 0o755 },
+		);
+		const tree = createRunner({
+			config: () => ({ ...DEFAULT_CONFIG, command: spawner, args: [], timeoutMs: 700 }),
+		});
+		ok("a wrapper that hangs yields no rendering", (await tree.render(PATCH, 80)) === undefined);
+		const reached = await stat(forked).then(() => true, () => false);
+		ok("the wrapper reached its fork before the timeout (else the next check is vacuous)", reached);
+		await new Promise((resolve) => setTimeout(resolve, 1500));
+		const leaked = await stat(marker).then(() => true, () => false);
+		ok("the timeout kills the whole process group, not just the child", !leaked);
+	} finally {
+		await rm(scriptDir, { recursive: true, force: true });
+	}
 }
 
 ok("nodeSpawn is the default", typeof nodeSpawn === "function");

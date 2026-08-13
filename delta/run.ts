@@ -27,11 +27,17 @@ export type SpawnFn = (
 	timeoutMs: number,
 ) => Promise<SpawnResult>;
 
+/** Process groups and negative-pid signals are POSIX-only. */
+const POSIX = process.platform !== "win32";
+
 export const nodeSpawn: SpawnFn = (command, args, input, timeoutMs) =>
 	new Promise((resolve) => {
 		let child: ReturnType<typeof spawn>;
 		try {
-			child = spawn(command, args, { stdio: ["pipe", "pipe", "ignore"] });
+			// `detached` puts the child in a process group of its own, which is what
+			// makes the group kill below possible. Windows has no process groups to
+			// signal, so there is nothing to gain there.
+			child = spawn(command, args, { stdio: ["pipe", "pipe", "ignore"], detached: POSIX });
 		} catch {
 			resolve({ code: null, stdout: "", timedOut: false });
 			return;
@@ -41,9 +47,36 @@ export const nodeSpawn: SpawnFn = (command, args, input, timeoutMs) =>
 		let timedOut = false;
 		let settled = false;
 
+		/**
+		 * Kill the child *and* anything it started.
+		 *
+		 * `config.command` does not have to be delta itself — it is a configured path,
+		 * and pointing it at a wrapper script is a reasonable thing to do. Signalling
+		 * only the immediate pid leaves that wrapper's children orphaned but running,
+		 * and they inherited our stdout pipe: `close` does not fire until every holder
+		 * of that pipe exits, so a 300ms timeout against a wrapper around `sleep 5`
+		 * kept this promise pending for the full five seconds — the timeout stopped
+		 * being a timeout. Signalling the group ends the whole tree at once.
+		 */
+		const killTree = () => {
+			if (POSIX && child.pid !== undefined) {
+				try {
+					process.kill(-child.pid, "SIGKILL");
+					return;
+				} catch {
+					// No such group: the child is already gone, or was never detached.
+				}
+			}
+			try {
+				child.kill("SIGKILL");
+			} catch {
+				// Already exited.
+			}
+		};
+
 		const timer = setTimeout(() => {
 			timedOut = true;
-			child.kill("SIGKILL");
+			killTree();
 		}, timeoutMs);
 
 		const finish = (code: number | null) => {

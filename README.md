@@ -31,6 +31,7 @@ extensions/
 │   ├── engine.ts
 │   ├── footer.ts
 │   ├── run.ts
+│   ├── shell.ts
 │   └── README.md
 ├── mcp/                an extension (loaded via mcp/index.ts)
 │   ├── index.ts

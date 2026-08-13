@@ -37,6 +37,98 @@ ok(
 	sanitize("\x1b]8;;file:///x\x07t\x1b]8;;\x07") === "\x1b]8;;file:///x\x07t\x1b]8;;\x07",
 );
 ok("newlines preserved", sanitize("a\nb") === "a\nb");
+ok("tabs preserved", sanitize("a\tb") === "a\tb");
+
+// ---- sanitize(): everything that is not colour is not trusted
+//
+// The allowlist matters more than the blocklist. `sanitize` used to strip two
+// specific shapes (`[0-2]?K`, `[0-2]?J`) and pass everything else through, so
+// any sequence outside those two patterns reached pi's frame intact: a cursor
+// move pi's width accounting cannot see, or an erase pi has to repaint. Delta
+// is not expected to emit these, but "the pager we shell out to only emits what
+// we predicted" is not a property this module can enforce, and it is the only
+// thing standing between delta's stdout and the frame.
+
+ok(
+	"erase-in-display with an out-of-range parameter is dropped (3J clears scrollback)",
+	sanitize("a\x1b[3Jb") === "ab",
+	JSON.stringify(sanitize("a\x1b[3Jb")),
+);
+ok(
+	"multi-parameter erase-in-line still becomes the sentinel",
+	sanitize("a\x1b[0;0Kb") === `a${FILL_SENTINEL}b`,
+	JSON.stringify(sanitize("a\x1b[0;0Kb")),
+);
+ok(
+	"8-bit CSI erase-in-line becomes the sentinel",
+	sanitize("a\x9b0Kb") === `a${FILL_SENTINEL}b`,
+	JSON.stringify(sanitize("a\x9b0Kb")),
+);
+ok(
+	"8-bit CSI erase-in-display is dropped",
+	sanitize("a\x9b2Jb") === "ab",
+	JSON.stringify(sanitize("a\x9b2Jb")),
+);
+ok(
+	"cursor movement is dropped",
+	sanitize("a\x1b[999Db") === "ab",
+	JSON.stringify(sanitize("a\x1b[999Db")),
+);
+ok(
+	"cursor positioning is dropped",
+	sanitize("a\x1b[10;20Hb") === "ab",
+	JSON.stringify(sanitize("a\x1b[10;20Hb")),
+);
+ok(
+	"scroll region is dropped",
+	sanitize("a\x1b[1;5rb") === "ab",
+	JSON.stringify(sanitize("a\x1b[1;5rb")),
+);
+ok(
+	"private-mode set/reset (alternate screen) is dropped",
+	sanitize("a\x1b[?1049hb") === "ab",
+	JSON.stringify(sanitize("a\x1b[?1049hb")),
+);
+ok(
+	"a non-CSI escape (RIS, full reset) is dropped",
+	sanitize("a\x1bcb") === "ab",
+	JSON.stringify(sanitize("a\x1bcb")),
+);
+ok(
+	"a bare ESC with nothing after it is dropped",
+	sanitize("a\x1b") === "a",
+	JSON.stringify(sanitize("a\x1b")),
+);
+ok(
+	"backspace is dropped (it moves the cursor pi cannot see)",
+	sanitize("a\bb") === "ab",
+	JSON.stringify(sanitize("a\bb")),
+);
+ok(
+	"an OSC title change is dropped while OSC 8 hyperlinks survive",
+	sanitize("a\x1b]0;title\x07b") === "ab",
+	JSON.stringify(sanitize("a\x1b]0;title\x07b")),
+);
+ok(
+	"an OSC 8 hyperlink terminated by ST (not BEL) is preserved",
+	sanitize("\x1b]8;;http://x\x1b\\t\x1b]8;;\x1b\\") === "\x1b]8;;http://x\x1b\\t\x1b]8;;\x1b\\",
+	JSON.stringify(sanitize("\x1b]8;;http://x\x1b\\t\x1b]8;;\x1b\\")),
+);
+ok(
+	"an unterminated OSC does not swallow the rest of the line",
+	!sanitize("a\x1b]8;;http://x").includes("\x1b"),
+	JSON.stringify(sanitize("a\x1b]8;;http://x")),
+);
+ok(
+	"a DCS string is dropped",
+	sanitize("a\x1bPq#0;2;0;0;0\x1b\\b") === "ab",
+	JSON.stringify(sanitize("a\x1bPq#0;2;0;0;0\x1b\\b")),
+);
+ok(
+	"colour survives alongside a stripped movement sequence",
+	sanitize("\x1b[31m\x1b[2Ared\x1b[0m") === "\x1b[31mred\x1b[0m",
+	JSON.stringify(sanitize("\x1b[31m\x1b[2Ared\x1b[0m")),
+);
 
 // ---- fill(): expand the sentinel into the padding it stands for
 //
@@ -272,6 +364,42 @@ ok(
 	"256-colour bg/fg introducers (38/48;5;n) are not mistaken for a reset",
 	restoreBackground("\x1b[48;5;196mtext\x1b[0m", PREFIX) === `\x1b[48;5;196mtext\x1b[0m${PREFIX}`,
 	restoreBackground("\x1b[48;5;196mtext\x1b[0m", PREFIX),
+);
+
+ok(
+	"a reset written with a leading zero (ESC[00m) is recognised as a reset",
+	restoreBackground("alpha\x1b[00mbeta", PREFIX) === `alpha\x1b[00m${PREFIX}beta`,
+	restoreBackground("alpha\x1b[00mbeta", PREFIX),
+);
+
+ok(
+	"a padded background reset (ESC[049m) is recognised",
+	restoreBackground("alpha\x1b[049mbeta", PREFIX) === `alpha${PREFIX}beta`,
+	restoreBackground("alpha\x1b[049mbeta", PREFIX),
+);
+
+// A composite that resets *and then* sets a background has already put the
+// background where it wants it; appending pi's prefix after that would paint
+// over delta's own colour rather than restore pi's box.
+ok(
+	"a reset followed by a new background in the same sequence is left alone",
+	restoreBackground("\x1b[0;48;2;1;2;3mtext", PREFIX) === "\x1b[0;48;2;1;2;3mtext",
+	restoreBackground("\x1b[0;48;2;1;2;3mtext", PREFIX),
+);
+ok(
+	"a reset followed by a 256-colour background in the same sequence is left alone",
+	restoreBackground("\x1b[0;48;5;196mtext", PREFIX) === "\x1b[0;48;5;196mtext",
+	restoreBackground("\x1b[0;48;5;196mtext", PREFIX),
+);
+ok(
+	"a reset followed by a basic background in the same sequence is left alone",
+	restoreBackground("\x1b[0;44mtext", PREFIX) === "\x1b[0;44mtext",
+	restoreBackground("\x1b[0;44mtext", PREFIX),
+);
+ok(
+	"a background set *before* a reset in the same sequence still restores",
+	restoreBackground("\x1b[44;0mtext", PREFIX) === `\x1b[44;0m${PREFIX}text`,
+	restoreBackground("\x1b[44;0mtext", PREFIX),
 );
 
 ok(

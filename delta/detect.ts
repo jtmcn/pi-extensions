@@ -16,6 +16,24 @@
 /** Flags that turn a diff command into a summary, which delta cannot render. */
 const SUMMARY = /^--(stat|numstat|name-only|name-status|shortstat|compact-summary)(=|$)/;
 
+/** Flags that suppress `git show`'s diff, leaving only the commit message. */
+const NO_PATCH = /^(-s|--no-patch)$/;
+
+/**
+ * A `git show` argument that names something other than a commit.
+ *
+ * `git show rev:path` and `git show :path` print the *contents* of a blob or a
+ * listing of a tree, not a diff, and `rev^{tree}` / `rev^{blob}` peel to the
+ * same. Recolouring a source file as though it were a diff is the expensive
+ * half of this matcher's two failure modes, and `git show` is the one
+ * subcommand where a plain-looking invocation produces no diff at all.
+ *
+ * A colon is a reliable signal because git forbids it in ref names
+ * (`git check-ref-format`), so `rev:path` is the only thing it can mean here.
+ * `^{}` and `^{commit}` are left alone: both still resolve to a commit.
+ */
+const NOT_A_COMMIT = /:|\^\{(tree|blob)\}/;
+
 /** Flags that make `git log` and `git stash show` emit a patch. */
 const PATCH = /^(-[pu]|--patch|--unified(=|$)|-U\d*)$/;
 
@@ -60,7 +78,11 @@ function isBuiltinDiff(parts: string[]): boolean {
 	const [first, ...rest] = parts;
 	if (first === "git") {
 		const { name, args } = subcommand(rest);
-		if (name === "diff" || name === "show" || name === "range-diff") return true;
+		if (name === "show") {
+			if (args.some((arg) => NO_PATCH.test(arg))) return false;
+			return !args.some((arg) => !arg.startsWith("-") && NOT_A_COMMIT.test(arg));
+		}
+		if (name === "diff" || name === "range-diff") return true;
 		if (name === "log") return args.some((arg) => PATCH.test(arg));
 		if (name === "stash") return args[0] === "show" && args.slice(1).some((arg) => PATCH.test(arg));
 		return false;

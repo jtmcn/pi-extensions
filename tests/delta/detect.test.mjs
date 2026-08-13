@@ -18,6 +18,8 @@ const matches = [
 	"git -c color.ui=always diff",
 	"git -C /tmp/repo diff",
 	"git show HEAD",
+	"git show HEAD^",
+	"git show v1.0^{}",
 	"git log -p",
 	"git log --patch -n2",
 	"git stash show -p",
@@ -40,6 +42,18 @@ const rejects = [
 	"git diff --compact-summary",
 	"git show --compact-summary HEAD",
 	"git show --stat HEAD",
+	// `git show rev:path` prints the *contents* of a blob, and `--no-patch`/`-s`
+	// suppress the diff and leave only the commit message. Handing either to delta
+	// means recolouring ordinary text as if it were a diff, which is the expensive
+	// direction of this matcher's two failure modes.
+	"git show HEAD:file.ts",
+	"git show main:src/index.ts",
+	"git show :staged.txt",
+	"git show HEAD^{tree}",
+	"git show HEAD:",
+	"git show --no-patch HEAD",
+	"git show -s HEAD",
+	"git show -s --format=%B HEAD",
 	"git log",
 	"git log --oneline -20",
 	"git stash show",

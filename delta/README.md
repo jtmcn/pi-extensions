@@ -5,15 +5,19 @@ built-in diff styling:
 
 - `bash` results whose command produces a diff (`git diff`, `git show`,
   `git log -p`, `git stash show -p`, `diff -u`, plus anything you add through
-  `extraCommands`)
+  `extraCommands`). Invocations that produce something other than a diff are
+  skipped: `--stat` and friends, `git show -s`, and `git show rev:path`, which
+  prints file contents rather than a patch.
 - the diff pi paints when the `edit` tool applies a change
 
 Display only: the model still receives the plain unified diff, so this costs no
 tokens and cannot confuse it with escape codes.
 
 Delta reads its own settings from the `[delta]` section of your git config, so
-diffs in pi look like diffs in your pager. This extension only forces
-`--paging never` and the width.
+diffs in pi look like diffs in your pager. The only flags this extension forces
+are `--paging never` and the width; the default config then appends two style
+flags to suppress delta's line backgrounds (see [Config](#config)), and anything
+in `args` is appended last so it wins over both.
 
 ## Requirements
 
@@ -41,9 +45,19 @@ keep the reduced framing described below, and you get one warning per session.
 | `enabled` | `true` | Master switch |
 | `command` | `"delta"` | Binary to run |
 | `args` | `["--minus-style", "syntax normal", "--plus-style", "syntax normal"]` | Extra delta flags, appended last so they win over git config |
-| `timeoutMs` | `2000` | Per-invocation timeout |
-| `maxBytes` | `262144` | Diffs larger than this skip delta |
+| `timeoutMs` | `2000` | Per-invocation timeout, capped at 30000 |
+| `maxBytes` | `262144` | Diffs larger than this skip delta, capped at 4194304 |
 | `extraCommands` | `[]` | Regexes added to the bash command matcher |
+
+Bad config warns and is ignored rather than failing startup: a malformed file, a
+value of the wrong type, and a misspelled key each produce one warning per
+session. `timeoutMs` and `maxBytes` are capped rather than rejected — `maxBytes`
+bounds both the diff size handed to delta and, through the 64-entry render cache,
+the memory that cache can hold.
+
+`command` is a path this extension executes. In a trusted project it can come
+from `<project>/.pi/delta.json`, so it carries the same trust as any other
+project-local setting pi honours.
 
 The default `args` suppress delta's line-level background fills (dark navy on
 removed lines, dark maroon on added lines). Pi paints its tool results in a green

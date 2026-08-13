@@ -9,7 +9,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFakePi } from "../fake-pi.mjs";
-import { assertions, loadExt, piEntry, piTuiEntry } from "../harness.mjs";
+import { assertions, loadExt, pexec, piEntry, piTuiEntry } from "../harness.mjs";
 
 const { ok, done } = assertions();
 const extension = (await loadExt("delta/index.ts")).default;
@@ -578,6 +578,74 @@ try {
 		ok("a run landing after session_shutdown does not repaint", torn.invalidations === 0, String(torn.invalidations));
 
 		await writeFile(join(agentDir, "delta.json"), JSON.stringify({ command: "delta-does-not-exist" }));
+	}
+
+	// ---- a config load that lands after session_shutdown must not touch its ctx
+	//
+	// `session_start` is async: it awaits `loadConfig` and then notifies about any
+	// warnings through the ctx it captured before the await. If the session is torn
+	// down inside that window, that ctx is stale, and writing through it throws
+	// "extension ctx is stale" and takes the process down. The generation snapshot
+	// guards a session being *replaced*; shutdown is the other half of the window.
+	//
+	// Driven by a FIFO standing in for `delta.json`, so the config read is genuinely
+	// still in flight when shutdown fires — a mocked delay would not prove the
+	// ordering the hazard depends on.
+
+	{
+		const slowAgentDir = await mkdtemp(join(tmpdir(), "delta-slow-agent-"));
+		const fifo = join(slowAgentDir, "delta.json");
+		await pexec("mkfifo", [fifo]);
+		process.env.PI_CODING_AGENT_DIR = slowAgentDir;
+
+		try {
+			const h = createFakePi({ cwd: project });
+			extension(h.pi);
+
+			const starting = h.fire("session_start");
+			await settle(50); // loadConfig is now blocked on the FIFO
+			const stale = h.ctx();
+			await h.fire("session_shutdown");
+
+			// Malformed JSON, because a warning is what drives the notify path at all.
+			await writeFile(fifo, "{ not json");
+			await starting;
+			await settle(50);
+
+			ok(
+				"a config load landing after session_shutdown does not notify through the stale ctx",
+				stale.own.notices.length === 0,
+				JSON.stringify(stale.own.notices),
+			);
+		} finally {
+			process.env.PI_CODING_AGENT_DIR = agentDir;
+			await rm(slowAgentDir, { recursive: true, force: true });
+		}
+	}
+
+	// ---- the control: the same warning *is* delivered to a live session
+	//
+	// Without this, the assertion above passes just as well against a config loader
+	// that never warns at all.
+
+	{
+		const warnAgentDir = await mkdtemp(join(tmpdir(), "delta-warn-agent-"));
+		await writeFile(join(warnAgentDir, "delta.json"), "{ not json");
+		process.env.PI_CODING_AGENT_DIR = warnAgentDir;
+
+		try {
+			const h = createFakePi({ cwd: project });
+			extension(h.pi);
+			await h.fire("session_start");
+			ok(
+				"a live session is warned about malformed config",
+				h.ctx().own.notices.some((n) => n.message.includes("invalid JSON")),
+				JSON.stringify(h.ctx().own.notices),
+			);
+		} finally {
+			process.env.PI_CODING_AGENT_DIR = agentDir;
+			await rm(warnAgentDir, { recursive: true, force: true });
+		}
 	}
 } finally {
 	if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;

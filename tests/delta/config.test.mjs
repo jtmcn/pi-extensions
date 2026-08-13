@@ -62,6 +62,35 @@ const badTypes = await load(true);
 ok("type errors warn per field", badTypes.warnings.length === 4, JSON.stringify(badTypes.warnings));
 ok("bad values do not clobber", badTypes.config.command === "/opt/homebrew/bin/delta");
 
+// A typo in a key is the one config mistake that produces no visible effect at
+// all: the value is simply never read, and the feature quietly behaves as if the
+// setting had not been written. Warning is the whole remedy.
+await writeProject(JSON.stringify({ timeuotMs: 500, enabled: true }));
+const typo = await load(true);
+ok(
+	"an unknown key warns",
+	typo.warnings.some((w) => w.includes("timeuotMs")),
+	JSON.stringify(typo.warnings),
+);
+ok("an unknown key does not stop the known ones applying", typo.config.enabled === true);
+ok("a known key does not warn", !typo.warnings.some((w) => w.includes('"enabled"')), JSON.stringify(typo.warnings));
+
+// `maxBytes` is the size of diff handed to delta, and every rendering of one is
+// held in a 64-entry cache. An absurd value turns that cache into an unbounded
+// memory sink, so it is clamped rather than trusted.
+await writeProject(JSON.stringify({ maxBytes: 999_999_999, timeoutMs: 600_000 }));
+const absurd = await load(true);
+ok("an absurd maxBytes is clamped", absurd.config.maxBytes < 999_999_999, String(absurd.config.maxBytes));
+ok("clamping maxBytes warns", absurd.warnings.some((w) => w.includes("maxBytes")), JSON.stringify(absurd.warnings));
+ok("an absurd timeoutMs is clamped", absurd.config.timeoutMs < 600_000, String(absurd.config.timeoutMs));
+ok("clamping timeoutMs warns", absurd.warnings.some((w) => w.includes("timeoutMs")), JSON.stringify(absurd.warnings));
+
+await writeProject(JSON.stringify({ maxBytes: 1024, timeoutMs: 500 }));
+const sane = await load(true);
+ok("a sane maxBytes is left alone", sane.config.maxBytes === 1024, String(sane.config.maxBytes));
+ok("a sane timeoutMs is left alone", sane.config.timeoutMs === 500, String(sane.config.timeoutMs));
+ok("sane values do not warn", sane.warnings.length === 0, JSON.stringify(sane.warnings));
+
 ok("version is stable for equal config", configVersion(DEFAULT_CONFIG) === configVersion({ ...DEFAULT_CONFIG }));
 ok(
 	"version changes with args",

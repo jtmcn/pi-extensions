@@ -30,10 +30,76 @@
  * it cannot parse.
  */
 
-/** CSI erase-in-line, with or without a parameter (`0K`/`1K`/`2K`/bare `K`). */
-const ERASE_LINE = /\x1b\[[0-2]?K/g;
-/** CSI erase-in-display, with or without a parameter. */
-const ERASE_DISPLAY = /\x1b\[[0-2]?J/g;
+/**
+ * Every escape sequence and control character, matched in one pass so the
+ * replacer below can decide per sequence.
+ *
+ * This is an allowlist by construction, and deliberately so: the previous
+ * version stripped two specific shapes (`\x1b[[0-2]?K`, `\x1b[[0-2]?J`) and
+ * passed everything else through, which meant anything outside those two
+ * patterns reached the frame intact — `\x1b[3J`, a multi-parameter `\x1b[0;0K`,
+ * an 8-bit `\x9b0K`, a cursor move, an alternate-screen switch. Delta is not
+ * expected to emit any of them, but "the pager only emits what we predicted" is
+ * not a property this module can enforce, and it is the last thing between
+ * delta's stdout and pi's frame.
+ *
+ * Order matters: string sequences (OSC/DCS/APC/PM/SOS) come first so their
+ * bodies are consumed whole rather than being partly matched as CSI, and the
+ * unterminated forms are anchored to end-of-input so a truncated sequence can
+ * never leak its introducer into the output.
+ */
+const STRING_TERMINATOR = "(?:\\u0007|\\u001B\\u005C|\\u009C|$)";
+const SEQUENCE = new RegExp(
+	[
+		// OSC: ESC ] ... ST/BEL. Kept only when it is a hyperlink; see keep().
+		`(?:\\u001B\\]|\\u009D)[\\s\\S]*?${STRING_TERMINATOR}`,
+		// DCS / SOS / PM / APC: ESC P, ESC X, ESC ^, ESC _ and their 8-bit forms.
+		// Spelled out rather than as a range: `[P-_]` also covers `[`, which would
+		// make every CSI match here instead and swallow the rest of the input.
+		`(?:\\u001B[PX^_]|[\\u0090\\u0098\\u009E\\u009F])[\\s\\S]*?${STRING_TERMINATOR}`,
+		// CSI: introducer, parameter bytes, intermediate bytes, final byte. The
+		// final byte is optional so a truncated CSI is consumed rather than left.
+		"(?:\\u001B\\[|\\u009B)[0-?]*[ -/]*[@-~]?",
+		// Any other escape (RIS `ESC c`, charset selection, ...) and a bare ESC.
+		"\\u001B[\\s\\S]?",
+		// Remaining C1 controls, and C0 controls other than newline and tab. This is
+		// where carriage return is handled: it moves the cursor somewhere pi's width
+		// accounting does not model.
+		"[\\u0080-\\u009F]",
+		"[\\u0000-\\u0008\\u000B-\\u001F\\u007F]",
+	].join("|"),
+	"g",
+);
+
+/** A single CSI sequence, split into parameters, intermediates and final byte. */
+const CSI = /^(?:\u001B\[|\u009B)([0-?]*)([ -/]*)([@-~])$/;
+
+/** OSC 8 is the hyperlink; every other OSC (window title, clipboard) is dropped. */
+const OSC_HYPERLINK = /^(?:\u001B\]|\u009D)8;/;
+const OSC_TERMINATED = /(?:\u0007|\u001B\u005C|\u009C)$/;
+
+/**
+ * What one matched sequence becomes: itself, the fill sentinel, or nothing.
+ *
+ * Colour (SGR) and OSC 8 hyperlinks are the only things kept — they are why
+ * delta is here. An 8-bit CSI is normalised to its 7-bit form on the way
+ * through, because `restoreBackground` below and pi's own width accounting both
+ * pattern-match `\x1b[`, and a sequence that survives sanitising only to be
+ * invisible to those is worse than one that never survived.
+ */
+function keep(sequence: string): string {
+	const csi = CSI.exec(sequence);
+	if (csi) {
+		const [, params, intermediates, final] = csi;
+		// A private-parameter or intermediate-byte sequence is not SGR even when it
+		// ends in `m` (`\x1b[?1m`), so it does not get the colour exemption.
+		if (final === "m" && !params.includes("?") && intermediates === "") return `\u001B[${params}m`;
+		if (final === "K") return FILL_SENTINEL;
+		return "";
+	}
+	if (OSC_HYPERLINK.test(sequence) && OSC_TERMINATED.test(sequence)) return sequence;
+	return "";
+}
 
 /**
  * Stands in for an erase-in-line until `fill()` knows the render width and can
@@ -55,11 +121,7 @@ export function sanitize(text: string): string {
 	// Strip any pre-existing U+E000 (Nerd Fonts, Powerline glyphs) before
 	// inserting our own sentinels, so fill() can never confuse content with a
 	// real erase-in-line marker. See FILL_SENTINEL's comment for the trade-off.
-	return text
-		.replace(/\uE000/g, "")
-		.replace(ERASE_LINE, FILL_SENTINEL)
-		.replace(ERASE_DISPLAY, "")
-		.replace(/\r/g, "");
+	return text.replace(/\uE000/g, "").replace(SEQUENCE, keep);
 }
 
 /**
@@ -172,36 +234,87 @@ function sgrParams(body: string): string[] {
 	const params: string[] = [];
 	let i = 0;
 	while (i < tokens.length) {
-		const tok = tokens[i];
+		const tok = normalize(tokens[i]);
 		if (tok === "38" || tok === "48") {
-			const mode = tokens[i + 1];
+			// Collapsed to a marker rather than dropped: whether the sequence ends up
+			// with a background set is what decides the restore below, so "an
+			// extended background happened here, in this position" is load-bearing.
+			const marker = tok === "48" ? EXTENDED_BG : EXTENDED_FG;
+			const mode = normalize(tokens[i + 1] ?? "");
 			if (mode === "5") {
 				i += 3; // 38/48, 5, n
-				continue;
-			}
-			if (mode === "2") {
+			} else if (mode === "2") {
 				i += 5; // 38/48, 2, r, g, b
-				continue;
+			} else {
+				// Unknown extended form (e.g. a colon-subparameter variant this parser
+				// does not split on): consume just the introducer token defensively
+				// rather than risk misreading whatever follows.
+				i += 1;
 			}
-			// Unknown extended form (e.g. a colon-subparameter variant this parser
-			// does not split on): consume just the introducer token defensively
-			// rather than risk misreading whatever follows.
-			i += 1;
+			params.push(marker);
 			continue;
 		}
-		params.push(tok === "" ? "0" : tok);
+		params.push(tok);
 		i += 1;
 	}
 	return params;
+}
+
+const EXTENDED_BG = "bg*";
+const EXTENDED_FG = "fg*";
+
+/**
+ * One SGR parameter in canonical form.
+ *
+ * `ESC[00m` and `ESC[049m` are a reset and a background reset to every terminal
+ * — leading zeros are padding, not a different code — so comparing the raw
+ * token against `"0"` misses them and leaves pi's box background cancelled for
+ * the rest of the row. An empty parameter is `0` by definition, per ECMA-48.
+ * Anything non-numeric (a colon-subparameter form) is left alone rather than
+ * coerced through `Number`, which would turn it into `NaN`.
+ */
+function normalize(token: string): string {
+	if (token === "") return "0";
+	if (!/^\d+$/.test(token)) return token;
+	return String(Number(token));
+}
+
+/**
+ * Whether the background is left at the terminal default once `params` have all
+ * been applied, which is the only case where pi's prefix has to be restored.
+ *
+ * Order is what matters, not membership. `ESC[0;48;2;1;2;3m` contains a reset,
+ * but it goes on to set a background in the same sequence: appending pi's
+ * prefix after that would paint over the colour delta just asked for. The
+ * mirror image, `ESC[44;0m`, sets a background and then resets it, and does
+ * need the restore.
+ */
+function backgroundDefaultAfter(params: readonly string[]): boolean {
+	let isDefault = false;
+	for (const param of params) {
+		if (param === "0" || param === "49") {
+			isDefault = true;
+			continue;
+		}
+		if (param === EXTENDED_BG) {
+			isDefault = false;
+			continue;
+		}
+		const code = Number(param);
+		if ((code >= 40 && code <= 47) || (code >= 100 && code <= 107)) isDefault = false;
+	}
+	return isDefault;
 }
 
 export function restoreBackground(text: string, prefix: string): string {
 	if (!prefix) return text;
 	return text.replace(SGR_SEQUENCE, (match, body: string) => {
 		const params = sgrParams(body);
+		if (!backgroundDefaultAfter(params)) return match;
+		// A sequence that only reset the background served no other purpose, so it
+		// is replaced outright rather than kept and followed.
 		if (params.length === 1 && params[0] === "49") return prefix;
-		if (params.includes("0") || params.includes("49")) return match + prefix;
-		return match;
+		return match + prefix;
 	});
 }
 

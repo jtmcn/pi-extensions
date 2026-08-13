@@ -191,9 +191,14 @@ export default function deltaExtension(pi: ExtensionAPI): void {
 
 	pi.on("session_shutdown", () => {
 		session = undefined;
-		// The shutdown window is another chance for an in-flight run to land in a
-		// session that no longer exists: bump the generation here too, so anything
-		// still running is dropped rather than cached or painted.
+		// The shutdown window is another chance for in-flight work to land in a
+		// session that no longer exists, and there are two kinds of it. `engine.reset()`
+		// bumps the *engine's* generation, so a delta subprocess still running is
+		// dropped rather than cached or painted. `sessionGeneration` is the other one:
+		// a `session_start` still awaiting `loadConfig` resumes after this and would
+		// otherwise pass its generation check and notify through the ctx it captured,
+		// which is stale once shutdown has fired.
+		sessionGeneration += 1;
 		engine.reset();
 	});
 
