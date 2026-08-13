@@ -16,6 +16,7 @@
  * dangerous thing an extension can hold.
  */
 
+import { restoreBackground } from "./ansi.ts";
 import type { Engine } from "./engine.ts";
 
 /** Pinned copy of pi's `BASH_PREVIEW_LINES` (core/tools/bash.js). */
@@ -43,6 +44,16 @@ export interface BashResultInput {
 	warnings: string[];
 	expanded: boolean;
 	timing?: { label: string; ms: number };
+	/**
+	 * The ANSI prefix pi's own `Box.applyBg` puts at the start of this row —
+	 * `theme.bg(key, ...)`'s prefix half, chosen from `toolPendingBg` /
+	 * `toolSuccessBg` / `toolErrorBg` the way `ToolExecutionComponent` does.
+	 * Re-emitted after every reset in the body so a reset inside our own
+	 * content cannot cancel the box's background for the rest of the row (see
+	 * `restoreBackground` in `delta/ansi.ts`). Empty when this row has no box
+	 * to restore.
+	 */
+	bgPrefix: string;
 }
 
 export interface BashResult {
@@ -135,7 +146,7 @@ export function collapsedPreview(
 }
 
 export function createBashResult(deps: BashResultDeps): BashResult {
-	let input: BashResultInput = { body: "", warnings: [], expanded: false };
+	let input: BashResultInput = { body: "", warnings: [], expanded: false, bgPrefix: "" };
 
 	return {
 		update(next) {
@@ -148,7 +159,12 @@ export function createBashResult(deps: BashResultDeps): BashResult {
 			const lines: string[] = [];
 			const rendered = input.body ? deps.engine.lookup(input.body, width, deps.invalidate) : undefined;
 			const raw = rendered ?? (input.body ? deps.fallback(input.body) : "");
-			const text = raw ? deps.fill(raw, width) : "";
+			// Restore the box background after every reset in `raw` *before* `fill`
+			// expands its erase-in-line sentinel: the expanded padding then sits
+			// between whichever background SGR precedes the sentinel and this
+			// restored prefix, and inherits the right colour either way.
+			const restored = raw ? restoreBackground(raw, input.bgPrefix) : "";
+			const text = restored ? deps.fill(restored, width) : "";
 
 			if (text) {
 				if (input.expanded) {

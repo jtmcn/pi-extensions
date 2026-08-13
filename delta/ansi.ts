@@ -110,6 +110,102 @@ function fillLine(line: string, width: number, measure: (text: string) => number
 }
 
 /**
+ * Restore pi's tool-box background after every SGR reset in `text`.
+ *
+ * pi wraps a rendered row in exactly one background span: `Box.applyBg` is
+ * `bgFn(line + padding)`, and `bgFn` is `theme.bg(key, text)`, which is
+ * `<ansi-prefix>${text}\x1b[49m` — the prefix set once at the very start of
+ * the whole line, padding included. A terminal does not re-apply that prefix
+ * on its own; it is sequential state. So any SGR reset *inside* our content —
+ * and delta emits one at the end of every content line — cancels the box's
+ * background for the remainder of the row, including pi's own trailing
+ * padding: a themed diff shows the terminal's default background (the app
+ * background) instead of pi's box colour, for every character after the
+ * reset.
+ *
+ * The fix is not to remove those resets — delta needs `ESC[0m` to end its own
+ * colouring before starting the next token — but to immediately follow every
+ * one with `prefix`, so the box's background is re-established before
+ * anything else is drawn. Three shapes, one rule:
+ *
+ *   - `ESC[0m` / bare `ESC[m` (full reset): kept, `prefix` appended after.
+ *   - `ESC[49m` in isolation (reset background only, nothing else in the
+ *     sequence): the sequence itself served no other purpose, so it is
+ *     replaced outright by `prefix` rather than kept-then-followed.
+ *   - Composite sequences whose parameters include `0` or `49` alongside
+ *     other codes (`ESC[0;1m`, `ESC[39;49m`): kept in full — the other codes
+ *     still apply — with `prefix` appended after.
+ *
+ * Parameters are walked rather than string-matched, because a 24-bit colour
+ * parameter can itself contain the digits `0` or `49` as an RGB component
+ * (`ESC[38;2;10;49;77m`) and `38;5;n` / `48;5;n` (256-colour) and `38;2;r;g;b`
+ * / `48;2;r;g;b` (24-bit) introducers have to be consumed as one unit so their
+ * component values are never mistaken for a bare reset code.
+ *
+ * `prefix` is a no-op function argument: an empty string (the `edit` row,
+ * whose `renderShell: "self"` puts it in a plain `Container`, never a `Box` —
+ * `ToolExecutionComponent.updateDisplay` only calls `setBgFn` `if
+ * (renderContainer instanceof Box)`) makes this the identity function, text
+ * untouched.
+ *
+ * Ordering: this runs on delta's raw output — already through `sanitize()` in
+ * `run.ts`, so its erase-in-line is `FILL_SENTINEL`, not a live escape — and
+ * has to run *before* `fill()` expands that sentinel into padding, so the
+ * expanded padding sits between whatever background SGR precedes the
+ * sentinel and this function's restored prefix, inheriting the right colour
+ * either way. Concretely, delta's own per-content-line shape is
+ * `content ESC[0m ESC[48;2;r;g;bm ESC[0K ESC[0m`; after `sanitize()` the
+ * `ESC[0K` is `FILL_SENTINEL`, and this function's job is only the two
+ * `ESC[0m`s around it — `fill()` still owns turning the sentinel into spaces.
+ */
+const SGR_SEQUENCE = /\x1b\[([0-9;]*)m/g;
+
+/**
+ * The SGR parameters of one sequence's body, with 256-colour and 24-bit colour
+ * introducers (`38`/`48` followed by `5;n` or `2;r;g;b`) consumed as a single
+ * opaque unit so a colour component is never read as a bare reset code. An
+ * empty body (bare `ESC[m`) is `ESC[0m` by definition, per ECMA-48.
+ */
+function sgrParams(body: string): string[] {
+	if (body === "") return ["0"];
+	const tokens = body.split(";");
+	const params: string[] = [];
+	let i = 0;
+	while (i < tokens.length) {
+		const tok = tokens[i];
+		if (tok === "38" || tok === "48") {
+			const mode = tokens[i + 1];
+			if (mode === "5") {
+				i += 3; // 38/48, 5, n
+				continue;
+			}
+			if (mode === "2") {
+				i += 5; // 38/48, 2, r, g, b
+				continue;
+			}
+			// Unknown extended form (e.g. a colon-subparameter variant this parser
+			// does not split on): consume just the introducer token defensively
+			// rather than risk misreading whatever follows.
+			i += 1;
+			continue;
+		}
+		params.push(tok === "" ? "0" : tok);
+		i += 1;
+	}
+	return params;
+}
+
+export function restoreBackground(text: string, prefix: string): string {
+	if (!prefix) return text;
+	return text.replace(SGR_SEQUENCE, (match, body: string) => {
+		const params = sgrParams(body);
+		if (params.length === 1 && params[0] === "49") return prefix;
+		if (params.includes("0") || params.includes("49")) return match + prefix;
+		return match;
+	});
+}
+
+/**
  * Every escape sequence, as pi's `stripAnsi` matches them.
  *
  * A pinned copy of pi's regex (`utils/ansi.js`, derived from `ansi-regex`,

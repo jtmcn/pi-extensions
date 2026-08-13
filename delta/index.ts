@@ -35,6 +35,7 @@ import {
 	type ExtensionContext,
 	keyHint,
 	renderDiff,
+	type Theme,
 	truncateToVisualLines,
 } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
@@ -53,6 +54,27 @@ import { loadShellSettings, shellSettingsKey } from "./shell.ts";
 interface RenderTheme {
 	fg(color: string, text: string): string;
 	bold(text: string): string;
+}
+
+/**
+ * A marker used only to split `theme.bg`'s output into its prefix and suffix.
+ * A different Unicode Private Use Area code point than `FILL_SENTINEL` so the
+ * two can never be confused mid-flight; it never reaches rendered output
+ * because it is consumed by `.split()` in the same expression it is produced.
+ */
+const BG_PREFIX_MARKER = "\uE001";
+
+/**
+ * The ANSI prefix pi's own `Box.applyBg` puts at the start of a tool row —
+ * `theme.bg(key, text)` is `${prefix}${text}\x1b[49m`, so running a marker
+ * through it and splitting that back out gives the prefix without hardcoding
+ * colour codes that change per theme. `key` is chosen the same way
+ * `ToolExecutionComponent.updateDisplay` chooses `bgFn`: pending while the
+ * result is partial, error once it has failed, success otherwise.
+ */
+function boxBackgroundPrefix(theme: Theme, key: "toolPendingBg" | "toolSuccessBg" | "toolErrorBg"): string {
+	const [prefix] = theme.bg(key, BG_PREFIX_MARKER).split(BG_PREFIX_MARKER);
+	return prefix ?? "";
 }
 
 export default function deltaExtension(pi: ExtensionAPI): void {
@@ -240,6 +262,14 @@ export default function deltaExtension(pi: ExtensionAPI): void {
 			body,
 			warnings: bashWarnings(details),
 			expanded: options.expanded,
+			// bash's Box wraps content + padding in one background span (see
+			// restoreBackground's doc comment in delta/ansi.ts); this row's key
+			// mirrors pi's own bgFn selection so the restored prefix matches
+			// exactly what Box.applyBg would have painted at the row's start.
+			// The error branch is unreachable today (isError returns above,
+			// before this component is ever built) but mirrored for fidelity in
+			// case that guard ever moves.
+			bgPrefix: boxBackgroundPrefix(theme, options.isPartial ? "toolPendingBg" : context.isError ? "toolErrorBg" : "toolSuccessBg"),
 			timing:
 				state.startedAt === undefined
 					? undefined

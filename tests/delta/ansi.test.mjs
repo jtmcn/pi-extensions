@@ -9,7 +9,7 @@
 import { assertions, loadExt, piEntry, piTuiEntry } from "../harness.mjs";
 
 const { ok, done } = assertions();
-const { sanitize, fill, FILL_SENTINEL, plain } = await loadExt("delta/ansi.ts");
+const { sanitize, fill, FILL_SENTINEL, plain, restoreBackground } = await loadExt("delta/ansi.ts");
 const { visibleWidth } = await import(`file://${await piTuiEntry()}`);
 
 // ---- sanitize(): erase-in-line becomes a sentinel, not nothing
@@ -204,6 +204,98 @@ for (const sample of [
 		"output with stray U+E000 equals the same line without it: glyph is gone, not expanded into misplaced padding",
 		filledWith === filledWithout,
 		JSON.stringify({ with: filledWith, without: filledWithout }),
+	);
+}
+
+// ---- restoreBackground(): re-establish pi's box background after every SGR
+// reset in delta's own content, so a reset mid-line cannot cancel the single
+// background span `Box.applyBg` wraps the whole row (content + padding) in.
+// See the function's doc comment in delta/ansi.ts for the full mechanism.
+
+const PREFIX = "\x1b[48;2;40;50;40m"; // stand-in for pi's toolSuccessBg prefix
+
+ok(
+	"a no-op when the prefix is empty (the edit row, which has no Box)",
+	restoreBackground("alpha\x1b[0mbeta", "") === "alpha\x1b[0mbeta",
+);
+
+ok(
+	"text with no resets is left untouched",
+	restoreBackground("\x1b[38;2;10;20;30mplain\x1b[39m", PREFIX) === "\x1b[38;2;10;20;30mplain\x1b[39m",
+	restoreBackground("\x1b[38;2;10;20;30mplain\x1b[39m", PREFIX),
+);
+
+ok(
+	"ESC[0m: the reset is kept, and the prefix is appended right after it",
+	restoreBackground("alpha\x1b[0mbeta", PREFIX) === `alpha\x1b[0m${PREFIX}beta`,
+	restoreBackground("alpha\x1b[0mbeta", PREFIX),
+);
+
+ok(
+	"bare ESC[m (implicit full reset) is treated the same as ESC[0m",
+	restoreBackground("alpha\x1b[mbeta", PREFIX) === `alpha\x1b[m${PREFIX}beta`,
+	restoreBackground("alpha\x1b[mbeta", PREFIX),
+);
+
+ok(
+	"ESC[49m in isolation is replaced outright by the prefix: it served no other purpose",
+	restoreBackground("alpha\x1b[49mbeta", PREFIX) === `alpha${PREFIX}beta`,
+	restoreBackground("alpha\x1b[49mbeta", PREFIX),
+);
+
+ok(
+	"composite ESC[0;1m (reset plus bold) keeps every code, prefix appended after",
+	restoreBackground("alpha\x1b[0;1mbeta", PREFIX) === `alpha\x1b[0;1m${PREFIX}beta`,
+	restoreBackground("alpha\x1b[0;1mbeta", PREFIX),
+);
+
+ok(
+	"composite ESC[39;49m (fg default + bg default) keeps every code, prefix appended after",
+	restoreBackground("alpha\x1b[39;49mbeta", PREFIX) === `alpha\x1b[39;49m${PREFIX}beta`,
+	restoreBackground("alpha\x1b[39;49mbeta", PREFIX),
+);
+
+ok(
+	"a 24-bit colour whose RGB component is literally 0 or 49 is not mistaken for a reset",
+	restoreBackground("\x1b[38;2;10;49;0mtext\x1b[0m", PREFIX) === `\x1b[38;2;10;49;0mtext\x1b[0m${PREFIX}`,
+	restoreBackground("\x1b[38;2;10;49;0mtext\x1b[0m", PREFIX),
+);
+
+ok(
+	"a combined 24-bit bg+fg sequence (delta's real shape) is not mistaken for a reset",
+	restoreBackground("\x1b[48;2;40;59;77;38;2;248;248;242mtext\x1b[0m", PREFIX) ===
+		`\x1b[48;2;40;59;77;38;2;248;248;242mtext\x1b[0m${PREFIX}`,
+	restoreBackground("\x1b[48;2;40;59;77;38;2;248;248;242mtext\x1b[0m", PREFIX),
+);
+
+ok(
+	"256-colour bg/fg introducers (38/48;5;n) are not mistaken for a reset",
+	restoreBackground("\x1b[48;5;196mtext\x1b[0m", PREFIX) === `\x1b[48;5;196mtext\x1b[0m${PREFIX}`,
+	restoreBackground("\x1b[48;5;196mtext\x1b[0m", PREFIX),
+);
+
+ok(
+	"multiple resets on one line each get the prefix restored",
+	restoreBackground("a\x1b[0mb\x1b[49mc\x1b[0md", PREFIX) === `a\x1b[0m${PREFIX}b${PREFIX}c\x1b[0m${PREFIX}d`,
+	restoreBackground("a\x1b[0mb\x1b[49mc\x1b[0md", PREFIX),
+);
+
+{
+	// The real delta line from the fill() tests above, run through
+	// restoreBackground with pi's real prefix marker split out. Confirms the
+	// exact interaction described in the doc comment: this runs before fill(),
+	// so the (still-unexpanded) FILL_SENTINEL sits between delta's own
+	// background and the restored prefix that follows delta's trailing reset.
+	const restored = restoreBackground(sanitize(REAL_DELTA_LINE), PREFIX);
+	ok(
+		"the sentinel survives restoreBackground untouched, ready for fill()",
+		restored.includes(FILL_SENTINEL),
+		JSON.stringify(restored),
+	);
+	ok(
+		"the trailing reset that would otherwise cancel the box background is followed by the prefix",
+		restored.endsWith(`\x1b[0m${PREFIX}`),
+		JSON.stringify(restored),
 	);
 }
 

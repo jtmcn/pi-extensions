@@ -179,6 +179,38 @@ const build = ({ ready, ...overrides } = {}) => {
 	);
 }
 
+// ---- bgPrefix: restoreBackground runs on the engine's answer before fill()
+//
+// See delta/ansi.ts's `restoreBackground` doc comment and
+// tests/delta/background-bleed.test.mjs for the full mechanism and the
+// real-`ToolExecutionComponent` invariant this only has to wire correctly for.
+
+{
+	const PREFIX = "<BOXBG>";
+	const { component } = build({ ready: `alpha\x1b[0mbeta`, fill: noopFill });
+	component.update({ body: "diff", warnings: [], expanded: true, bgPrefix: PREFIX });
+	const lines = component.render(80);
+	ok(
+		"the reset in the engine's answer is followed by bgPrefix",
+		lines.some((l) => l.includes(`alpha\x1b[0m${PREFIX}beta`)),
+		JSON.stringify(lines),
+	);
+}
+
+{
+	// No bgPrefix supplied (the field an older caller might omit, or the edit
+	// row's empty prefix): restoreBackground is a no-op, exactly as if it were
+	// never called.
+	const { component } = build({ ready: `alpha\x1b[0mbeta`, fill: noopFill });
+	component.update({ body: "diff", warnings: [], expanded: true, bgPrefix: "" });
+	const lines = component.render(80);
+	ok(
+		"an empty bgPrefix leaves the engine's answer untouched",
+		lines.some((l) => l === `alpha\x1b[0mbeta`),
+		JSON.stringify(lines),
+	);
+}
+
 // ---- the pinned copies
 
 ok("formatDuration matches pi's format", formatDuration(1234) === "1.2s" && formatDuration(500) === "0.5s");
