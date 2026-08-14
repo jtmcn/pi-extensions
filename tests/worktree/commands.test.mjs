@@ -865,6 +865,85 @@ const userEntry = (content) => ({ type: "message", message: { role: "user", cont
 	t.commands.setKnownBranches({ local: [], remote: [], remotes: [] });
 	ok("completions: cleared cache offers nothing", t.commands.getArgumentCompletions("checkout ") === null);
 }
+
+// ==================================================== completions: from the model's shape
+
+{
+	// No repo or model needed: `setKnown` drives the cache directly, same as the
+	// `setKnownBranches` block above.
+	const h = await setup();
+	h.commands.setKnown([
+		{ name: "alpha", path: "/wt/alpha", branch: "jimothy/alpha", managed: true, status: "provisioned" },
+		{ name: "chosen", path: "/hand/dup", branch: "feature-y", managed: true, status: "not provisioned" },
+		{ name: "made", path: "/hand/made", branch: "feature-x", managed: false },
+	]);
+	const focus = h.commands.getArgumentCompletions("focus ") ?? [];
+	const values = focus.map((item) => item.value);
+	ok("offers registry names", values.includes("focus alpha") && values.includes("focus chosen"), JSON.stringify(values));
+	ok("offers unmanaged worktrees too", values.includes("focus made"), JSON.stringify(values));
+	ok("offers 'off' for focus", values.includes("focus off"), JSON.stringify(values));
+	const filtered = h.commands.getArgumentCompletions("focus al") ?? [];
+	ok("filters by prefix", filtered.length > 0 && filtered.every((item) => /al/.test(item.value)), JSON.stringify(filtered));
+	ok("returns null when nothing matches", h.commands.getArgumentCompletions("focus zzz") === null);
+}
+
+// ==================================================== refreshCached: lock-free
+
+{
+	// The whole point of `refreshCached` is that it costs no registry lock and no
+	// rewrite. A spy on `list()` (the reconciling call `refresh`/`refreshKnown`
+	// use) proves it: this would fail if `refreshCached` were implemented over
+	// `list()` instead of `snapshot()`.
+	const { dir } = await makeRepo();
+	const model = await openModel(execRunner(), dir);
+	let listed = 0;
+	const spyModel = {
+		...model,
+		registry: {
+			...model.registry,
+			list: async (...args) => {
+				listed++;
+				return model.registry.list(...args);
+			},
+			snapshot: (...args) => model.registry.snapshot(...args),
+		},
+	};
+	const commands = createCommands({
+		runner: execRunner(),
+		ui: { say: () => {}, report: () => {}, clearReport: () => {}, clearAll: () => {}, setStatus: () => {} },
+		getModel: () => spyModel,
+		getConfig: () => DEFAULT_CONFIG,
+		getConfigSources: () => [],
+		getFocus: () => undefined,
+		setFocus: () => {},
+	});
+
+	await commands.refreshCached();
+	ok("seeding the completion cache does not reconcile", listed === 0);
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+// ==================================================== refreshKnown: sees unmanaged worktrees
+
+{
+	// The reconciling read is the whole reason `refreshKnown` exists separately
+	// from `refreshCached`: `snapshot()` has no unmanaged half at all, so a
+	// worktree the model-facing tool just created through raw git would be
+	// invisible to completions until the next `/worktree` command, unless the
+	// tool calls this one instead.
+	const { dir, paths } = await makeRepo();
+	const h = await setup({ dir });
+
+	const seen = await h.commands.refreshKnown();
+	ok(
+		"refreshKnown sees the unmanaged worktree",
+		seen.some((wt) => wt.path === paths.exp && !wt.managed),
+		JSON.stringify(seen),
+	);
+
+	await rm(dir, { recursive: true, force: true });
+}
 done();
 
 function basename(p) {

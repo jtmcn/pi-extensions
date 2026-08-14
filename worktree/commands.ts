@@ -76,6 +76,18 @@ export interface Commands {
 	getArgumentCompletions: (prefix: string) => { value: string; label: string }[] | null;
 	/** Seed the name cache used by completions. */
 	setKnown: (worktrees: KnownWorktree[]) => void;
+	/**
+	 * Seed the completion cache from the lock-free snapshot. For `session_start`
+	 * and anything else that must not take the registry lock.
+	 */
+	refreshCached: () => Promise<KnownWorktree[]>;
+	/**
+	 * Seed the completion cache from the reconciling read. For a caller — the
+	 * model-facing tool, after a create — that just changed what git reports and
+	 * needs the cache to see it, including an unmanaged worktree `refreshCached`
+	 * cannot.
+	 */
+	refreshKnown: () => Promise<KnownWorktree[]>;
 	/** Seed the branch cache used by `checkout` completions. */
 	setKnownBranches: (branches: BranchList) => void;
 }
@@ -121,6 +133,28 @@ export function createCommands(deps: CommandDeps): Commands {
 			worktrees.unshift(await mainWorktree(model));
 		}
 		known = worktrees;
+		return known;
+	};
+
+	/**
+	 * Seed the completion cache without reconciling.
+	 *
+	 * `list()` takes the registry lock and rewrites `registry.json` on every call,
+	 * which is right for a command that must be exact and wrong for a cache that
+	 * refills on every keystroke. `snapshot()` costs neither: it may name a
+	 * worktree git has since dropped, but offering it as a completion costs only a
+	 * failed command with a clear message, and the next reconciling call (the
+	 * first `showList`, `focus` or `remove`) corrects the cache.
+	 *
+	 * What it cannot offer: unmanaged worktrees, which only `list()` discovers by
+	 * asking git, and (for the same reason) the repository's main working tree
+	 * that `refresh()` puts back — both trades accepted for a lock-free keystroke.
+	 */
+	const refreshCached = async (): Promise<KnownWorktree[]> => {
+		const model = getModel();
+		if (!model) return [];
+		const snapshot = await model.registry.snapshot();
+		known = toKnown({ managed: snapshot.managed, unmanaged: [] }, model.deps);
 		return known;
 	};
 
@@ -546,6 +580,8 @@ export function createCommands(deps: CommandDeps): Commands {
 		setKnown: (worktrees) => {
 			known = worktrees;
 		},
+		refreshCached,
+		refreshKnown: refresh,
 		setKnownBranches: (branches) => {
 			knownBranches = branches;
 		},

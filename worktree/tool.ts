@@ -14,10 +14,11 @@
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { listWorktrees, type RepoInfo, slugify, type Worktree } from "../lib/git.ts";
+import { listWorktrees, type RepoInfo, slugify } from "../lib/git.ts";
 import { type BranchList, listBranches } from "./branches.ts";
 import type { WorktreeConfig } from "./config.ts";
 import type { FocusTarget } from "./focus.ts";
+import type { KnownWorktree } from "./known.ts";
 import { type CommandRunner, createWorktree } from "./worktrees.ts";
 
 export interface ToolDeps {
@@ -27,14 +28,19 @@ export interface ToolDeps {
 	/** The live session context, or undefined outside a session. */
 	getSessionCtx: () => ExtensionContext | undefined;
 	setFocus: (ctx: ExtensionContext, target: FocusTarget | undefined, announce?: boolean) => void;
-	/** Keep the slash command's completion cache in step after a create. */
-	setKnown: (worktrees: Worktree[]) => void;
+	/**
+	 * Keep the slash command's completion cache in step after a create. The
+	 * reconciling read, not the lock-free one: what this tool just created is
+	 * unmanaged until phase 4 moves this create onto the model's write paths, and
+	 * a snapshot cannot see an unmanaged worktree at all.
+	 */
+	refreshKnown: () => Promise<KnownWorktree[]>;
 	/** Same, for the branch cache `checkout` completes from. */
 	setKnownBranches: (branches: BranchList) => void;
 }
 
 export function createWorktreeTool(deps: ToolDeps) {
-	const { runner, getRepo, getConfig, getSessionCtx, setFocus, setKnown, setKnownBranches } = deps;
+	const { runner, getRepo, getConfig, getSessionCtx, setFocus, refreshKnown, setKnownBranches } = deps;
 
 	return {
 		name: "worktree",
@@ -90,10 +96,10 @@ export function createWorktreeTool(deps: ToolDeps) {
 					sourceWorktree: repo.worktreeRoot,
 					signal,
 				});
-				// Completion caches only. The worktree exists either way, so a git call
-				// failing here must not turn a successful create into an error.
+				// Completion caches only. The worktree exists either way, so a failure
+				// here must not turn a successful create into an error.
 				try {
-					setKnown((await listWorktrees(runner, repo.projectRoot)).filter((wt) => !wt.bare));
+					await refreshKnown();
 					setKnownBranches(await listBranches(runner, repo.projectRoot));
 				} catch {}
 

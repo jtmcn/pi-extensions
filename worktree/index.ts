@@ -183,9 +183,14 @@ export default function (pi: ExtensionAPI) {
 		if (!active) return;
 		for (const warning of loaded.warnings) say(ctx, warning, "warning");
 
-		// Only branches are seeded here: the worktree cache holds the model's shape
-		// now, and it is refilled by the first /worktree command that lists.
+		// The worktree cache seeds from the lock-free snapshot, not the reconciling
+		// `list()`: a fresh session has no completion to offer yet, and paying the
+		// registry lock for it here would cost every session start what only a
+		// keystroke needs to be cheap. A failure here (like a branch listing
+		// failure) is tolerated, never fatal: the cache is refilled opportunistically
+		// by the first /worktree command that lists.
 		try {
+			await commands.refreshCached();
 			commands.setKnownBranches(await listBranches(pi, repo.projectRoot));
 		} catch {
 			commands.setKnownBranches(EMPTY_BRANCHES);
@@ -366,11 +371,11 @@ export default function (pi: ExtensionAPI) {
 			getConfig: () => session?.config ?? DEFAULT_CONFIG,
 			getSessionCtx: () => session?.ctx,
 			setFocus,
-			// The tool still seeds from a raw git listing, which is no longer the
-			// shape the completion cache holds. Invalidating it is the honest
-			// stopgap — the next /worktree command refills it from the model —
-			// rather than fabricating registry names from git.
-			setKnown: () => commands.setKnown([]),
+			// A create through the tool bypasses the model's write paths (phase 4),
+			// so what it just made is unmanaged until then — snapshot() cannot see
+			// an unmanaged worktree at all, so the reconciling read is the one that
+			// must run here, not refreshCached's lock-free one.
+			refreshKnown: commands.refreshKnown,
 			setKnownBranches: commands.setKnownBranches,
 		}),
 	);
