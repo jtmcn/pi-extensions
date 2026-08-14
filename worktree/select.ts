@@ -66,6 +66,14 @@ export type Match =
  * The name is the registry's, not the directory's: an adopted worktree can be
  * named something other than its folder, and the name is what every other
  * command prints.
+ *
+ * An exact name or branch can be claimed by more than one entry — the
+ * repository's main working tree is unmanaged and keeps its directory name, so
+ * a jimothy-managed worktree adopted or created under that same name collides
+ * with it. The managed one wins: the registry's name is what every other
+ * command prints, and this is what makes such a worktree reachable by name at
+ * all — it never was before the registry, because git always listed the main
+ * working tree first and the collision predates this matcher.
  */
 export function matchWorktree(
 	worktrees: KnownWorktree[],
@@ -77,7 +85,9 @@ export function matchWorktree(
 
 	const exact =
 		worktrees.find((wt) => wt.path === needle) ??
+		worktrees.find((wt) => wt.managed && wt.name === needle) ??
 		worktrees.find((wt) => wt.name === needle) ??
+		worktrees.find((wt) => wt.managed && wt.branch === needle) ??
 		worktrees.find((wt) => wt.branch === needle);
 	if (exact) return { kind: "one", worktree: exact };
 	if (options?.exactOnly) return { kind: "none" };

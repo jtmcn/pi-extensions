@@ -483,6 +483,41 @@ async function setup({
 	await rm(dir, { recursive: true, force: true });
 }
 
+// ================================= list: bare-repository layout
+
+{
+	// proj/.bare + proj/main + siblings: the same layout the AGENTS.md invariant
+	// names as the one exception where `mainWorktree` is not the repository's
+	// invoking directory. `openModel`'s cwd is `proj/main`, and the assertion is
+	// the same one the plain-repo listing test above makes: the main working
+	// tree is still listed, unmanaged, under this layout too.
+	const root = await realpath(await mkdtemp(join(tmpdir(), "pi-commands-bare-")));
+	const seed = join(root, "seed");
+	await pexec("git", ["init", "-q", "-b", "main", seed]);
+	await pexec("git", ["config", "user.email", "test@example.com"], { cwd: seed });
+	await pexec("git", ["config", "user.name", "Test"], { cwd: seed });
+	await writeFile(join(seed, "file.txt"), "hi\n");
+	await pexec("git", ["add", "."], { cwd: seed });
+	await pexec("git", ["commit", "-q", "-m", "init"], { cwd: seed });
+
+	const proj = join(root, "proj");
+	await pexec("git", ["clone", "-q", "--bare", seed, join(proj, ".bare")]);
+	await writeFile(join(proj, ".git"), "gitdir: ./.bare\n");
+	await pexec("git", ["worktree", "add", "-q", join(proj, "main"), "main"], { cwd: proj });
+
+	const info = await getRepoInfo(execRunner(), join(proj, "main"));
+	const h = await setup({ dir: join(proj, "main") });
+	await h.commands.dispatch(info, h.ctx, "list");
+	const block = h.reported[0]?.lines ?? [];
+	const main = block.find((line) => line.startsWith("main "));
+	ok("bare layout: main working tree is listed", main !== undefined, JSON.stringify(block));
+	ok("bare layout: labelled unmanaged", /unmanaged/.test(String(main)), String(main));
+	ok("bare layout: with its checked-out branch", /\(main\)/.test(String(main)), String(main));
+	ok("bare layout: marked as the session's", /session/.test(String(main)), String(main));
+
+	await rm(root, { recursive: true, force: true });
+}
+
 // ============================================ dispatch
 
 {
