@@ -30,6 +30,7 @@ extensions/
 │   ├── detect.ts
 │   ├── engine.ts
 │   ├── footer.ts
+│   ├── render-rules.ts
 │   ├── run.ts
 │   ├── shell.ts
 │   └── README.md

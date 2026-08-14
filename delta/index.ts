@@ -39,14 +39,23 @@ import {
 	truncateToVisualLines,
 } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { fill, plain } from "./ansi.ts";
+import { fill } from "./ansi.ts";
 import { createBashResult } from "./bash-result.ts";
 import { createDiffBody } from "./body.ts";
 import { createCache } from "./cache.ts";
 import { configVersion, DEFAULT_CONFIG, type DeltaConfig, loadConfig } from "./config.ts";
-import { compilePatterns, isDiffCommand } from "./detect.ts";
+import { compilePatterns } from "./detect.ts";
 import { createEngine } from "./engine.ts";
 import { bashWarnings, splitBashFooter } from "./footer.ts";
+import {
+	backgroundKey,
+	bashCommand,
+	displayPath,
+	isOurComponent,
+	resultText,
+	timing,
+	usesDelta,
+} from "./render-rules.ts";
 import { createRunner } from "./run.ts";
 import { loadShellSettings, shellSettingsKey } from "./shell.ts";
 
@@ -69,8 +78,8 @@ const BG_PREFIX_MARKER = "\uE001";
  * `theme.bg(key, text)` is `${prefix}${text}\x1b[49m`, so running a marker
  * through it and splitting that back out gives the prefix without hardcoding
  * colour codes that change per theme. `key` is chosen the same way
- * `ToolExecutionComponent.updateDisplay` chooses `bgFn`: pending while the
- * result is partial, error once it has failed, success otherwise.
+ * `ToolExecutionComponent.updateDisplay` chooses `bgFn` — see `backgroundKey` in
+ * `render-rules.ts`.
  */
 function boxBackgroundPrefix(theme: Theme, key: "toolPendingBg" | "toolSuccessBg" | "toolErrorBg"): string {
 	const [prefix] = theme.bg(key, BG_PREFIX_MARKER).split(BG_PREFIX_MARKER);
@@ -209,21 +218,12 @@ export default function deltaExtension(pi: ExtensionAPI): void {
 	const bashExecute: BashSlots["execute"] = (toolCallId, params, signal, onUpdate, ctx) =>
 		bashFor(ctx).then((tool) => tool.execute(toolCallId, params, signal, onUpdate, ctx));
 	const bashRenderResult: NonNullable<BashSlots["renderResult"]> = (result, options, theme, context) => {
-		const command = String((context.args as { command?: unknown } | undefined)?.command ?? "");
-		// pi's bash `execute` calls `onUpdate` immediately, so a diff command's
-		// partial result is rendered — by us — before an error can arrive, and
-		// `lastComponent` is then ours. pi's built-in does
-		// `context.lastComponent ?? new BashResultRenderComponent()` and then
-		// `component.clear()`, so handing it our component throws a TypeError
-		// inside pi's renderer; pi catches that and dumps the whole untruncated
-		// output with no preview, hint, warning, or timing.
-		// `git diff --exit-code`, `git diff --quiet`, `git show <bad-ref>` and
-		// `git diff` outside a repo all take this path.
+		// `lastComponent` can be ours even when this result has to go to pi's own
+		// renderer, and handing pi our component crashes it — see `isOurComponent`.
 		const previous = context.lastComponent as ReturnType<typeof createBashResult> | undefined;
-		const ours = typeof (previous as { update?: unknown } | undefined)?.update === "function";
+		const ours = isOurComponent(previous);
 
-		// Errors keep pi's rendering: the text is a message, not a diff.
-		if (context.isError || !isDiffCommand(command, patterns)) {
+		if (!usesDelta({ command: bashCommand(context.args), isError: context.isError, patterns })) {
 			return bash.renderResult!(result, options, theme, ours ? { ...context, lastComponent: undefined } : context);
 		}
 
@@ -231,17 +231,7 @@ export default function deltaExtension(pi: ExtensionAPI): void {
 		if (!options.isPartial) state.endedAt ??= Date.now();
 
 		const details = result.details as Parameters<typeof bashWarnings>[0];
-		// `plain` matches pi's `getTextOutput`, which strips ANSI and carriage
-		// returns before styling. Without it, `git -c color.ui=always diff` feeds
-		// its own escapes to delta and to the fallback styler, and a CRLF repo puts
-		// raw `\r` into pi's frame.
-		const text = plain(
-			result.content
-				.filter((part): part is { type: "text"; text: string } => part.type === "text")
-				.map((part) => part.text ?? "")
-				.join("\n"),
-		).trim();
-		const { body } = splitBashFooter(text, details);
+		const { body } = splitBashFooter(resultText(result.content), details);
 
 		const component =
 			(ours ? previous : undefined) ??
@@ -274,14 +264,13 @@ export default function deltaExtension(pi: ExtensionAPI): void {
 			// The error branch is unreachable today (isError returns above,
 			// before this component is ever built) but mirrored for fidelity in
 			// case that guard ever moves.
-			bgPrefix: boxBackgroundPrefix(theme, options.isPartial ? "toolPendingBg" : context.isError ? "toolErrorBg" : "toolSuccessBg"),
-			timing:
-				state.startedAt === undefined
-					? undefined
-					: {
-							label: options.isPartial ? "Elapsed" : "Took",
-							ms: (state.endedAt ?? Date.now()) - state.startedAt,
-						},
+			bgPrefix: boxBackgroundPrefix(theme, backgroundKey({ isPartial: options.isPartial, isError: context.isError })),
+			timing: timing({
+				startedAt: state.startedAt,
+				endedAt: state.endedAt,
+				isPartial: options.isPartial,
+				now: Date.now(),
+			}),
 		});
 		return component;
 	};
@@ -313,11 +302,8 @@ export default function deltaExtension(pi: ExtensionAPI): void {
 		editFor(ctx).execute(toolCallId, params, signal, onUpdate, ctx);
 
 	/** `edit <path>`, in pi's colours. */
-	const header = (args: Record<string, unknown> | undefined, theme: RenderTheme, cwd: string): string => {
-		const raw = String(args?.path ?? args?.file_path ?? "");
-		const display = raw.startsWith(`${cwd}/`) ? raw.slice(cwd.length + 1) : raw || "...";
-		return `${theme.fg("toolTitle", theme.bold("edit"))} ${theme.fg("accent", display)}`;
-	};
+	const header = (args: Record<string, unknown> | undefined, theme: RenderTheme, cwd: string): string =>
+		`${theme.fg("toolTitle", theme.bold("edit"))} ${theme.fg("accent", displayPath(args, cwd))}`;
 
 	interface EditComponent {
 		render(width: number): string[];
@@ -374,10 +360,7 @@ export default function deltaExtension(pi: ExtensionAPI): void {
 		component.head = header(context.args as Record<string, unknown>, theme, context.cwd);
 		component.settled = true;
 		if (context.isError) {
-			component.error = result.content
-				.filter((part): part is { type: "text"; text: string } => part.type === "text")
-				.map((part) => part.text ?? "")
-				.join("\n");
+			component.error = resultText(result.content);
 			component.body.set(undefined, undefined);
 		} else {
 			const details = result.details as { diff?: string; patch?: string } | undefined;

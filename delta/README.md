@@ -99,6 +99,15 @@ Two consequences worth knowing:
   reproducing it would be a fork that breaks on upgrades. You see `edit <path>`
   while the edit is in flight and the delta diff once it lands.
 
+`index.ts` wires the two tools up and owns component lifecycle — reusing a
+component across frames, sharing one between `edit`'s call and result slots
+through `context.state`, and returning the empty component that stops a row
+painting twice. None of that is expressible without pi's render context. The
+decisions those slots make are in `render-rules.ts` instead, which needs no pi
+objects and is unit-tested directly: which renderer a result goes to, what text
+to pull out of it, which background pi would have painted, what the timing line
+says, and how a path is displayed.
+
 Delta runs asynchronously, so a diff appears in pi's own styling for one frame
 before delta's rendering replaces it. Results are cached per diff, width, and
 config; a resize re-renders at the new width.
