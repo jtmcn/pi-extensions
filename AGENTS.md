@@ -48,9 +48,16 @@ The dependency is currently pinned at a jimothy **worktree**,
 `/Users/joel/.jimothy/worktrees/jimothy/worktree-more-worktree`, not the main
 checkout: the phase-1 work that publishes `jimothy/worktrees` is still an
 unmerged PR, and the main checkout has no `dist/worktrees.js` until it lands.
-This pin must be repointed at `/Users/joel/Code/jimothy` once that PR merges —
-until then, removing that worktree breaks every pi session that loads this
-extension.
+This pin must be repointed at `/Users/joel/Code/jimothy` once that PR merges,
+which also requires re-running `npm install` here: that is what rewrites both
+`package-lock.json` and the `node_modules/jimothy` symlink to the new target,
+editing `package.json` alone leaves both pointed at the old worktree.
+
+Until the repoint happens, removing that worktree breaks every pi session that
+loads this extension, and not just its worktree features: the import is at
+module scope, so a missing target fails the whole module to load, taking
+`/worktree`, focus, the PR monitor and the status segment down with it, not
+only listing.
 
 Two further preconditions, both of which fail confusingly when unmet:
 

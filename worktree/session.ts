@@ -48,9 +48,13 @@ export interface SessionOptions {
 	/**
 	 * jimothy's worktree model, or undefined when it could not be opened.
 	 *
-	 * Per-session rather than per-process because its deps carry the session's
-	 * lifetime: a replaced session must not inherit the old one's. Stated
-	 * explicitly, like `repo`, so a missed wiring cannot hide behind a default.
+	 * Per-session rather than per-process because the repository it is opened
+	 * over is: a replaced session can be standing in a different repository, or
+	 * the same one with different config, and must not inherit the old one's
+	 * model. Giving its deps the session's `AbortSignal`, so a child cannot
+	 * outlive the session that started it, is phase 3's wiring — not this one's.
+	 * Stated explicitly, like `repo`, so a missed wiring cannot hide behind a
+	 * default.
 	 */
 	model: Model | undefined;
 	config?: WorktreeConfig;

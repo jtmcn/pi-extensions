@@ -186,9 +186,14 @@ export default function (pi: ExtensionAPI) {
 		// The worktree cache seeds from the lock-free snapshot, not the reconciling
 		// `list()`: a fresh session has no completion to offer yet, and paying the
 		// registry lock for it here would cost every session start what only a
-		// keystroke needs to be cheap. A failure here (like a branch listing
-		// failure) is tolerated, never fatal: the cache is refilled opportunistically
-		// by the first /worktree command that lists.
+		// keystroke needs to be cheap. The snapshot has no unmanaged half, so until
+		// the cache is refilled this is managed-only: in a repository with nothing
+		// jimothy manages, `focus <tab>` offers only `off` and `remove <tab>` offers
+		// nothing. That is a deliberate trade, not an oversight — the reconciling
+		// read would take the registry's lock, run git and write `registry.json`
+		// into every repository a session merely opens. A failure here (like a
+		// branch listing failure) is tolerated, never fatal: the cache is refilled
+		// opportunistically by the first `/worktree` command that lists.
 		try {
 			await commands.refreshCached();
 			commands.setKnownBranches(await listBranches(pi, repo.projectRoot));
@@ -355,8 +360,9 @@ export default function (pi: ExtensionAPI) {
 			try {
 				await commands.dispatch(info, ctx, args);
 			} catch (error) {
-				// listWorktrees and friends throw GitError; an unhandled rejection here
-				// would surface as a crash rather than a message.
+				// The registry's reconciling list() and the git calls dispatch makes for
+				// checkout, create and remove all throw; an unhandled rejection here would
+				// surface as a crash rather than a message.
 				say(ctx, (error as Error).message, "error");
 			}
 		},

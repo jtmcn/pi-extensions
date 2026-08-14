@@ -34,11 +34,13 @@ export interface KnownWorktree {
  * Flatten a listing, managed first.
  *
  * Order is deliberate rather than incidental: the managed worktrees are the
- * ones this tool is for, so they are listed first in `/worktree list`. A name
- * or branch claimed by more than one entry is not settled by this order,
- * though — that is `matchWorktree`'s job (see `select.ts`), which prefers a
- * managed worktree over an unmanaged one so list order can stay purely about
- * display.
+ * ones this tool is for, so they are listed first here. `/worktree list`
+ * itself shows the repository's main working tree ahead of this order still —
+ * `commands.ts` unshifts it onto the front once this list is built, since
+ * `Registry.list()` leaves it out on purpose. A name or branch claimed by more
+ * than one entry is not settled by this order, though — that is
+ * `matchWorktree`'s job (see `select.ts`), which prefers a managed worktree
+ * over an unmanaged one so list order can stay purely about display.
  *
  * `deps` supplies the clock and the pid probe `describeStatus` needs. Reading
  * the clock once here means two worktrees leased at the same moment cannot

@@ -47,13 +47,31 @@ already resolved, but a hand-written `/var` vs `/private/var` will not match.
 /worktree config          show effective configuration and where it came from
 ```
 
-Which worktrees exist is answered by jimothy's registry, not by a raw `git
-worktree list`: one jimothy created or adopted is shown under the name the
-registry gave it, with its status (held, provisioned, or not), and anything else
-is listed too but labelled `unmanaged` — jimothy will not provision, lease or
-remove it. The repository's main working tree is one of those: jimothy leaves it
-out of its own listing because nothing it does applies to it, and this extension
-puts it back, because it has always been listable and focusable.
+For the `/worktree` command, which worktrees exist is answered by jimothy's
+registry, not by a raw `git worktree list`: one jimothy created or adopted is
+shown under the name the registry gave it, with its status (held, provisioned,
+or not), and anything else is listed too but labelled `unmanaged` — jimothy will
+not provision, lease or remove it. The repository's main working tree is one of
+those: jimothy leaves it out of its own listing because nothing it does applies
+to it, and this extension puts it back, because it has always been listable and
+focusable. The model's `worktree` tool is different: its own `list` action still
+calls git directly and prints bare paths, with no registry name and no
+unmanaged label; porting it to the registry is a later phase.
+
+Reading the registry this way is not free of side effects: the reconciling read
+behind `/worktree list`, `focus`, `remove`, `new`, `checkout` and `prune` takes
+the registry's lock and rewrites `registry.json` at the repository's common
+dir, so the first of those commands in any repository creates that file —
+including for a user who has never run jimothy directly. Session start avoids
+that cost by seeding completions from the lock-free snapshot instead, which
+has no unmanaged half: in a repository with nothing jimothy manages, `focus
+<tab>` offers only `off` and `remove <tab>` offers nothing until the first
+`/worktree` command that lists refills the cache.
+
+The listing also shows less than the old `git worktree list`-based renderer
+did: jimothy's git entries carry no detached-HEAD short sha and no `(locked)` /
+`(prunable)` flags, so a worktree git considers prunable — one deleted by hand,
+for instance — now looks healthy in `/worktree list`.
 
 `focus` and `remove` autocomplete worktree names. A name is matched by exact
 path, name or branch first, then by unique prefix; an ambiguous prefix is
