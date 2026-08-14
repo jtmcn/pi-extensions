@@ -15,7 +15,16 @@
  */
 
 import type { ExecOptions, ExecResult } from "@earendil-works/pi-coding-agent";
-import type { Deps, RunOptions, RunResult } from "jimothy/worktrees";
+import {
+	type Deps,
+	type JimothyConfig,
+	loadConfig,
+	readRepoInfo,
+	Registry,
+	type RepoInfo,
+	type RunOptions,
+	type RunResult,
+} from "jimothy/worktrees";
 
 /** Minimal surface this file needs: something that can run a command. */
 export interface CommandRunner {
@@ -107,4 +116,34 @@ export function createDeps(runner: CommandRunner, options: DepsOptions = {}): De
 			return new Date();
 		},
 	};
+}
+
+/** Everything a registry call needs, resolved once per session. */
+export interface Model {
+	registry: Registry;
+	deps: Deps;
+	/**
+	 * jimothy's view of the repository, which is a different shape from the
+	 * extension's `RepoInfo` in `lib/git.ts` and must not be confused with it:
+	 * registry operations take this one, display keeps the extension's.
+	 */
+	info: RepoInfo;
+	config: JimothyConfig;
+}
+
+/**
+ * Open the model for a working directory.
+ *
+ * Rejects when the directory is not in a git repository, or when
+ * `jimothy.config.json` is unreadable — both of which the caller reports and
+ * neither of which is fatal to a session.
+ */
+export async function openModel(runner: CommandRunner, cwd: string, options: DepsOptions = {}): Promise<Model> {
+	const deps = createDeps(runner, options);
+	const info = await readRepoInfo(deps, cwd);
+	// The main working tree, not the invoking one: config lives at the repository
+	// root, and reading it from a linked worktree would make the layout depend on
+	// where the session happens to be.
+	const config = await loadConfig(info.mainWorktree);
+	return { registry: Registry.open(deps, info, config), deps, info, config };
 }

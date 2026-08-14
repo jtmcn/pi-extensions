@@ -5,8 +5,7 @@
  * `focus.ts` is a library rather than inline in `index.ts`.
  */
 
-import { basename } from "node:path";
-import type { Worktree } from "../lib/git.ts";
+import type { KnownWorktree } from "./known.ts";
 
 /** Split a command argument string into tokens, honouring '…' and "…". */
 export function tokenize(args: string): string[] {
@@ -54,30 +53,36 @@ export function parseNewArgs(args: string): NewArgs {
 
 export type Match =
 	| { kind: "none" }
-	| { kind: "one"; worktree: Worktree }
-	| { kind: "many"; worktrees: Worktree[] };
+	| { kind: "one"; worktree: KnownWorktree }
+	| { kind: "many"; worktrees: KnownWorktree[] };
 
 /**
  * Resolve a user-supplied worktree reference.
  *
- * Exact matches (path, directory name, branch) win outright. Prefix matches are
- * only accepted when unambiguous: `remove` is destructive, so silently picking
- * the first of several candidates is not acceptable.
+ * Exact matches (path, name, branch) win outright. Prefix matches are only
+ * accepted when unambiguous: `remove` is destructive, so silently picking the
+ * first of several candidates is not acceptable.
+ *
+ * The name is the registry's, not the directory's: an adopted worktree can be
+ * named something other than its folder, and the name is what every other
+ * command prints.
  */
-export function matchWorktree(worktrees: Worktree[], query: string, options?: { exactOnly?: boolean }): Match {
+export function matchWorktree(
+	worktrees: KnownWorktree[],
+	query: string,
+	options?: { exactOnly?: boolean },
+): Match {
 	const needle = query.trim();
 	if (!needle) return { kind: "none" };
 
 	const exact =
 		worktrees.find((wt) => wt.path === needle) ??
-		worktrees.find((wt) => basename(wt.path) === needle) ??
+		worktrees.find((wt) => wt.name === needle) ??
 		worktrees.find((wt) => wt.branch === needle);
 	if (exact) return { kind: "one", worktree: exact };
 	if (options?.exactOnly) return { kind: "none" };
 
-	const prefixed = worktrees.filter(
-		(wt) => basename(wt.path).startsWith(needle) || wt.branch?.startsWith(needle),
-	);
+	const prefixed = worktrees.filter((wt) => wt.name.startsWith(needle) || wt.branch?.startsWith(needle));
 	if (prefixed.length === 1) return { kind: "one", worktree: prefixed[0] };
 	if (prefixed.length > 1) return { kind: "many", worktrees: prefixed };
 	return { kind: "none" };

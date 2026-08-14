@@ -47,11 +47,19 @@ already resolved, but a hand-written `/var` vs `/private/var` will not match.
 /worktree config          show effective configuration and where it came from
 ```
 
+Which worktrees exist is answered by jimothy's registry, not by a raw `git
+worktree list`: one jimothy created or adopted is shown under the name the
+registry gave it, with its status (held, provisioned, or not), and anything else
+is listed too but labelled `unmanaged` — jimothy will not provision, lease or
+remove it. The repository's main working tree is one of those: jimothy leaves it
+out of its own listing because nothing it does applies to it, and this extension
+puts it back, because it has always been listable and focusable.
+
 `focus` and `remove` autocomplete worktree names. A name is matched by exact
-path, directory name or branch first, then by unique prefix; an ambiguous
-prefix is reported rather than resolved to whichever worktree git listed first.
-In non-interactive mode (`pi -p`) only exact matches are accepted, since there
-is no confirmation prompt.
+path, name or branch first, then by unique prefix; an ambiguous prefix is
+reported rather than resolved to whichever worktree git listed first. In
+non-interactive mode (`pi -p`) only exact matches are accepted, since there is
+no confirmation prompt.
 
 Names are slugified, and quoting works, so `/worktree new "My Feature!"`
 creates `my-feature`. The second token is the base ref, so an unquoted

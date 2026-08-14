@@ -34,12 +34,13 @@
 import { stat } from "node:fs/promises";
 import { basename } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { aheadBehind, countDirty, getRepoInfo, listWorktrees, type RepoInfo } from "../lib/git.ts";
+import { aheadBehind, countDirty, getRepoInfo, type RepoInfo } from "../lib/git.ts";
 import { createHerdrReporter, type HerdrReporter, herdrTarget } from "../lib/herdr.ts";
 import { EMPTY_BRANCHES, listBranches } from "./branches.ts";
 import { createCommands } from "./commands.ts";
 import { DEFAULT_CONFIG, loadConfig } from "./config.ts";
 import { applyFocus } from "./focus.ts";
+import { type Model, openModel } from "./jimothy.ts";
 import {
 	beginLocationCycle,
 	clearLocationPanel,
@@ -138,7 +139,14 @@ export default function (pi: ExtensionAPI) {
 			// needs clearing either way.
 			const noRepoReporter = makeReporter(ctx, "");
 			replaceSession(
-				createSession({ pi, ui, ctx, repo: undefined, report: (branch) => noRepoReporter?.report(branch) }),
+				createSession({
+					pi,
+					ui,
+					ctx,
+					repo: undefined,
+					model: undefined,
+					report: (branch) => noRepoReporter?.report(branch),
+				}),
 				noRepoReporter,
 			)?.paint(ctx);
 			return;
@@ -149,12 +157,23 @@ export default function (pi: ExtensionAPI) {
 			projectTrusted: ctx.isProjectTrusted(),
 		});
 		const nextReporter = makeReporter(ctx, loaded.config.branchPrefix);
+
+		let model: Model | undefined;
+		try {
+			model = await openModel(pi, ctx.cwd);
+		} catch (error) {
+			// Reported, never fatal: pi is already running, and a session that cannot
+			// reach the registry can still focus, still monitor a PR, and still paint.
+			say(ctx, `jimothy model unavailable: ${(error as Error).message}`, "warning");
+		}
+
 		const active = replaceSession(
 			createSession({
 				pi,
 				ui,
 				ctx,
 				repo,
+				model,
 				config: loaded.config,
 				configSources: loaded.sources,
 				report: (branch) => nextReporter?.report(branch),
@@ -164,11 +183,11 @@ export default function (pi: ExtensionAPI) {
 		if (!active) return;
 		for (const warning of loaded.warnings) say(ctx, warning, "warning");
 
+		// Only branches are seeded here: the worktree cache holds the model's shape
+		// now, and it is refilled by the first /worktree command that lists.
 		try {
-			commands.setKnown(await listWorktrees(pi, repo.projectRoot));
 			commands.setKnownBranches(await listBranches(pi, repo.projectRoot));
 		} catch {
-			commands.setKnown([]);
 			commands.setKnownBranches(EMPTY_BRANCHES);
 		}
 
@@ -314,6 +333,7 @@ export default function (pi: ExtensionAPI) {
 	const commands = createCommands({
 		runner: pi,
 		ui,
+		getModel: () => session?.model,
 		getConfig: () => session?.config ?? DEFAULT_CONFIG,
 		getConfigSources: () => session?.configSources ?? [],
 		getFocus: () => session?.focus,
@@ -346,7 +366,11 @@ export default function (pi: ExtensionAPI) {
 			getConfig: () => session?.config ?? DEFAULT_CONFIG,
 			getSessionCtx: () => session?.ctx,
 			setFocus,
-			setKnown: commands.setKnown,
+			// The tool still seeds from a raw git listing, which is no longer the
+			// shape the completion cache holds. Invalidating it is the honest
+			// stopgap — the next /worktree command refills it from the model —
+			// rather than fabricating registry names from git.
+			setKnown: () => commands.setKnown([]),
 			setKnownBranches: commands.setKnownBranches,
 		}),
 	);
