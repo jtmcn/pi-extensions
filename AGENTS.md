@@ -38,6 +38,36 @@ registration mechanism, and it means a scratch or template directory with an
 `index.ts` in it will be loaded too. `lib/` and `tests/` are safe because they
 have no `index.ts`.
 
+## The `worktree` extension depends on jimothy
+
+`worktree/` imports jimothy's worktree model over the `jimothy/worktrees`
+subpath, so the two tools manage the same worktrees through the same code
+instead of keeping a second implementation that agrees by coincidence.
+
+The dependency is currently pinned at a jimothy **worktree**,
+`/Users/joel/.jimothy/worktrees/jimothy/worktree-more-worktree`, not the main
+checkout: the phase-1 work that publishes `jimothy/worktrees` is still an
+unmerged PR, and the main checkout has no `dist/worktrees.js` until it lands.
+This pin must be repointed at `/Users/joel/Code/jimothy` once that PR merges —
+until then, removing that worktree breaks every pi session that loads this
+extension.
+
+Two further preconditions, both of which fail confusingly when unmet:
+
+- **jimothy's `dist/` is what is imported**, so `npm run build` in the
+  dependency's checkout is required before a model change reaches a session,
+  and `npm install` here must follow that build rather than precede it.
+- **jimothy's own `node_modules` is part of this extension's runtime.** npm
+  symlinks a `file:` dependency and never installs its dependencies, so a
+  freshly cloned or cleaned jimothy breaks every session that loads this
+  extension — with `Cannot find package 'proper-lockfile'`, which names
+  jimothy's internals rather than the missing `npm install`.
+
+Do **not** add `@earendil-works/*` to this collection's `package.json`. pi loads
+extensions through jiti with an alias table that maps those specifiers onto the
+*running* pi, and a local copy would be shadowed by that alias in some paths and
+win in others.
+
 ## Adding an extension
 
 1. `mkdir <name>` with an `index.ts` default-exporting the extension factory.
