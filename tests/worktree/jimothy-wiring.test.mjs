@@ -2,10 +2,11 @@
  * The dependency wiring itself.
  *
  * This is the one test that fails for an environmental reason rather than a
- * code one — a jimothy that was not built, or was built but never had its own
- * `npm install` run. Both produce errors that name jimothy's internals
- * (`Cannot find package 'proper-lockfile'`) rather than the missing step, so
- * this test says the missing step out loud.
+ * code one — the jimothy checkout was not built, or was built but never had
+ * its own `npm install` run, or this collection does not have `node_modules`.
+ * Those produce errors that name jimothy's internals (`Cannot find package
+ * 'proper-lockfile'`) or the missing package itself rather than the missing
+ * steps, so this test says those steps out loud.
  */
 
 import { assertions } from "../harness.mjs";
@@ -16,7 +17,7 @@ let model;
 try {
 	model = await import("jimothy/worktrees");
 } catch (error) {
-	ok(`jimothy/worktrees imports (run \`npm install && npm run build\` in ~/Code/jimothy): ${error.message}`, false);
+	ok(`jimothy/worktrees imports (run \`npm install && npm run build\` in the jimothy checkout specified in this collection's package.json, then \`npm install\` in this collection): ${error.message}`, false);
 	done();
 }
 
