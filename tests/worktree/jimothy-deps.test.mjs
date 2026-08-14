@@ -85,6 +85,21 @@ function fakeRunner(answer = () => ({ stdout: "out", stderr: "", code: 0, killed
 	ok("passes the session's signal to pi", runner.calls[0].options.signal === controller.signal);
 }
 
+// --- env, which pi's exec has no way to pass through ---------------------
+{
+	// pi's ExecOptions has no env field, so silently dropping opts.env would
+	// let a caller that depends on a custom environment run with the wrong
+	// one and fail somewhere else entirely. The adapter refuses instead.
+	const deps = createDeps(fakeRunner());
+	let threw = false;
+	try {
+		await deps.run("git", ["status"], { env: { FOO: "bar" } });
+	} catch {
+		threw = true;
+	}
+	ok("run refuses rather than dropping env", threw);
+}
+
 // --- the parts the model needs but pi does not provide -------------------
 {
 	const deps = createDeps(fakeRunner());

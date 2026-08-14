@@ -48,6 +48,15 @@ export function createDeps(runner: CommandRunner, options: DepsOptions = {}): De
 
 	return {
 		async run(command: string, args: string[], opts: RunOptions = {}): Promise<RunResult> {
+			// pi's `ExecOptions` has no way to set a child's environment — `signal`,
+			// `timeout` and `cwd` are the whole surface. Refusing beats dropping
+			// `env` silently and letting a caller that depends on it fail later,
+			// somewhere that gives no hint the environment was ever the problem.
+			if (opts.env !== undefined) {
+				throw new Error(
+					"worktree: pi's exec cannot set a child's environment; the model must not ask for one from inside pi",
+				);
+			}
 			// Clamped rather than passed through: see INSTALL_TIMEOUT_CEILING_MS.
 			const timeout = opts.timeoutMs === undefined ? undefined : Math.min(opts.timeoutMs, ceiling);
 			const result = await runner.exec(command, args, {
@@ -57,7 +66,14 @@ export function createDeps(runner: CommandRunner, options: DepsOptions = {}): De
 			});
 			// `killed` covers a timeout and an abort alike, and the model tells the
 			// user something different for each — so the distinction is made here,
-			// where the two causes are still distinguishable.
+			// where the two causes are still distinguishable. This is a snapshot at
+			// resolution time, not an ordering of the two causes: a genuine timeout
+			// whose kill is raced by a session abort that lands just before `exec`
+			// resolves is reported as an abort, not a timeout. Fixing that needs a
+			// local timer racing pi's own, which was rejected on purpose — it would
+			// reintroduce the second source of truth for child lifetime that this
+			// file exists to hand back to pi, to fix one misworded message about a
+			// run the session was cancelling anyway.
 			const timedOut = result.killed && timeout !== undefined && options.signal?.aborted !== true;
 			return {
 				code: result.code,
