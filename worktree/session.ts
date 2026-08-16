@@ -51,12 +51,18 @@ export interface SessionOptions {
 	 * Per-session rather than per-process because the repository it is opened
 	 * over is: a replaced session can be standing in a different repository, or
 	 * the same one with different config, and must not inherit the old one's
-	 * model. Giving its deps the session's `AbortSignal`, so a child cannot
-	 * outlive the session that started it, is phase 3's wiring — not this one's.
-	 * Stated explicitly, like `repo`, so a missed wiring cannot hide behind a
-	 * default.
+	 * model. Its deps carry this session's `abort` signal, so a child it starts
+	 * cannot outlive the session that started it. Stated explicitly, like `repo`,
+	 * so a missed wiring cannot hide behind a default.
 	 */
 	model: Model | undefined;
+	/**
+	 * Aborted when this session ends, and handed to the model's deps so a child
+	 * it started cannot outlive it. Owned by the session rather than created per
+	 * call: a `/reload` replaces the session, and the replacement must not be
+	 * able to cancel the outgoing one's work or inherit its cancellation.
+	 */
+	abort: AbortController;
 	config?: WorktreeConfig;
 	/** Config files that were applied, for `/worktree config`. */
 	configSources?: string[];
@@ -73,6 +79,7 @@ export interface WorktreeSession {
 	readonly ctx: ExtensionContext;
 	readonly repo: RepoInfo | undefined;
 	readonly model: Model | undefined;
+	readonly abort: AbortController;
 	readonly config: WorktreeConfig;
 	readonly configSources: string[];
 	readonly focus: FocusTarget | undefined;
@@ -88,7 +95,7 @@ export interface WorktreeSession {
 }
 
 export function createSession(options: SessionOptions): WorktreeSession {
-	const { pi, ui, ctx, repo, model } = options;
+	const { pi, ui, ctx, repo, model, abort } = options;
 	const config = options.config ?? { ...DEFAULT_CONFIG };
 	const configSources = options.configSources ?? [];
 	const report = options.report ?? (() => {});
@@ -162,6 +169,7 @@ export function createSession(options: SessionOptions): WorktreeSession {
 		ctx,
 		repo,
 		model,
+		abort,
 		config,
 		configSources,
 		get focus() {
@@ -174,6 +182,9 @@ export function createSession(options: SessionOptions): WorktreeSession {
 		},
 		paint,
 		dispose: () => {
+			// Before the monitor, so anything awaiting a model call sees the
+			// cancellation rather than a disposed monitor's error.
+			abort.abort();
 			disposed = true;
 			prMonitor.dispose();
 		},

@@ -136,7 +136,8 @@ export default function (pi: ExtensionAPI) {
 		const repo = await getRepoInfo(pi, ctx.cwd);
 		if (!repo) {
 			// Still a session, just not one that can do anything: the status segment
-			// needs clearing either way.
+			// needs clearing either way. It still gets its own controller, so this
+			// path's session disposes identically to the ordinary one.
 			const noRepoReporter = makeReporter(ctx, "");
 			replaceSession(
 				createSession({
@@ -145,6 +146,7 @@ export default function (pi: ExtensionAPI) {
 					ctx,
 					repo: undefined,
 					model: undefined,
+					abort: new AbortController(),
 					report: (branch) => noRepoReporter?.report(branch),
 				}),
 				noRepoReporter,
@@ -158,9 +160,13 @@ export default function (pi: ExtensionAPI) {
 		});
 		const nextReporter = makeReporter(ctx, loaded.config.branchPrefix);
 
+		// Owned by the session, not the call: it is handed to createSession below
+		// so dispose() can abort it, cancelling any child the model started without
+		// reaching for openModel's return value again.
+		const abort = new AbortController();
 		let model: Model | undefined;
 		try {
-			model = await openModel(pi, ctx.cwd);
+			model = await openModel(pi, ctx.cwd, { signal: abort.signal });
 		} catch (error) {
 			// Reported, never fatal: pi is already running, and a session that cannot
 			// reach the registry can still focus, still monitor a PR, and still paint.
@@ -174,6 +180,7 @@ export default function (pi: ExtensionAPI) {
 				ctx,
 				repo,
 				model,
+				abort,
 				config: loaded.config,
 				configSources: loaded.sources,
 				report: (branch) => nextReporter?.report(branch),

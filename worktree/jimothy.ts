@@ -44,11 +44,11 @@ export const INSTALL_TIMEOUT_CEILING_MS = 5 * 60_000;
 
 export interface DepsOptions {
 	/**
-	 * Meant to be aborted when the work that owns these deps ends — a session
-	 * shutdown, or a cancelled tool call — so a child cannot outlive the session
-	 * that started it. Nothing wires this yet: every current caller opens deps
-	 * without it, so a child still runs to completion or its own timeout
-	 * regardless of the session. That wiring is phase 3's.
+	 * Aborted when the session that opened these deps ends. `session.ts` owns
+	 * the controller and aborts it in `dispose()`, and `index.ts` hands its
+	 * signal to `openModel` at `session_start`, so a child a model call starts
+	 * here is cancelled the moment the session that started it is gone, rather
+	 * than running to completion or its own timeout regardless.
 	 */
 	signal?: AbortSignal;
 	/** Overridable for tests; defaults to `INSTALL_TIMEOUT_CEILING_MS`. */

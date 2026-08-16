@@ -178,6 +178,30 @@ const focusEntry = (data) => ({
 	await rm(dir, { recursive: true, force: true });
 }
 
+// --- the session's work is cancelled when the session ends ---------------
+{
+	const dir = (await makeRepo()).dir;
+	const fake = createFakePi({ cwd: dir });
+	extension(fake.pi);
+	await fake.fire("session_start");
+
+	// The model's deps reach pi through `pi.exec`, so the signal the session
+	// carries is observable as the one handed to the runner. Not `at(-1)`:
+	// session_start also runs git calls (ahead/behind, the stack panel, herdr)
+	// that go through `pi` directly rather than through the model's deps and so
+	// never carry a signal, and one of those is the last call the model's own
+	// calls always precede. A signal is unique to a model call, so filtering on
+	// its presence finds one unambiguously.
+	const before = fake.execCalls.filter((call) => call.options.signal !== undefined).at(-1);
+	ok("model calls carry a signal", before !== undefined);
+	ok("and it is live while the session is", before?.options.signal.aborted === false);
+
+	await fake.fire("session_shutdown", { reason: "quit" });
+	ok("shutting down aborts it", before?.options.signal.aborted === true);
+
+	await rm(dir, { recursive: true, force: true });
+}
+
 // ============================================ a worktree removed behind our back
 
 {

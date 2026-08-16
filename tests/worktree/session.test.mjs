@@ -45,8 +45,17 @@ function setup({ noRepo = false, hasUI = true, exec } = {}) {
 	const ctx = { cwd: "/proj/main", hasUI, mode: "interactive" };
 	const reported = [];
 	// No model: nothing in this file reaches the registry, and the field is
-	// explicit so a session that never opened one says so.
-	const session = createSession({ pi, ui, ctx, repo, model: undefined, report: (branch) => reported.push(branch) });
+	// explicit so a session that never opened one says so. `abort` is still
+	// required: dispose() aborts it unconditionally, model or not.
+	const session = createSession({
+		pi,
+		ui,
+		ctx,
+		repo,
+		model: undefined,
+		abort: new AbortController(),
+		report: (branch) => reported.push(branch),
+	});
 	return { session, ctx, entries, messages, statuses, reported };
 }
 
