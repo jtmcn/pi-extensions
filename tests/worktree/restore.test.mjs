@@ -14,11 +14,21 @@
  * becomes `cd '<gone>' || exit 1`.
  */
 
+import { spawn } from "node:child_process";
 import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFakePi } from "../fake-pi.mjs";
 import { assertions, execRunner, loadExt, pexec } from "../harness.mjs";
+
+/**
+ * A live process that is neither us nor our parent, to hold a lease.
+ *
+ * A lease held by a pid that is *not* alive is a stale lease and takes an
+ * entirely different row, so the stranger rows below need a genuinely live
+ * foreign process rather than an invented pid. Killed before `done()`.
+ */
+const stranger = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60_000)"], { stdio: "ignore" });
 
 const panels = await loadExt("lib/panels.ts");
 
@@ -459,23 +469,92 @@ const focusEntry = (data) => ({
 	await rm(dir, { recursive: true, force: true });
 }
 
-// --- a live stranger keeps it, and the session says who has it -------------
+// --- a live stranger, with a UI ------------------------------------------
 {
 	const { dir, model, record } = await makeManaged();
-	// pid 1 is alive, is not this process and is not its parent — the three facts
-	// that make a holder a stranger. Signal 0 against it raises EPERM, which the
-	// model's isPidAlive reads as alive, so no fixture process is needed.
-	await model.registry.acquireLease("alpha", "someone-else", 1, { label: "run" });
-	const h = harness(record.path, []);
+	await model.registry.acquireLease("alpha", "someone-else", stranger.pid, { label: "pi session" });
+
+	const h = harness(record.path, [], { selects: ["Quit"] });
+	await h.fire("session_start");
+
+	ok("the user is asked", h.prompts.select.length === 1, JSON.stringify(h.prompts.select));
+	ok(
+		"and told what holds it",
+		/someone-else/.test(h.prompts.select[0].title + h.prompts.select[0].options.join()),
+		JSON.stringify(h.prompts.select[0]),
+	);
+	ok(
+		"quit is offered first, so it is the default",
+		h.prompts.select[0].options[0] === "Quit",
+		JSON.stringify(h.prompts.select[0]?.options),
+	);
+	ok("choosing quit shuts pi down", h.shutdowns.length === 1, JSON.stringify(h.messages()));
+	ok("and the stranger keeps the lease", (await ownerOf(model, "alpha"))?.runId === "someone-else");
+
+	await h.fire("session_shutdown");
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	const { dir, model, record } = await makeManaged();
+	await model.registry.acquireLease("alpha", "someone-else", stranger.pid, { label: "pi session" });
+
+	const h = harness(record.path, [], { selects: ["Take over"] });
 	await h.fire("session_start");
 
 	const owner = await ownerOf(model, "alpha");
-	ok("a live stranger's lease is left alone", owner?.runId === "someone-else", JSON.stringify(owner));
+	ok("taking over moves the lease here", owner?.pid === process.pid, JSON.stringify(owner));
+	ok("under this session's run id", owner?.runId === "fake-session-id", JSON.stringify(owner));
 	ok(
-		"and the user is told who holds it",
-		h.messages().some((m) => /worktree "alpha" is in use by run someone-else/.test(m)),
+		"and says whose run was displaced",
+		h.messages().some((m) => /took over "alpha" from run someone-else/.test(m)),
 		JSON.stringify(h.notices),
 	);
+	ok("without shutting down", h.shutdowns.length === 0, JSON.stringify(h.messages()));
+	// One question, not two: the acquisition that follows a take-over must not
+	// come back round to the prompt row.
+	ok("asking once", h.prompts.select.length === 1, JSON.stringify(h.prompts.select));
+
+	await h.fire("session_shutdown");
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// Dismissing the dialog is not consent to take someone's worktree.
+	const { dir, model, record } = await makeManaged();
+	await model.registry.acquireLease("alpha", "someone-else", stranger.pid, { label: "pi session" });
+
+	// No scripted answer: the harness resolves `select` as undefined, which is
+	// what pi does when the dialog is dismissed.
+	const h = harness(record.path, []);
+	await h.fire("session_start");
+
+	ok("dismissal is treated as quit", h.shutdowns.length === 1, JSON.stringify(h.messages()));
+	ok("and the lease is untouched", (await ownerOf(model, "alpha"))?.runId === "someone-else");
+
+	await h.fire("session_shutdown");
+	await rm(dir, { recursive: true, force: true });
+}
+
+// --- a live stranger, headless -------------------------------------------
+{
+	const { dir, model, record } = await makeManaged();
+	await model.registry.acquireLease("alpha", "someone-else", stranger.pid, { label: "pi session" });
+
+	const h = harness(record.path, [], { hasUI: false, mode: "print" });
+	// A headless `say` goes to stdout rather than to `ctx.ui.notify`, so the
+	// warning is only observable there — `h.messages()` stays empty by design.
+	const output = await captureStdout(() => h.fire("session_start"));
+
+	ok("nothing is asked", h.prompts.select.length === 0, JSON.stringify(h.prompts.select));
+	ok(
+		"the session is warned",
+		/worktree "alpha" is in use by pi session someone-else/.test(output),
+		JSON.stringify(output),
+	);
+	ok("and told it is running unleased", /continuing without a lease/.test(output), JSON.stringify(output));
+	ok("and continues", h.shutdowns.length === 0, JSON.stringify(h.messages()));
+	ok("leaving the lease where it was", (await ownerOf(model, "alpha"))?.runId === "someone-else");
 
 	await h.fire("session_shutdown");
 	await rm(dir, { recursive: true, force: true });
@@ -573,4 +652,5 @@ const focusEntry = (data) => ({
 	await rm(dir, { recursive: true, force: true });
 }
 
+stranger.kill();
 done();

@@ -77,8 +77,22 @@ is the focus restored from the transcript and not the directory pi was started
 in. A directory jimothy does not manage has no record, so there is nothing to
 lease and nothing is said about it. A lease left behind by a crashed session
 names a pid that is gone, and the next session reclaims it and says so — there is
-no command to run for that. A worktree held by a process that is still alive is
-left alone and reported, and the session starts unleased.
+no command to run for that.
+
+A worktree held by a process that is still *alive* is a question rather than a
+warning. The session asks — `Worktree "<name>" is in use by pi session <id>
+(pid …, … ago)` — and offers **Quit** first, so quitting is the default, and
+**Take over** second. Quit shuts pi down and leaves the other session's lease
+exactly as it was; so does dismissing the dialog, because dismissal is not
+consent to take somebody's worktree. Taking over breaks a lease whose holder is
+still running, which is destructive to that session, so it names the run and pid
+it displaced before acquiring the lease for this one.
+
+A session with no UI cannot ask, so it warns that the worktree is in use, says it
+is continuing without a lease, and carries on. That is deliberately the wrong
+side of the one-agent-at-a-time rule: a prompt is impossible in a `pi -p` run,
+such a run is bounded and usually read-only, and killing a scripted run is worse
+than the warning. It is also the row a pi started by another pi lands on.
 
 When jimothy launched pi itself it took the lease before pi existed, and the
 session moves that lease onto its own pid rather than acquiring a second one,

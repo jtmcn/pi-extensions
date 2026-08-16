@@ -210,12 +210,39 @@ export default function (pi: ExtensionAPI) {
 				// ours to release is the runId's business, not this row's.
 				hold(decision.runId);
 				return;
-			case "prompt":
 			case "warn":
-				// A live stranger. Asking to take it over is the next phase's; until
-				// then neither row takes the lease.
-				say(ctx, `worktree "${record.name}" is ${held(decision)}`, "warning");
+				// A headless run is bounded and usually read-only; a prompt is
+				// impossible and killing a scripted run is worse than the warning. This
+				// is also the row every pi-inside-a-pi lands on.
+				say(ctx, `worktree "${record.name}" is ${held(decision)}; continuing without a lease`, "warning");
 				return;
+			case "prompt": {
+				const choice = await ctx.ui.select(`Worktree "${record.name}" is ${held(decision)}`, [
+					"Quit",
+					"Take over",
+				]);
+				// Dismissal is not consent: anything other than an explicit take-over
+				// leaves the other session alone.
+				//
+				// Shutting down from inside `session_start` — a handler pi awaits before it
+				// shows the prompt — was spiked under a pty before this was written: pi
+				// exits 0 in under a second and does not wait for the rest of the handler,
+				// so nothing after this call is guaranteed to run.
+				if (choice !== "Take over") {
+					say(ctx, `worktree "${record.name}" is held by another session`, "warning");
+					ctx.shutdown();
+					return;
+				}
+				// Force, because the whole point of this row is that the holder is alive:
+				// without it `breakLease` refuses. The displaced run is named, because
+				// someone is losing a worktree they are still working in.
+				const displaced = await model.registry.breakLease(record.name, { force: true });
+				if (displaced) {
+					say(ctx, `took over "${record.name}" from run ${displaced.runId} (pid ${displaced.pid})`, "warning");
+				}
+				await applyDecision(active, ctx, model, record, { kind: "acquire" }, retargetRetry);
+				return;
+			}
 		}
 	};
 
