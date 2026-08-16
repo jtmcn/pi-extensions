@@ -61,6 +61,9 @@ export function createFakePi({
 	projectTrusted = false,
 	systemPrompt: systemPromptInput = "",
 	commands: commandInfos = () => [],
+	confirms = [],
+	selects = [],
+	inputs = [],
 } = {}) {
 	// A static string is the common case; a function lets tests change the
 	// prompt between session_start fires without rebuilding the whole harness.
@@ -83,6 +86,14 @@ export function createFakePi({
 	const appended = [];
 	const sent = [];
 	const contexts = [];
+	/** Every prompt any context showed, in order, with what answered it. */
+	const prompts = { confirm: [], select: [], input: [] };
+	/** Contexts that called `ctx.shutdown()`. Recorded, never performed. */
+	const shutdowns = [];
+	// Queues rather than single values: a take-over asks, breaks the lease and
+	// can ask again, and a test that silently reuses one answer for both would
+	// pass while the code asked once.
+	const answers = { confirm: [...confirms], select: [...selects], input: [...inputs] };
 
 	const pi = {
 		on(event, handler) {
@@ -171,7 +182,25 @@ export function createFakePi({
 					currentComponent?.dispose?.();
 					currentComponent = factory(headerTui, headerTheme);
 				},
+				confirm: async (title, message) => {
+					const answer = answers.confirm.length ? answers.confirm.shift() : false;
+					prompts.confirm.push({ title, message, answer, ctx });
+					return answer;
+				},
+				select: async (title, options) => {
+					const answer = answers.select.length ? answers.select.shift() : undefined;
+					prompts.select.push({ title, options, answer, ctx });
+					return answer;
+				},
+				input: async (title, placeholder) => {
+					const answer = answers.input.length ? answers.input.shift() : undefined;
+					prompts.input.push({ title, placeholder, answer, ctx });
+					return answer;
+				},
 			},
+			// Recorded, not performed: a test that really shut pi down would take the
+			// test process with it.
+			shutdown: () => shutdowns.push(ctx),
 		};
 		contexts.push(ctx);
 		return ctx;
@@ -197,6 +226,8 @@ export function createFakePi({
 		notices,
 		appended,
 		sent,
+		prompts,
+		shutdowns,
 		names: () => [...tools.keys()].sort(),
 		messages: () => notices.map((n) => n.message),
 		status: () => statuses.at(-1),
