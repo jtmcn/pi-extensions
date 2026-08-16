@@ -47,6 +47,7 @@ const pexec = promisify(execFile);
  *                              string (same for every session) or a zero-arg
  *                              function called per `getSystemPrompt()` invocation,
  *                              so the caller can change it between sessions.
+ * @param options.sessionId  What `ctx.sessionManager.getSessionId()` returns.
  * @param options.mode  What `ctx.mode` returns. Accepts a string (same for
  *                      every session) or a zero-arg function called per
  *                      `session_start`, so the caller can change it between
@@ -61,6 +62,7 @@ export function createFakePi({
 	projectTrusted = false,
 	systemPrompt: systemPromptInput = "",
 	commands: commandInfos = () => [],
+	sessionId = "fake-session-id",
 	confirms = [],
 	selects = [],
 	inputs = [],
@@ -158,7 +160,11 @@ export function createFakePi({
 			own,
 			paints: own.statuses,
 			isProjectTrusted: () => projectTrusted,
-			sessionManager: { getBranch: () => entries(), getEntries: () => entries() },
+			// One id for every context this pi hands out: pi mints a session id per
+			// *session file*, and `/reload` reopens the same one, so a harness that
+			// minted a fresh id per `session_start` would make a reloaded session look
+			// like a different run to anything keyed on it.
+			sessionManager: { getBranch: () => entries(), getEntries: () => entries(), getSessionId: () => sessionId },
 			getSystemPrompt: resolvePrompt,
 			ui: {
 				setStatus: (_key, value) => {

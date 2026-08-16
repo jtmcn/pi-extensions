@@ -70,6 +70,20 @@ Two further preconditions, both of which fail confusingly when unmet:
   extension — with `Cannot find package 'proper-lockfile'`, which names
   jimothy's internals rather than the missing `npm install`.
 
+Two rules about the lease a session takes at startup, both of which are silent
+when broken:
+
+- **The launcher variables are read once and deleted.** `JIMOTHY_RUN_ID` and
+  `JIMOTHY_WORKTREE` are removed from `process.env` during the first
+  `session_start`, before any tool call can spawn anything, because every
+  subagent and every `pi` the model starts from bash inherits this environment —
+  and one that kept them would retarget the live agent's lease onto its own pid,
+  leaving the lease naming a dead process when it exited.
+- **pi must stay a direct child of jimothy.** The retarget is guarded by
+  `owner.pid === process.ppid`, so interposing a shell or a wrapper between
+  jimothy and pi silently demotes every launched session to "held by a
+  stranger" — prompt included.
+
 Do **not** add `@earendil-works/*` to this collection's `package.json`. pi loads
 extensions through jiti with an alias table that maps those specifiers onto the
 *running* pi, and a local copy would be shadowed by that alias in some paths and

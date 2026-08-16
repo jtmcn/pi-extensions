@@ -24,6 +24,25 @@ import { resolveTarget } from "./pr.ts";
 import { createPrMonitor, type PrMonitor } from "./pr-monitor.ts";
 import type { Ui } from "./ui.ts";
 
+/**
+ * A worktree lease this session is holding.
+ *
+ * A list of these rather than one, from the start: a session launched into one
+ * worktree and then focused on another holds both, and a field widened later is
+ * a field every earlier assertion has to be rewritten around.
+ */
+export interface HeldLease {
+	/** The registry name, which is what every registry call takes. */
+	name: string;
+	/** The runId we hold it under — the launcher's, when delegated. */
+	runId: string;
+	/**
+	 * Who will release it. `delegated` means jimothy's own `finally` owns it and
+	 * matches on this runId, so the extension must leave it alone.
+	 */
+	provenance: "delegated" | "ours";
+}
+
 /** Custom entry holding focus state. Entries are durable; custom messages are not. */
 export const FOCUS_ENTRY_TYPE = "worktree-focus";
 /** Custom message announcing focus to the model. Carries no state. */
@@ -83,11 +102,21 @@ export interface WorktreeSession {
 	readonly config: WorktreeConfig;
 	readonly configSources: string[];
 	readonly focus: FocusTarget | undefined;
+	/**
+	 * The worktree leases this session holds.
+	 *
+	 * Deliberately not persisted, unlike focus: a lease is a fact about a live
+	 * process, so one restored from a transcript would be a claim about a pid that
+	 * died with the session that wrote it.
+	 */
+	readonly leases: readonly HeldLease[];
 	readonly prMonitor: PrMonitor;
 	/** Redirect (or stop redirecting) tool calls, persisting the choice. */
 	setFocus: (ctx: ExtensionContext, target: FocusTarget | undefined, announce?: boolean) => void;
 	/** Adopt focus restored from the transcript, without announcing or persisting it. */
 	restoreFocus: (target: FocusTarget | undefined) => void;
+	/** Record a lease this session took, replacing any it already held on that worktree. */
+	addLease: (lease: HeldLease) => void;
 	/** Repaint the footer segment. */
 	paint: (ctx: ExtensionContext) => void;
 	/** Retire the session: its monitor stops and everything in flight goes inert. */
@@ -101,6 +130,7 @@ export function createSession(options: SessionOptions): WorktreeSession {
 	const report = options.report ?? (() => {});
 
 	let focus: FocusTarget | undefined;
+	const leases: HeldLease[] = [];
 	let disposed = false;
 
 	/**
@@ -175,10 +205,22 @@ export function createSession(options: SessionOptions): WorktreeSession {
 		get focus() {
 			return focus;
 		},
+		get leases() {
+			return leases;
+		},
 		prMonitor,
 		setFocus,
 		restoreFocus: (target) => {
 			focus = target;
+		},
+		// Replaced rather than appended: the retarget path can re-decide against the
+		// worktree's current owner and end up holding the same one twice, and a
+		// duplicate would be released twice — the second release landing on whatever
+		// lease had been taken in between.
+		addLease: (lease) => {
+			const existing = leases.findIndex((held) => held.name === lease.name);
+			if (existing === -1) leases.push(lease);
+			else leases[existing] = lease;
 		},
 		paint,
 		dispose: () => {

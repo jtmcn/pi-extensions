@@ -18,12 +18,13 @@ import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFakePi } from "../fake-pi.mjs";
-import { assertions, loadExt, pexec } from "../harness.mjs";
+import { assertions, execRunner, loadExt, pexec } from "../harness.mjs";
 
 const panels = await loadExt("lib/panels.ts");
 
 const { ok, done } = assertions();
 const extension = (await loadExt("worktree/index.ts")).default;
+const { openModel } = await loadExt("worktree/jimothy.ts");
 
 /** A repo on `main` with one commit and a linked worktree on `exp`. */
 async function makeRepo() {
@@ -77,6 +78,32 @@ async function captureStdout(fn) {
 		process.stdout.write = original;
 	}
 	return written.join("");
+}
+
+/**
+ * A repo with one jimothy-managed worktree, created through the model so the
+ * registry record is real rather than hand-written.
+ *
+ * The config is what keeps this out of the developer's home directory:
+ * jimothy's default baseDir is `~/.jimothy/worktrees`, and a relative one is
+ * resolved against the repository, so every worktree created here dies with the
+ * temp repo. `.jimothy` rather than `wt`, which `makeRepo` already uses for a
+ * hand-made *unmanaged* worktree — telling the two apart is what these tests
+ * are about, and sharing a directory would hide a confusion between them.
+ */
+async function makeManaged(name = "alpha") {
+	const { dir } = await makeRepo();
+	await writeFile(join(dir, "jimothy.config.json"), JSON.stringify({ baseDir: ".jimothy" }));
+	const model = await openModel(execRunner(), dir);
+	// `create` takes the name positionally and requires exactly one of
+	// base/branch/track; `main` is what makeRepo's initial commit is on.
+	const record = await model.registry.create(name, { base: "main" });
+	return { dir, model, record };
+}
+
+/** Who the registry currently says holds a worktree, read without the lock. */
+async function ownerOf(model, name) {
+	return (await model.registry.snapshot()).managed.find((r) => r.name === name)?.owner;
 }
 
 /** A transcript entry as `pi.appendEntry("worktree-focus", …)` writes it. */
@@ -370,6 +397,178 @@ const focusEntry = (data) => ({
 	const panel = panels.listPanels().find((p) => p.owner === "worktree");
 	const rendered = panel?.render(120).join("\n") ?? "";
 	ok("focused with undefined branch: panel does not show repo branch", !rendered.includes("⑂ main"), rendered);
+	await h.fire("session_shutdown");
+	await rm(dir, { recursive: true, force: true });
+}
+
+// ===================================================== taking the lease
+//
+// A session leases the worktree it will write to, so two agents cannot end up
+// in one. Everything below drives the real registry in a throwaway repo: the
+// decision is unit-tested in lease.test.mjs, and what is left to prove is the
+// wiring — that the lease lands on the right worktree, under the right run id,
+// and that nothing here can stop a session starting.
+
+// --- acquiring on start --------------------------------------------------
+{
+	const { dir, model, record } = await makeManaged();
+	const h = harness(record.path, []);
+	await h.fire("session_start");
+
+	const owner = await ownerOf(model, "alpha");
+	ok("the session took the lease", owner !== undefined, JSON.stringify(h.notices));
+	ok("under this process", owner?.pid === process.pid, JSON.stringify(owner));
+	ok("with the pi session id as the run id", owner?.runId === "fake-session-id", JSON.stringify(owner));
+	ok("labelled as a pi session", owner?.label === "pi session", JSON.stringify(owner));
+
+	await h.fire("session_shutdown");
+	await rm(dir, { recursive: true, force: true });
+}
+
+// --- an unmanaged directory is left alone --------------------------------
+{
+	const { dir } = await makeRepo();
+	const h = harness(dir, []);
+	await h.fire("session_start");
+	ok(
+		"says nothing about a lease in a directory jimothy does not manage",
+		h.messages().every((m) => !/lease/i.test(m)),
+		JSON.stringify(h.notices),
+	);
+	await h.fire("session_shutdown");
+	await rm(dir, { recursive: true, force: true });
+}
+
+// --- a stale lease is reclaimed, and says so ------------------------------
+{
+	const { dir, model, record } = await makeManaged();
+	// A pid that cannot be alive: the registry's dead-pid rule is what reclaims it.
+	await model.registry.acquireLease("alpha", "old-run", 999_999_999, { label: "run" });
+	const h = harness(record.path, []);
+	await h.fire("session_start");
+
+	const owner = await ownerOf(model, "alpha");
+	ok("the dead owner is displaced", owner?.pid === process.pid, JSON.stringify(owner));
+	ok(
+		"and the user is told, rather than it silently opening",
+		h.messages().some((m) => /reclaimed "alpha"/.test(m)),
+		JSON.stringify(h.notices),
+	);
+
+	await h.fire("session_shutdown");
+	await rm(dir, { recursive: true, force: true });
+}
+
+// --- a live stranger keeps it, and the session says who has it -------------
+{
+	const { dir, model, record } = await makeManaged();
+	// pid 1 is alive, is not this process and is not its parent — the three facts
+	// that make a holder a stranger. Signal 0 against it raises EPERM, which the
+	// model's isPidAlive reads as alive, so no fixture process is needed.
+	await model.registry.acquireLease("alpha", "someone-else", 1, { label: "run" });
+	const h = harness(record.path, []);
+	await h.fire("session_start");
+
+	const owner = await ownerOf(model, "alpha");
+	ok("a live stranger's lease is left alone", owner?.runId === "someone-else", JSON.stringify(owner));
+	ok(
+		"and the user is told who holds it",
+		h.messages().some((m) => /worktree "alpha" is in use by run someone-else/.test(m)),
+		JSON.stringify(h.notices),
+	);
+
+	await h.fire("session_shutdown");
+	await rm(dir, { recursive: true, force: true });
+}
+
+// --- the launcher's lease is retargeted, not fought -----------------------
+{
+	const { dir, model, record } = await makeManaged();
+	// The launcher holds it under *our parent's* pid, which is what proves this
+	// process is that launcher's agent.
+	await model.registry.acquireLease("alpha", "launch-1", process.ppid, { label: "run" });
+	// process.env is process-wide, but each test builds a fresh extension closure,
+	// so the latch that reads this once cannot leak into the tests below. The
+	// cleanup is here because a *failing* test would otherwise corrupt them: the
+	// extension is expected to have deleted both already, which is asserted.
+	process.env.JIMOTHY_RUN_ID = "launch-1";
+	process.env.JIMOTHY_WORKTREE = record.path;
+	try {
+		const h = harness(record.path, []);
+		await h.fire("session_start");
+
+		const owner = await ownerOf(model, "alpha");
+		ok("the lease moves onto this process", owner?.pid === process.pid, JSON.stringify(owner));
+		ok(
+			"keeping the launcher's run id, so jimothy's release still matches",
+			owner?.runId === "launch-1",
+			JSON.stringify(owner),
+		);
+		ok("the launcher variables are scrubbed", process.env.JIMOTHY_RUN_ID === undefined);
+		ok("both of them", process.env.JIMOTHY_WORKTREE === undefined);
+
+		await h.fire("session_shutdown");
+	} finally {
+		delete process.env.JIMOTHY_RUN_ID;
+		delete process.env.JIMOTHY_WORKTREE;
+	}
+	await rm(dir, { recursive: true, force: true });
+}
+
+// --- a lease already ours survives a reload ------------------------------
+{
+	const { dir, model, record } = await makeManaged();
+	const h = harness(record.path, []);
+	await h.fire("session_start");
+	const first = await ownerOf(model, "alpha");
+	await h.fire("session_shutdown", { reason: "reload" });
+	await h.fire("session_start");
+
+	const owner = await ownerOf(model, "alpha");
+	ok("the replacement session holds the lease", owner?.pid === process.pid, JSON.stringify(owner));
+	// Re-acquiring is not merely wasteful: acquireLease refuses a live lease, even
+	// our own, so a reload that tried would report the worktree as unavailable.
+	ok("by adopting it rather than taking it again", owner?.since === first?.since, `${first?.since} -> ${owner?.since}`);
+	ok("and says nothing about it", h.messages().every((m) => !/lease/i.test(m)), JSON.stringify(h.notices));
+
+	await h.fire("session_shutdown");
+	await rm(dir, { recursive: true, force: true });
+}
+
+// --- the target is the restored focus, not the cwd ------------------------
+{
+	const { dir, model, record } = await makeManaged("beta");
+	// The cwd is the main working tree, which jimothy does not manage; the focused
+	// worktree is where every tool call is about to be rewritten to.
+	const h = harness(dir, [focusEntry({ path: record.path, branch: record.branch })]);
+	await h.fire("session_start");
+
+	const owner = await ownerOf(model, "beta");
+	ok("the lease follows the agent's write target", owner?.pid === process.pid, JSON.stringify(owner));
+
+	await h.fire("session_shutdown");
+	await rm(dir, { recursive: true, force: true });
+}
+
+// --- failure is reported, never fatal ------------------------------------
+{
+	// A corrupt registry is the cheapest real failure that lands *inside* the
+	// acquisition: the model opens from git and config alone, so it is only the
+	// first read of registry.json that throws — as lock contention would.
+	const { dir, record } = await makeManaged();
+	await writeFile(join(dir, ".git", "jimothy", "registry.json"), "{ not valid json");
+
+	const h = harness(record.path, []);
+	// Reaching the next line at all is half the assertion: an unhandled throw in
+	// the acquisition would reject session_start and take this file down with it.
+	await h.fire("session_start");
+	ok("the session still painted its footer", h.ctx().own.statuses.length > 0);
+	ok(
+		"and the failure is reported rather than swallowed",
+		h.notices.some((n) => n.level === "warning" && n.message.includes("worktree lease unavailable")),
+		JSON.stringify(h.notices),
+	);
+
 	await h.fire("session_shutdown");
 	await rm(dir, { recursive: true, force: true });
 }

@@ -54,6 +54,19 @@ const { ok, done } = assertions();
 	ok("and names the context that asked", fake.shutdowns[0] === ctx);
 }
 
+// --- the session id ------------------------------------------------------
+{
+	const fake = createFakePi();
+	const first = fake.ctx().sessionManager.getSessionId();
+	ok("a session id is offered at all", first === "fake-session-id", first);
+	await fake.fire("session_start");
+	// pi mints one id per session *file* and `/reload` reopens the same one, so a
+	// replacement session is the same run to anything keyed on this — a lease
+	// included.
+	ok("and survives a replacement session", fake.ctx().sessionManager.getSessionId() === first);
+	ok("overridable per pi", createFakePi({ sessionId: "other" }).ctx().sessionManager.getSessionId() === "other");
+}
+
 // --- prompts belong to the session that asked ----------------------------
 {
 	const fake = createFakePi({ confirms: [true, true] });

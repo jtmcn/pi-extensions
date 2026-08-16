@@ -176,4 +176,30 @@ function setup({ noRepo = false, hasUI = true, exec } = {}) {
 	ok("report: outside a repo there is no branch to report", h.reported.at(-1) === undefined && h.reported.length === 1, JSON.stringify(h.reported));
 }
 
+// ===================================================== leases held
+
+{
+	const h = setup();
+	ok("leases: a new session holds none", h.session.leases.length === 0);
+
+	h.session.addLease({ name: "alpha", runId: "run-1", provenance: "ours" });
+	h.session.addLease({ name: "beta", runId: "run-1", provenance: "delegated" });
+	ok("leases: each worktree is recorded", h.session.leases.map((l) => l.name).join(",") === "alpha,beta", JSON.stringify(h.session.leases));
+
+	// A retarget can re-decide against the current owner and hold the same
+	// worktree a second time; releasing it twice at shutdown would drop a lease
+	// somebody else had taken in between.
+	h.session.addLease({ name: "alpha", runId: "run-2", provenance: "delegated" });
+	ok("leases: the same worktree is replaced, not appended", h.session.leases.length === 2, JSON.stringify(h.session.leases));
+	ok(
+		"leases: and the replacement is what is held",
+		h.session.leases.find((l) => l.name === "alpha")?.runId === "run-2",
+		JSON.stringify(h.session.leases),
+	);
+
+	// Not persisted: a lease is a fact about a live process, and a restored one
+	// would be a lie.
+	ok("leases: nothing is written to the transcript", h.entries.length === 0, JSON.stringify(h.entries));
+}
+
 done();

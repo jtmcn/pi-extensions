@@ -68,6 +68,28 @@ has no unmanaged half: in a repository with nothing jimothy manages, `focus
 <tab>` offers only `off` and `remove <tab>` offers nothing until the first
 `/worktree` command that lists refills the cache.
 
+A session also takes jimothy's *lease* on the worktree it is going to write to,
+at session start. The lease is the mechanism that stops two agents writing to
+one worktree: a held worktree is shown as in use by `/worktree list` and by
+jimothy's own picker, and jimothy refuses to remove one. The target is the
+worktree this session will write to, which after a `/reload`, a resume or a fork
+is the focus restored from the transcript and not the directory pi was started
+in. A directory jimothy does not manage has no record, so there is nothing to
+lease and nothing is said about it. A lease left behind by a crashed session
+names a pid that is gone, and the next session reclaims it and says so — there is
+no command to run for that. A worktree held by a process that is still alive is
+left alone and reported, and the session starts unleased.
+
+When jimothy launched pi itself it took the lease before pi existed, and the
+session moves that lease onto its own pid rather than acquiring a second one,
+keeping jimothy's run id so jimothy's own release still matches. The handoff is
+recognised by parentage — the lease's owner has to be this process's parent — so
+pi must stay a direct child of jimothy for it to work.
+
+None of this is fatal. A registry that cannot be read, or a lock another process
+is holding, is reported as a warning; the session still starts, still focuses,
+and still monitors a PR.
+
 The listing also shows less than the old `git worktree list`-based renderer
 did: jimothy's git entries carry no detached-HEAD short sha and no `(locked)` /
 `(prunable)` flags, so a worktree git considers prunable — one deleted by hand,

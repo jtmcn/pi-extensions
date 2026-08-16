@@ -31,9 +31,16 @@
  * *current* session, which is why they receive getters rather than values.
  */
 
-import { stat } from "node:fs/promises";
+import { realpath, stat } from "node:fs/promises";
 import { basename } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+	checkLease,
+	describeLease,
+	describeReclaim,
+	type WorktreeLease,
+	type WorktreeRecord,
+} from "jimothy/worktrees";
 import { aheadBehind, countDirty, getRepoInfo, type RepoInfo } from "../lib/git.ts";
 import { createHerdrReporter, type HerdrReporter, herdrTarget } from "../lib/herdr.ts";
 import { EMPTY_BRANCHES, listBranches } from "./branches.ts";
@@ -41,6 +48,7 @@ import { createCommands } from "./commands.ts";
 import { DEFAULT_CONFIG, loadConfig } from "./config.ts";
 import { applyFocus } from "./focus.ts";
 import { type Model, openModel } from "./jimothy.ts";
+import { decideLease, type LauncherEnv, type LeaseDecision, leaseProvenance, readLauncherEnv } from "./lease.ts";
 import {
 	beginLocationCycle,
 	clearLocationPanel,
@@ -53,6 +61,8 @@ import { createWorktreeTool } from "./tool.ts";
 import { createUi } from "./ui.ts";
 
 const STATUS_KEY = "worktree";
+/** What a lease taken by this extension calls itself, wherever one is rendered. */
+const LEASE_LABEL = "pi session";
 
 export default function (pi: ExtensionAPI) {
 	const ui = createUi({ statusKey: STATUS_KEY, prefix: "worktree" });
@@ -91,6 +101,19 @@ export default function (pi: ExtensionAPI) {
 	let reporterGeneration = 0;
 
 	/**
+	 * What jimothy told this process, read once and removed from the environment.
+	 *
+	 * In the closure rather than on the session because it must survive `/reload`
+	 * and `/fork`: provenance is defined against this run id, and a session that
+	 * had forgotten it would release a lease jimothy is going to release.
+	 *
+	 * Read at the first `session_start` rather than at load, so the delete happens
+	 * inside the handler pi awaits before any tool can run.
+	 */
+	let launcher: LauncherEnv | undefined;
+	let launcherRead = false;
+
+	/**
 	 * The only place `session` is assigned.
 	 *
 	 * Retiring the outgoing session is not optional: its monitor may have a fetch
@@ -126,7 +149,109 @@ export default function (pi: ExtensionAPI) {
 		});
 	};
 
+	/** The model's own rendering of a live holder, so this and `/worktree list` agree. */
+	const held = (decision: { lease: WorktreeLease; ageMs: number }) =>
+		describeLease({ state: "held", lease: decision.lease, ageMs: decision.ageMs });
+
+	/** Carry out a decision, and record what we ended up holding. */
+	const applyDecision = async (
+		active: WorktreeSession,
+		ctx: ExtensionContext,
+		model: Model,
+		record: WorktreeRecord | undefined,
+		decision: LeaseDecision,
+	) => {
+		if (!record || decision.kind === "unmanaged") return;
+		const hold = (runId: string) =>
+			active.addLease({ name: record.name, runId, provenance: leaseProvenance(runId, launcher?.runId) });
+
+		switch (decision.kind) {
+			case "acquire": {
+				const runId = ctx.sessionManager.getSessionId();
+				const result = await model.registry.acquireLease(record.name, runId, process.pid, {
+					label: LEASE_LABEL,
+				});
+				// A worktree that was "in use" a moment ago and now simply opens makes
+				// the lease look like it meant nothing.
+				if (result.reclaimed) say(ctx, describeReclaim(record.name, result.reclaimed), "info");
+				hold(runId);
+				return;
+			}
+			case "retarget": {
+				const moved = await model.registry.retargetLease(record.name, decision.runId, {
+					fromPid: decision.fromPid,
+					pid: process.pid,
+					label: LEASE_LABEL,
+				});
+				// False means the lease changed hands between the read and this call —
+				// the launcher died and someone reclaimed it. Start again from the
+				// current facts rather than assuming. This re-decides exactly once: the
+				// launcher's lease is gone, so no second pass can reach this row again,
+				// and every other row is terminal.
+				if (moved) hold(decision.runId);
+				else await takeLease(active, ctx);
+				return;
+			}
+			case "adopt":
+				// Already ours: `session_shutdown` fires before the replacement's
+				// `session_start`, so this is the ordinary `/reload` path. Whether it is
+				// ours to release is the runId's business, not this row's.
+				hold(decision.runId);
+				return;
+			case "prompt":
+			case "warn":
+				// A live stranger. Asking to take it over is the next phase's; until
+				// then neither row takes the lease.
+				say(ctx, `worktree "${record.name}" is ${held(decision)}`, "warning");
+				return;
+		}
+	};
+
+	/**
+	 * Lease the worktree this session will write to.
+	 *
+	 * The target is the restored focus when there is one, because every tool call
+	 * is rewritten into it — leasing the cwd there would hold the worktree nobody
+	 * is writing to. It is realpath'd because records store resolved paths, and an
+	 * unresolved one silently matches nothing: a session in a symlinked worktree
+	 * would decide it is unmanaged and take no lease at all.
+	 *
+	 * The snapshot, not `list()`: this runs in every pi session that opens a
+	 * repository, and the reconciling read would take the registry's lock and
+	 * rewrite `registry.json` for all of them.
+	 *
+	 * Everything here is reported and nothing is fatal: pi is already running.
+	 */
+	const takeLease = async (active: WorktreeSession, ctx: ExtensionContext) => {
+		const model = active.model;
+		if (!model) return;
+		try {
+			const target = await realpath(active.focus?.path ?? ctx.cwd);
+			const record = (await model.registry.snapshot()).managed.find((entry) => entry.path === target);
+			const decision = decideLease({
+				record,
+				state: record ? checkLease(record, model.deps.isPidAlive, model.deps.now()) : { state: "free" },
+				launcherRunId: launcher?.runId,
+				pid: process.pid,
+				ppid: process.ppid,
+				hasUI: ctx.hasUI,
+			});
+			await applyDecision(active, ctx, model, record, decision);
+		} catch (error) {
+			// Lock contention and a corrupt registry both arrive here as a UserError,
+			// and a session never dies of either.
+			say(ctx, `worktree lease unavailable: ${(error as Error).message}`, "warning");
+		}
+	};
+
 	pi.on("session_start", async (_event, ctx) => {
+		// Before anything can spawn a child: every subagent and every pi the model
+		// starts from bash inherits this environment, and an inherited launcher would
+		// retarget the live agent's lease onto a process about to exit.
+		if (!launcherRead) {
+			launcherRead = true;
+			launcher = readLauncherEnv(process.env);
+		}
 		replaceSession(undefined);
 		clearLocationPanel();
 		commands.setKnown([]);
@@ -223,6 +348,13 @@ export default function (pi: ExtensionAPI) {
 			say(ctx, `focused worktree ${restored.path} no longer exists; focus cleared`, "warning");
 			active.setFocus(ctx, undefined, false);
 		}
+
+		// After the focus restore, and after the check above has had its say about a
+		// worktree that is gone: the lease belongs on the directory this session will
+		// actually write to, which for a reload, a resume or a fork is the restored
+		// focus rather than the cwd pi was started in.
+		await takeLease(active, ctx);
+
 		active.paint(ctx);
 		active.prMonitor.refresh();
 
