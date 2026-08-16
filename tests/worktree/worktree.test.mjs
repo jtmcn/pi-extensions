@@ -141,20 +141,67 @@ ok(
 );
 ok("args: empty", select.parseNewArgs("   ").name === undefined);
 
+// Matching is over the model's worktrees now, so the fixtures are KnownWorktree
+// objects: a name that is the registry's for a managed worktree, and the
+// directory's for one jimothy did not create.
+//
+// The unmanaged fixture's name ("made") and branch ("feature-x") are
+// deliberately unlike each other: an assertion that queries the branch and
+// happens to also equal the name would still pass if branch matching were
+// deleted, which is exactly the regression this phase exists to catch.
 const wts = [
-	{ path: "/proj/main", branch: "main", detached: false, bare: false, locked: false, prunable: false },
-	{ path: "/proj/wt/feature-a", branch: "joel/feature-a", detached: false, bare: false, locked: false, prunable: false },
-	{ path: "/proj/wt/feature-b", branch: "joel/feature-b", detached: false, bare: false, locked: false, prunable: false },
+	{ name: "made", path: "/hand/made", branch: "hotfix", managed: false },
+	{ name: "feature-a", path: "/proj/wt/feature-a", branch: "joel/feature-a", managed: true, status: "provisioned" },
+	{ name: "feature-b", path: "/proj/wt/feature-b", branch: "joel/feature-b", managed: true, status: "provisioned" },
+	{ name: "detached", path: "/hand/detached", managed: false },
 ];
-ok("match: exact basename", select.matchWorktree(wts, "feature-a").worktree === wts[1]);
-ok("match: exact path", select.matchWorktree(wts, "/proj/main").worktree === wts[0]);
+ok("match: exact name", select.matchWorktree(wts, "feature-a").worktree === wts[1]);
+ok("match: exact path", select.matchWorktree(wts, "/hand/made").worktree === wts[0]);
 ok("match: exact branch", select.matchWorktree(wts, "joel/feature-b").worktree === wts[2]);
 ok("match: unique prefix", select.matchWorktree(wts, "ma").worktree === wts[0]);
 ok("match: ambiguous prefix is refused", select.matchWorktree(wts, "feature").kind === "many");
 ok("match: ambiguous prefix lists candidates", select.matchWorktree(wts, "feature").worktrees.length === 2);
 ok("match: no match", select.matchWorktree(wts, "nope").kind === "none");
 ok("match: exactOnly rejects prefixes", select.matchWorktree(wts, "ma", { exactOnly: true }).kind === "none");
-ok("match: exactOnly still takes exact", select.matchWorktree(wts, "main", { exactOnly: true }).kind === "one");
+ok("match: exactOnly still takes exact", select.matchWorktree(wts, "made", { exactOnly: true }).kind === "one");
+// An unmanaged worktree still resolves by branch: /worktree focus <branch> has
+// always worked, and losing it for the half jimothy does not manage would be a
+// silent regression. The query ("hotfix") is the fixture's branch, not its
+// name, so this fails if branch matching is ever deleted.
+ok("match: an unmanaged worktree by branch", select.matchWorktree(wts, "hotfix").worktree === wts[0]);
+ok("match: a worktree with no branch does not throw", select.matchWorktree(wts, "detach").worktree === wts[3]);
+
+// A managed worktree can share a name or branch with an unmanaged one — most
+// commonly the repository's main working tree, which (unlike anything jimothy
+// creates) keeps whatever name and branch its directory already had. The
+// managed entry must win: the registry name is what every other command
+// prints, and winning the collision is what makes such a worktree reachable
+// by name at all — it never was before the registry, since git always listed
+// the main working tree first.
+const collision = [
+	{ name: "api", path: "/hand/api", branch: "main", managed: false },
+	{ name: "api", path: "/wt/api", branch: "jimothy/api", managed: true, status: "provisioned" },
+	{ name: "other", path: "/hand/other", branch: "shared-branch", managed: false },
+	{ name: "renamed", path: "/wt/renamed", branch: "shared-branch", managed: true, status: "provisioned" },
+];
+ok(
+	"match: a name collision resolves to the managed worktree",
+	select.matchWorktree(collision, "api").worktree === collision[1],
+);
+ok(
+	"match: a branch collision resolves to the managed worktree",
+	select.matchWorktree(collision, "shared-branch").worktree === collision[3],
+);
+ok(
+	"match: an exact path still wins over a name collision",
+	select.matchWorktree(collision, "/hand/api").worktree === collision[0],
+);
+
+// The name is the registry's, not the directory's — the case the old matcher,
+// which read `basename(path)`, could not express.
+const renamed = [{ name: "chosen", path: "/hand/dup", branch: "feature-y", managed: true, status: "not provisioned" }];
+ok("match: the registry name, not the directory", select.matchWorktree(renamed, "chosen").worktree === renamed[0]);
+ok("match: the directory name is not matched", select.matchWorktree(renamed, "dup").kind === "none");
 
 // ============================================== integration: plain git repo
 

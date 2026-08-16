@@ -147,6 +147,37 @@ const focusEntry = (data) => ({
 	await rm(dir, { recursive: true, force: true });
 }
 
+// ============================================ the model fails to open at session start
+
+// `openModel` rejects when `jimothy.config.json` is unreadable — after the
+// repository itself resolved, so this is a config failure, not a "not a git
+// repo" one. That must be reported, and it must not be fatal: the rest of
+// session_start (focus restore, the location panel) has nothing to do with
+// the registry and must still run.
+{
+	const { dir, worktree } = await makeRepo();
+	await writeFile(join(dir, "jimothy.config.json"), "{ not valid json");
+	panels.resetPanels("worktree");
+
+	const h = harness(dir, [focusEntry({ path: worktree, branch: "exp" })]);
+	await h.fire("session_start");
+
+	ok(
+		"a broken config warns that the model is unavailable",
+		h.notices.some((n) => n.level === "warning" && n.message.includes("jimothy model unavailable")),
+		JSON.stringify(h.notices),
+	);
+	ok("focus still restores from the transcript", /⑂ exp/.test(h.status() ?? ""), JSON.stringify(h.status()));
+	ok("with its branch", (h.status() ?? "").includes("(exp)"), h.status());
+	const panel = panels.listPanels().find((p) => p.owner === "worktree");
+	ok("the location panel is still published", panel !== undefined);
+	const rendered = panel?.render(120).join("\n") ?? "";
+	ok("and reflects the restored focus", rendered.includes(worktree), rendered);
+
+	await h.fire("session_shutdown");
+	await rm(dir, { recursive: true, force: true });
+}
+
 // ============================================ a worktree removed behind our back
 
 {

@@ -13,9 +13,11 @@
 
 import { basename } from "node:path";
 import type { ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { countDirty, describeWorktree, listWorktrees, type RepoInfo, slugify, type Worktree } from "../lib/git.ts";
+import { countDirty, getRepoInfo, type RepoInfo, slugify } from "../lib/git.ts";
 import { type WorktreeConfig, worktreePath } from "./config.ts";
 import type { FocusTarget } from "./focus.ts";
+import type { Model } from "./jimothy.ts";
+import { describeKnown, type KnownWorktree, toKnown } from "./known.ts";
 import { matchWorktree, parseNewArgs, tokenize } from "./select.ts";
 import { messageTexts, suggestName, uniqueName } from "./suggest.ts";
 import type { Ui } from "./ui.ts";
@@ -31,6 +33,16 @@ import {
 } from "./branches.ts";
 import { type CommandRunner, type CreateResult, createWorktree, pruneWorktrees, removeWorktree } from "./worktrees.ts";
 
+/**
+ * Said when the session has no model.
+ *
+ * Every command that names a worktree resolves it through the registry, so
+ * without one the honest answer is "cannot look", not "none found" — the
+ * difference matters most on `remove`, where the second reading invites the user
+ * to create a duplicate of something that is still there.
+ */
+const MODEL_UNAVAILABLE = "jimothy's worktree model is unavailable, so worktrees cannot be listed";
+
 const SUBCOMMANDS = [
 	{ value: "list", label: "list", description: "Show worktrees for this repo" },
 	{ value: "new", label: "new <name>", description: "Create a worktree and branch" },
@@ -45,6 +57,12 @@ export interface CommandDeps {
 	/** Reaches git. `pi` in production. */
 	runner: CommandRunner;
 	ui: Ui;
+	/**
+	 * The current session's jimothy model, or undefined when it could not be
+	 * opened. A getter, not a value: these commands are registered once per
+	 * process and must act on the *current* session.
+	 */
+	getModel: () => Model | undefined;
 	getConfig: () => WorktreeConfig;
 	/** Config files that were applied, for `/worktree config`. */
 	getConfigSources: () => string[];
@@ -57,21 +75,86 @@ export interface Commands {
 	/** Completions for the command's arguments; null when there is nothing to offer. */
 	getArgumentCompletions: (prefix: string) => { value: string; label: string }[] | null;
 	/** Seed the name cache used by completions. */
-	setKnown: (worktrees: Worktree[]) => void;
+	setKnown: (worktrees: KnownWorktree[]) => void;
+	/**
+	 * Seed the completion cache from the lock-free snapshot. For `session_start`
+	 * and anything else that must not take the registry lock.
+	 */
+	refreshCached: () => Promise<KnownWorktree[]>;
+	/**
+	 * Seed the completion cache from the reconciling read. For a caller — the
+	 * model-facing tool, after a create — that just changed what git reports and
+	 * needs the cache to see it, including an unmanaged worktree `refreshCached`
+	 * cannot.
+	 */
+	refreshKnown: () => Promise<KnownWorktree[]>;
 	/** Seed the branch cache used by `checkout` completions. */
 	setKnownBranches: (branches: BranchList) => void;
 }
 
 export function createCommands(deps: CommandDeps): Commands {
-	const { runner, ui, getConfig, getConfigSources, getFocus, setFocus } = deps;
+	const { runner, ui, getModel, getConfig, getConfigSources, getFocus, setFocus } = deps;
 	const say = ui.say;
 	const report = ui.report;
 
 	/** Worktree names for autocomplete; refreshed opportunistically. */
-	let known: Worktree[] = [];
+	let known: KnownWorktree[] = [];
 
-	const refresh = async (info: RepoInfo): Promise<Worktree[]> => {
-		known = (await listWorktrees(runner, info.projectRoot)).filter((wt) => !wt.bare);
+	/**
+	 * The repository's main working tree, which the model's listing leaves out.
+	 *
+	 * jimothy omits it because nothing jimothy *does* applies to it: it cannot be
+	 * provisioned, leased, adopted or removed. This extension has always listed it
+	 * and `/worktree focus <main>` has always resolved it, so it is put back here —
+	 * from the model's own repository info, so worktree identity still has exactly
+	 * one source and no second git listing is parsed. `managed: false` is the
+	 * truth, and the listing labels it so.
+	 *
+	 * Its branch is the one read-only question jimothy has no opinion about — what
+	 * is checked out at a path — which is `lib/git.ts`'s job. A main checkout that
+	 * cannot be read degrades to no branch rather than failing the whole listing.
+	 */
+	const mainWorktree = async (model: Model): Promise<KnownWorktree> => {
+		const path = model.info.mainWorktree;
+		const branch = await getRepoInfo(runner, path)
+			.then((info) => info?.branch)
+			.catch(() => undefined);
+		return { name: basename(path), path, ...(branch === undefined ? {} : { branch }), managed: false };
+	};
+
+	/** The reconciling read, for commands that must be exact. */
+	const refresh = async (): Promise<KnownWorktree[]> => {
+		const model = getModel();
+		if (!model) return [];
+		const worktrees = toKnown(await model.registry.list(), model.deps);
+		// Deduped by path rather than assumed absent: the model decides what its
+		// listing contains, and a repository could yet be one it manages.
+		if (!worktrees.some((wt) => wt.path === model.info.mainWorktree)) {
+			worktrees.unshift(await mainWorktree(model));
+		}
+		known = worktrees;
+		return known;
+	};
+
+	/**
+	 * Seed the completion cache without reconciling.
+	 *
+	 * `list()` takes the registry lock and rewrites `registry.json` on every call,
+	 * which is right for a command that must be exact and wrong for a cache that
+	 * refills on every keystroke. `snapshot()` costs neither: it may name a
+	 * worktree git has since dropped, but offering it as a completion costs only a
+	 * failed command with a clear message, and the next reconciling call (the
+	 * first `showList`, `focus` or `remove`) corrects the cache.
+	 *
+	 * What it cannot offer: unmanaged worktrees, which only `list()` discovers by
+	 * asking git, and (for the same reason) the repository's main working tree
+	 * that `refresh()` puts back — both trades accepted for a lock-free keystroke.
+	 */
+	const refreshCached = async (): Promise<KnownWorktree[]> => {
+		const model = getModel();
+		if (!model) return [];
+		const snapshot = await model.registry.snapshot();
+		known = toKnown({ managed: snapshot.managed, unmanaged: [] }, model.deps);
 		return known;
 	};
 
@@ -84,18 +167,18 @@ export function createCommands(deps: CommandDeps): Commands {
 	};
 
 	/**
-	 * Directory names that are already spoken for.
+	 * Names that are already spoken for.
 	 *
-	 * Worktree directory names and currently checked-out branches, with
-	 * `branchPrefix` stripped so `joel/foo` occupies `foo`. Cannot see a stray
-	 * non-worktree directory or a branch checked out nowhere — those still fall
-	 * back to createWorktree's error.
+	 * Worktree names and currently checked-out branches, with `branchPrefix`
+	 * stripped so `joel/foo` occupies `foo`. Cannot see a stray non-worktree
+	 * directory or a branch checked out nowhere — those still fall back to
+	 * createWorktree's error.
 	 */
-	const takenNames = (worktrees: Worktree[]): Set<string> => {
+	const takenNames = (worktrees: KnownWorktree[]): Set<string> => {
 		const prefix = getConfig().branchPrefix;
 		const taken = new Set<string>();
 		for (const wt of worktrees) {
-			taken.add(basename(wt.path));
+			taken.add(wt.name);
 			if (wt.branch) taken.add(wt.branch.startsWith(prefix) ? wt.branch.slice(prefix.length) : wt.branch);
 		}
 		return taken;
@@ -108,18 +191,21 @@ export function createCommands(deps: CommandDeps): Commands {
 	 * must keep failing loudly in `createWorktree` rather than quietly becoming
 	 * something else.
 	 */
-	const suggest = async (info: RepoInfo, ctx: ExtensionContext): Promise<string> => {
-		const taken = takenNames(await refresh(info));
+	const suggest = async (ctx: ExtensionContext): Promise<string> => {
+		const taken = takenNames(await refresh());
 		return uniqueName(suggestName(messageTexts(ctx.sessionManager.getBranch())), (name) => taken.has(name));
 	};
 
 	const resolveWorktree = async (
-		info: RepoInfo,
 		ctx: ExtensionCommandContext,
 		query: string,
 		prompt: string,
-	): Promise<Worktree | undefined> => {
-		const worktrees = await refresh(info);
+	): Promise<KnownWorktree | undefined> => {
+		if (!getModel()) {
+			say(ctx, MODEL_UNAVAILABLE, "error");
+			return undefined;
+		}
+		const worktrees = await refresh();
 		if (worktrees.length === 0) {
 			say(ctx, "no worktrees found", "warning");
 			return undefined;
@@ -131,7 +217,7 @@ export function createCommands(deps: CommandDeps): Commands {
 			const match = matchWorktree(worktrees, needle, { exactOnly: !ctx.hasUI });
 			if (match.kind === "one") return match.worktree;
 			if (match.kind === "many") {
-				const names = match.worktrees.map((wt) => basename(wt.path)).join(", ");
+				const names = match.worktrees.map((wt) => wt.name).join(", ");
 				say(ctx, `"${needle}" is ambiguous: ${names}`, "error");
 				return undefined;
 			}
@@ -142,7 +228,7 @@ export function createCommands(deps: CommandDeps): Commands {
 			say(ctx, "a worktree name is required in non-interactive mode", "error");
 			return undefined;
 		}
-		const labels = worktrees.map(describeWorktree);
+		const labels = worktrees.map(describeKnown);
 		const choice = await ctx.ui.select(prompt, labels);
 		if (!choice) return undefined;
 		return worktrees[labels.indexOf(choice)];
@@ -161,7 +247,11 @@ export function createCommands(deps: CommandDeps): Commands {
 	};
 
 	const showList = async (info: RepoInfo, ctx: ExtensionContext) => {
-		const worktrees = await refresh(info);
+		if (!getModel()) {
+			say(ctx, MODEL_UNAVAILABLE, "error");
+			return;
+		}
+		const worktrees = await refresh();
 		const dirtyCounts = await Promise.all(worktrees.map((wt) => countDirty(runner, wt.path)));
 		const lines = worktrees.map((wt, index) => {
 			const dirty = dirtyCounts[index];
@@ -170,7 +260,7 @@ export function createCommands(deps: CommandDeps): Commands {
 				getFocus() && wt.path === getFocus()?.path ? "focused" : undefined,
 				dirty > 0 ? `${dirty} dirty` : undefined,
 			].filter(Boolean);
-			return `${describeWorktree(wt)}${marks.length ? `  — ${marks.join(", ")}` : ""}`;
+			return `${describeKnown(wt)}${marks.length ? `  — ${marks.join(", ")}` : ""}`;
 		});
 		if (lines.length === 0) lines.push("(none)");
 		report(ctx, `Worktrees in ${info.projectRoot}:`, lines);
@@ -188,7 +278,7 @@ export function createCommands(deps: CommandDeps): Commands {
 			// A suggestion rather than an empty box: pi's `input` placeholder is never
 			// rendered, so the old hint was invisible. `editor` does prefill, which
 			// makes the name editable instead of merely proposed.
-			const suggestion = await suggest(info, ctx);
+			const suggestion = await suggest(ctx);
 			if (!ctx.hasUI) {
 				// No prompt to fall back on. Using the suggestion beats the silent
 				// no-op this path used to be.
@@ -214,7 +304,7 @@ export function createCommands(deps: CommandDeps): Commands {
 				projectRoot: info.projectRoot,
 				sourceWorktree: info.worktreeRoot,
 			});
-			await refresh(info);
+			await refresh();
 			// The new branch exists now: `checkout <tab>` should offer it.
 			await refreshBranches(info);
 
@@ -242,8 +332,8 @@ export function createCommands(deps: CommandDeps): Commands {
 		}
 
 		let branches = await refreshBranches(info);
-		const worktrees = await refresh(info);
-		const checkedOut = new Map<string, Worktree>();
+		const worktrees = await refresh();
+		const checkedOut = new Map<string, KnownWorktree>();
 		for (const wt of worktrees) if (wt.branch) checkedOut.set(wt.branch, wt);
 
 		let query = queryArg;
@@ -289,7 +379,7 @@ export function createCommands(deps: CommandDeps): Commands {
 		if (occupied) {
 			say(
 				ctx,
-				`"${match.branch}" is already checked out at ${occupied.path} — /worktree focus ${basename(occupied.path)}`,
+				`"${match.branch}" is already checked out at ${occupied.path} — /worktree focus ${occupied.name}`,
 				"error",
 			);
 			return;
@@ -311,7 +401,7 @@ export function createCommands(deps: CommandDeps): Commands {
 				projectRoot: info.projectRoot,
 				sourceWorktree: info.worktreeRoot,
 			});
-			await refresh(info);
+			await refresh();
 			await refreshBranches(info);
 
 			const extras: string[] = [];
@@ -332,7 +422,7 @@ export function createCommands(deps: CommandDeps): Commands {
 			say(ctx, "focus cleared", "info");
 			return;
 		}
-		const target = await resolveWorktree(info, ctx, query, "Focus which worktree?");
+		const target = await resolveWorktree(ctx, query, "Focus which worktree?");
 		if (!target) return;
 		if (target.path === info.worktreeRoot) {
 			setFocus(ctx, undefined);
@@ -340,11 +430,11 @@ export function createCommands(deps: CommandDeps): Commands {
 			return;
 		}
 		setFocus(ctx, { path: target.path, branch: target.branch });
-		say(ctx, `focused ${describeWorktree(target)}`, "info");
+		say(ctx, `focused ${describeKnown(target)}`, "info");
 	};
 
 	const doRemove = async (info: RepoInfo, ctx: ExtensionCommandContext, args: string) => {
-		const target = await resolveWorktree(info, ctx, args.trim(), "Remove which worktree?");
+		const target = await resolveWorktree(ctx, args.trim(), "Remove which worktree?");
 		if (!target) return;
 		if (target.path === info.worktreeRoot) {
 			say(ctx, "refusing to remove the session's own worktree", "error");
@@ -354,7 +444,7 @@ export function createCommands(deps: CommandDeps): Commands {
 		const dirty = await countDirty(runner, target.path);
 		if (ctx.hasUI) {
 			const message = dirty > 0 ? `${dirty} uncommitted file(s) will be lost.` : "This cannot be undone.";
-			const ok = await ctx.ui.confirm(`Remove ${describeWorktree(target)}?`, message);
+			const ok = await ctx.ui.confirm(`Remove ${describeKnown(target)}?`, message);
 			if (!ok) return;
 		} else if (dirty > 0) {
 			say(ctx, "refusing to remove a dirty worktree without confirmation", "error");
@@ -380,7 +470,7 @@ export function createCommands(deps: CommandDeps): Commands {
 				forceDeleteBranch: false,
 			});
 			if (getFocus()?.path === target.path) setFocus(ctx, undefined);
-			await refresh(info);
+			await refresh();
 			// The branch may have gone with the worktree: completing a dead branch
 			// costs a pointless fetch when it is accepted.
 			await refreshBranches(info);
@@ -440,7 +530,7 @@ export function createCommands(deps: CommandDeps): Commands {
 				return doRemove(info, ctx, rest);
 			case "prune": {
 				const out = await pruneWorktrees(runner, info.projectRoot);
-				await refresh(info);
+				await refresh();
 				say(ctx, out || "nothing to prune", "info");
 				return;
 			}
@@ -476,7 +566,7 @@ export function createCommands(deps: CommandDeps): Commands {
 		}
 
 		if (sub !== "focus" && sub !== "remove") return null;
-		const names = known.filter((wt) => !wt.bare).map((wt) => basename(wt.path));
+		const names = known.map((wt) => wt.name);
 		if (sub === "focus") names.unshift("off");
 		const items = names
 			.filter((n) => n.startsWith(needle))
@@ -490,6 +580,8 @@ export function createCommands(deps: CommandDeps): Commands {
 		setKnown: (worktrees) => {
 			known = worktrees;
 		},
+		refreshCached,
+		refreshKnown: refresh,
 		setKnownBranches: (branches) => {
 			knownBranches = branches;
 		},

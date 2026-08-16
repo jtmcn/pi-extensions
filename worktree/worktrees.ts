@@ -15,7 +15,6 @@ import {
 	listWorktrees,
 	refExists,
 	slugify,
-	type Worktree,
 } from "../lib/git.ts";
 import type { WorktreeConfig } from "./config.ts";
 import { worktreePath } from "./config.ts";
@@ -119,7 +118,12 @@ export async function createWorktree(pi: CommandRunner, options: CreateOptions):
 }
 
 export interface RemoveOptions {
-	worktree: Worktree;
+	/**
+	 * The worktree to remove. Narrower than `Worktree` because removal reads
+	 * nothing else: the path is what git is given and what is cleaned up after a
+	 * failed delete, and the branch is what may be deleted with it.
+	 */
+	worktree: { path: string; branch?: string };
 	projectRoot: string;
 	/** Force removal of a worktree with uncommitted changes. */
 	force: boolean;

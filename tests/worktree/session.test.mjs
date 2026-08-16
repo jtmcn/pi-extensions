@@ -44,7 +44,9 @@ function setup({ noRepo = false, hasUI = true, exec } = {}) {
 	};
 	const ctx = { cwd: "/proj/main", hasUI, mode: "interactive" };
 	const reported = [];
-	const session = createSession({ pi, ui, ctx, repo, report: (branch) => reported.push(branch) });
+	// No model: nothing in this file reaches the registry, and the field is
+	// explicit so a session that never opened one says so.
+	const session = createSession({ pi, ui, ctx, repo, model: undefined, report: (branch) => reported.push(branch) });
 	return { session, ctx, entries, messages, statuses, reported };
 }
 

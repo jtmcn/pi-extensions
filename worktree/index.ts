@@ -34,12 +34,13 @@
 import { stat } from "node:fs/promises";
 import { basename } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { aheadBehind, countDirty, getRepoInfo, listWorktrees, type RepoInfo } from "../lib/git.ts";
+import { aheadBehind, countDirty, getRepoInfo, type RepoInfo } from "../lib/git.ts";
 import { createHerdrReporter, type HerdrReporter, herdrTarget } from "../lib/herdr.ts";
 import { EMPTY_BRANCHES, listBranches } from "./branches.ts";
 import { createCommands } from "./commands.ts";
 import { DEFAULT_CONFIG, loadConfig } from "./config.ts";
 import { applyFocus } from "./focus.ts";
+import { type Model, openModel } from "./jimothy.ts";
 import {
 	beginLocationCycle,
 	clearLocationPanel,
@@ -138,7 +139,14 @@ export default function (pi: ExtensionAPI) {
 			// needs clearing either way.
 			const noRepoReporter = makeReporter(ctx, "");
 			replaceSession(
-				createSession({ pi, ui, ctx, repo: undefined, report: (branch) => noRepoReporter?.report(branch) }),
+				createSession({
+					pi,
+					ui,
+					ctx,
+					repo: undefined,
+					model: undefined,
+					report: (branch) => noRepoReporter?.report(branch),
+				}),
 				noRepoReporter,
 			)?.paint(ctx);
 			return;
@@ -149,12 +157,23 @@ export default function (pi: ExtensionAPI) {
 			projectTrusted: ctx.isProjectTrusted(),
 		});
 		const nextReporter = makeReporter(ctx, loaded.config.branchPrefix);
+
+		let model: Model | undefined;
+		try {
+			model = await openModel(pi, ctx.cwd);
+		} catch (error) {
+			// Reported, never fatal: pi is already running, and a session that cannot
+			// reach the registry can still focus, still monitor a PR, and still paint.
+			say(ctx, `jimothy model unavailable: ${(error as Error).message}`, "warning");
+		}
+
 		const active = replaceSession(
 			createSession({
 				pi,
 				ui,
 				ctx,
 				repo,
+				model,
 				config: loaded.config,
 				configSources: loaded.sources,
 				report: (branch) => nextReporter?.report(branch),
@@ -164,11 +183,21 @@ export default function (pi: ExtensionAPI) {
 		if (!active) return;
 		for (const warning of loaded.warnings) say(ctx, warning, "warning");
 
+		// The worktree cache seeds from the lock-free snapshot, not the reconciling
+		// `list()`: a fresh session has no completion to offer yet, and paying the
+		// registry lock for it here would cost every session start what only a
+		// keystroke needs to be cheap. The snapshot has no unmanaged half, so until
+		// the cache is refilled this is managed-only: in a repository with nothing
+		// jimothy manages, `focus <tab>` offers only `off` and `remove <tab>` offers
+		// nothing. That is a deliberate trade, not an oversight — the reconciling
+		// read would take the registry's lock, run git and write `registry.json`
+		// into every repository a session merely opens. A failure here (like a
+		// branch listing failure) is tolerated, never fatal: the cache is refilled
+		// opportunistically by the first `/worktree` command that lists.
 		try {
-			commands.setKnown(await listWorktrees(pi, repo.projectRoot));
+			await commands.refreshCached();
 			commands.setKnownBranches(await listBranches(pi, repo.projectRoot));
 		} catch {
-			commands.setKnown([]);
 			commands.setKnownBranches(EMPTY_BRANCHES);
 		}
 
@@ -314,6 +343,7 @@ export default function (pi: ExtensionAPI) {
 	const commands = createCommands({
 		runner: pi,
 		ui,
+		getModel: () => session?.model,
 		getConfig: () => session?.config ?? DEFAULT_CONFIG,
 		getConfigSources: () => session?.configSources ?? [],
 		getFocus: () => session?.focus,
@@ -330,8 +360,9 @@ export default function (pi: ExtensionAPI) {
 			try {
 				await commands.dispatch(info, ctx, args);
 			} catch (error) {
-				// listWorktrees and friends throw GitError; an unhandled rejection here
-				// would surface as a crash rather than a message.
+				// The registry's reconciling list() and the git calls dispatch makes for
+				// checkout, create and remove all throw; an unhandled rejection here would
+				// surface as a crash rather than a message.
 				say(ctx, (error as Error).message, "error");
 			}
 		},
@@ -346,7 +377,11 @@ export default function (pi: ExtensionAPI) {
 			getConfig: () => session?.config ?? DEFAULT_CONFIG,
 			getSessionCtx: () => session?.ctx,
 			setFocus,
-			setKnown: commands.setKnown,
+			// A create through the tool bypasses the model's write paths (phase 4),
+			// so what it just made is unmanaged until then — snapshot() cannot see
+			// an unmanaged worktree at all, so the reconciling read is the one that
+			// must run here, not refreshCached's lock-free one.
+			refreshKnown: commands.refreshKnown,
 			setKnownBranches: commands.setKnownBranches,
 		}),
 	);

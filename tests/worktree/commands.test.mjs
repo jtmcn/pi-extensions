@@ -29,6 +29,7 @@ import { assertions, execRunner, loadExt, pexec } from "../harness.mjs";
 const { ok, done } = assertions();
 const { createCommands } = await loadExt("worktree/commands.ts");
 const { DEFAULT_CONFIG } = await loadExt("worktree/config.ts");
+const { openModel } = await loadExt("worktree/jimothy.ts");
 const { getRepoInfo } = await loadExt("lib/git.ts");
 
 const exists = async (path) => {
@@ -85,8 +86,14 @@ async function makeClone({ shared = [], remoteOnly = [] } = {}) {
  *
  * `confirm` is a queue of answers, so a test can say yes to removal and no to
  * the branch, which is the combination the code treats as two decisions.
+ *
+ * `dir` is the repository the session's jimothy model is opened over — worktree
+ * identity comes from that model now, so a test that dispatches anything which
+ * lists must supply it. `withModel: false` pins the other path: a session whose
+ * model could not be opened.
  */
-function setup({
+async function setup({
+	dir,
 	hasUI = true,
 	confirms = [],
 	select,
@@ -94,6 +101,7 @@ function setup({
 	editor = async (_prompt, prefill) => prefill,
 	entries = [],
 	config = {},
+	withModel = true,
 } = {}) {
 	const said = [];
 	const reported = [];
@@ -119,9 +127,12 @@ function setup({
 		setStatus: () => {},
 	};
 
+	const model = dir && withModel ? await openModel(execRunner(), dir) : undefined;
+
 	const commands = createCommands({
 		runner,
 		ui,
+		getModel: () => model,
 		getConfig: () => ({ ...DEFAULT_CONFIG, ...config }),
 		getConfigSources: () => [],
 		getFocus: () => focus,
@@ -158,6 +169,7 @@ function setup({
 	return {
 		commands,
 		ctx,
+		model,
 		said,
 		reported,
 		prompts,
@@ -176,7 +188,7 @@ function setup({
 {
 	const { dir } = await makeRepo();
 	const info = await getRepoInfo(execRunner(), dir);
-	const h = setup({ confirms: [true, true] });
+	const h = await setup({ dir, confirms: [true, true] });
 
 	await h.commands.dispatch(info, h.ctx, `remove ${basename(dir)}`);
 	ok(
@@ -187,7 +199,21 @@ function setup({
 	ok("and it is still there", await exists(join(dir, "file.txt")));
 	ok("and it never asked for confirmation", h.prompts.confirm.length === 0);
 
+	// The same guard from inside a linked worktree, which is the other half of
+	// "the session's own": there the session worktree is the one being named.
+	const { dir: other, paths } = await makeRepo();
+	const linkedInfo = await getRepoInfo(execRunner(), paths.exp);
+	const linked = await setup({ dir: other, confirms: [true, true] });
+	await linked.commands.dispatch(linkedInfo, linked.ctx, "remove exp");
+	ok(
+		"refuses to remove the session's own linked worktree",
+		linked.errors().some((m) => m.includes("refusing to remove the session's own worktree")),
+		JSON.stringify(linked.said),
+	);
+	ok("and that one is still there too", await exists(join(paths.exp, "file.txt")));
+
 	await rm(dir, { recursive: true, force: true });
+	await rm(other, { recursive: true, force: true });
 }
 
 // ============================================ remove: dirty worktrees
@@ -196,7 +222,7 @@ function setup({
 	const { dir, paths } = await makeRepo();
 	await writeFile(join(paths.exp, "uncommitted.txt"), "precious\n");
 
-	const h = setup({ hasUI: false });
+	const h = await setup({ dir, hasUI: false });
 	const info = await getRepoInfo(execRunner(), dir);
 	await h.commands.dispatch(info, h.ctx, "remove exp");
 
@@ -215,7 +241,7 @@ function setup({
 	await writeFile(join(paths.exp, "uncommitted.txt"), "precious\n");
 
 	// Interactive, and the user declines.
-	const h = setup({ confirms: [false] });
+	const h = await setup({ dir, confirms: [false] });
 	const info = await getRepoInfo(execRunner(), dir);
 	await h.commands.dispatch(info, h.ctx, "remove exp");
 
@@ -231,7 +257,7 @@ function setup({
 	await writeFile(join(paths.exp, "uncommitted.txt"), "gone\n");
 
 	// Confirm the removal, decline the branch deletion: two decisions.
-	const h = setup({ confirms: [true, false] });
+	const h = await setup({ dir, confirms: [true, false] });
 	const info = await getRepoInfo(execRunner(), dir);
 	await h.commands.dispatch(info, h.ctx, "remove exp");
 
@@ -246,7 +272,7 @@ function setup({
 
 {
 	const { dir, paths } = await makeRepo();
-	const h = setup({ confirms: [true, true] });
+	const h = await setup({ dir, confirms: [true, true] });
 	const info = await getRepoInfo(execRunner(), dir);
 	await h.commands.dispatch(info, h.ctx, "remove exp");
 
@@ -261,7 +287,7 @@ function setup({
 	// Removing the focused worktree must drop focus, or every later tool call is
 	// redirected into a directory that no longer exists.
 	const { dir, paths } = await makeRepo();
-	const h = setup({ confirms: [true, false] });
+	const h = await setup({ dir, confirms: [true, false] });
 	h.setFocus({ path: paths.exp, branch: "exp" });
 	const info = await getRepoInfo(execRunner(), dir);
 	await h.commands.dispatch(info, h.ctx, "remove exp");
@@ -281,7 +307,7 @@ function setup({
 	// on that case cannot tell the two behaviours apart.
 	const { dir } = await makeRepo(["feature-a"]);
 	const info = await getRepoInfo(execRunner(), dir);
-	const h = setup({ hasUI: false });
+	const h = await setup({ dir, hasUI: false });
 
 	await h.commands.dispatch(info, h.ctx, "remove feat");
 	ok(
@@ -302,7 +328,7 @@ function setup({
 {
 	const { dir } = await makeRepo(["feature-a", "feature-b"]);
 	const info = await getRepoInfo(execRunner(), dir);
-	const h = setup({ hasUI: false });
+	const h = await setup({ dir, hasUI: false });
 	await h.commands.dispatch(info, h.ctx, "remove feature");
 	ok("an ambiguous prefix removes nothing", await exists(join(dir, "wt", "feature-a")));
 	await rm(dir, { recursive: true, force: true });
@@ -311,7 +337,7 @@ function setup({
 {
 	const { dir } = await makeRepo(["feature-a", "feature-b"]);
 	const info = await getRepoInfo(execRunner(), dir);
-	const h = setup({ confirms: [] });
+	const h = await setup({ dir, confirms: [] });
 	await h.commands.dispatch(info, h.ctx, "remove feature");
 	ok(
 		"an ambiguous match is reported interactively too",
@@ -324,7 +350,7 @@ function setup({
 {
 	const { dir } = await makeRepo();
 	const info = await getRepoInfo(execRunner(), dir);
-	const h = setup({ hasUI: false });
+	const h = await setup({ dir, hasUI: false });
 	await h.commands.dispatch(info, h.ctx, "remove");
 	ok(
 		"a missing name is an error, not a prompt, with no UI",
@@ -337,7 +363,7 @@ function setup({
 {
 	const { dir } = await makeRepo();
 	const info = await getRepoInfo(execRunner(), dir);
-	const h = setup({ confirms: [false], select: (labels) => labels[0] });
+	const h = await setup({ dir, confirms: [false], select: (labels) => labels[0] });
 	await h.commands.dispatch(info, h.ctx, "remove");
 	ok("with a UI it offers a picker", h.prompts.select.length === 1, JSON.stringify(h.prompts.select));
 	ok("the picker lists the worktrees", h.prompts.select[0]?.labels.length >= 1);
@@ -349,7 +375,7 @@ function setup({
 {
 	const { dir, paths } = await makeRepo();
 	const info = await getRepoInfo(execRunner(), dir);
-	const h = setup();
+	const h = await setup({ dir });
 
 	await h.commands.dispatch(info, h.ctx, "focus exp");
 	ok("focus resolves a name", h.focusCalls.at(-1)?.path === paths.exp, JSON.stringify(h.focusCalls));
@@ -370,7 +396,7 @@ function setup({
 	const { dir, paths } = await makeRepo();
 	await writeFile(join(paths.exp, "dirty.txt"), "x\n");
 	const info = await getRepoInfo(execRunner(), dir);
-	const h = setup();
+	const h = await setup({ dir });
 	h.setFocus({ path: paths.exp, branch: "exp" });
 
 	await h.commands.dispatch(info, h.ctx, "list");
@@ -382,12 +408,122 @@ function setup({
 	await rm(dir, { recursive: true, force: true });
 }
 
+// ============================================ list: rendered from the model
+
+{
+	// A worktree jimothy did not create is surfaced, labelled, and keeps its
+	// branch — losing the branch would break `/worktree focus <branch>`.
+	const { dir, paths } = await makeRepo();
+	const info = await getRepoInfo(execRunner(), dir);
+	const h = await setup({ dir });
+
+	await h.commands.dispatch(info, h.ctx, "list");
+	const block = h.reported[0]?.lines ?? [];
+	const listed = block.find((line) => line.startsWith("exp "));
+	ok("lists a worktree the registry did not create", listed !== undefined, JSON.stringify(block));
+	ok("labels it unmanaged", /unmanaged/.test(String(listed)), String(listed));
+	ok("keeps its branch", /\(exp\)/.test(String(listed)), String(listed));
+
+	// The model omits the main working tree because nothing it does applies to
+	// one; this extension has always listed and focused it, so `refresh` puts it
+	// back. Asserted directly so a future reader sees it is deliberate.
+	const registryPaths = (await h.model.registry.list()).unmanaged.map((entry) => entry.path);
+	ok("the registry's own listing omits the main working tree", !registryPaths.includes(dir), JSON.stringify(registryPaths));
+	const main = block.find((line) => line.startsWith(`${basename(dir)} `));
+	ok("the main working tree is listed anyway", main !== undefined, JSON.stringify(block));
+	ok("with the branch it has checked out", /\(main\)/.test(String(main)), String(main));
+	ok("and it is marked as the session's", /session/.test(String(main)), String(main));
+	ok("exactly once", block.filter((line) => line.startsWith(`${basename(dir)} `)).length === 1, JSON.stringify(block));
+
+	// The same repository from inside the linked worktree: the session marker
+	// follows the session, not the repository.
+	const linkedInfo = await getRepoInfo(execRunner(), paths.exp);
+	const linked = await setup({ dir });
+	await linked.commands.dispatch(linkedInfo, linked.ctx, "list");
+	const fromLinked = linked.reported[0]?.lines ?? [];
+	ok(
+		"a session in a linked worktree marks that one",
+		/session/.test(String(fromLinked.find((line) => line.startsWith("exp ")))),
+		JSON.stringify(fromLinked),
+	);
+	ok(
+		"and the main working tree is still listed, unmarked",
+		!/session/.test(String(fromLinked.find((line) => line.startsWith(`${basename(dir)} `)))),
+		JSON.stringify(fromLinked),
+	);
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// A session that could not open the model still runs: listing says why
+	// instead of throwing.
+	const { dir } = await makeRepo();
+	const info = await getRepoInfo(execRunner(), dir);
+	const h = await setup({ dir, withModel: false });
+
+	await h.commands.dispatch(info, h.ctx, "list");
+	ok(
+		"says why it cannot list rather than throwing",
+		h.errors().some((m) => /unavailable/i.test(m)),
+		JSON.stringify(h.said),
+	);
+	ok("and reports nothing", h.reported.length === 0, JSON.stringify(h.reported));
+
+	// Not "no worktrees found": on the destructive path that reading would invite
+	// the user to recreate something that is still there.
+	await h.commands.dispatch(info, h.ctx, "remove exp");
+	ok(
+		"naming a worktree says the same, rather than that there are none",
+		h.errors().every((m) => /unavailable/i.test(m)) && h.errors().length === 2,
+		JSON.stringify(h.said),
+	);
+	ok("and removes nothing", await exists(join(dir, "wt", "exp")));
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+// ================================= list: bare-repository layout
+
+{
+	// proj/.bare + proj/main + siblings: the same layout the AGENTS.md invariant
+	// names as the one exception where `mainWorktree` is not the repository's
+	// invoking directory. `openModel`'s cwd is `proj/main`, and the assertion is
+	// the same one the plain-repo listing test above makes: the main working
+	// tree is still listed, unmanaged, under this layout too.
+	const root = await realpath(await mkdtemp(join(tmpdir(), "pi-commands-bare-")));
+	const seed = join(root, "seed");
+	await pexec("git", ["init", "-q", "-b", "main", seed]);
+	await pexec("git", ["config", "user.email", "test@example.com"], { cwd: seed });
+	await pexec("git", ["config", "user.name", "Test"], { cwd: seed });
+	await writeFile(join(seed, "file.txt"), "hi\n");
+	await pexec("git", ["add", "."], { cwd: seed });
+	await pexec("git", ["commit", "-q", "-m", "init"], { cwd: seed });
+
+	const proj = join(root, "proj");
+	await pexec("git", ["clone", "-q", "--bare", seed, join(proj, ".bare")]);
+	await writeFile(join(proj, ".git"), "gitdir: ./.bare\n");
+	await pexec("git", ["worktree", "add", "-q", join(proj, "main"), "main"], { cwd: proj });
+
+	const info = await getRepoInfo(execRunner(), join(proj, "main"));
+	const h = await setup({ dir: join(proj, "main") });
+	await h.commands.dispatch(info, h.ctx, "list");
+	const block = h.reported[0]?.lines ?? [];
+	const main = block.find((line) => line.startsWith("main "));
+	ok("bare layout: main working tree is listed", main !== undefined, JSON.stringify(block));
+	ok("bare layout: labelled unmanaged", /unmanaged/.test(String(main)), String(main));
+	ok("bare layout: with its checked-out branch", /\(main\)/.test(String(main)), String(main));
+	ok("bare layout: marked as the session's", /session/.test(String(main)), String(main));
+
+	await rm(root, { recursive: true, force: true });
+}
+
 // ============================================ dispatch
 
 {
 	const { dir } = await makeRepo();
 	const info = await getRepoInfo(execRunner(), dir);
-	const h = setup();
+	const h = await setup({ dir });
 	await h.commands.dispatch(info, h.ctx, "bogus");
 	ok("an unknown subcommand is an error", h.errors().some((m) => m.includes('unknown subcommand "bogus"')), JSON.stringify(h.said));
 
@@ -405,7 +541,7 @@ function setup({
 	const { dir } = await makeRepo();
 	const info = await getRepoInfo(execRunner(), dir);
 	// No arguments and no UI lists rather than prompting into the void.
-	const h = setup({ hasUI: false });
+	const h = await setup({ dir, hasUI: false });
 	await h.commands.dispatch(info, h.ctx, "");
 	ok("bare /worktree with no UI lists", h.reported.length === 1, JSON.stringify(h.reported));
 	await rm(dir, { recursive: true, force: true });
@@ -416,7 +552,7 @@ function setup({
 {
 	const { dir } = await makeRepo(["feature-a", "feature-b"]);
 	const info = await getRepoInfo(execRunner(), dir);
-	const h = setup();
+	const h = await setup({ dir });
 	await h.commands.dispatch(info, h.ctx, "list");
 
 	ok("completes subcommands", (h.commands.getArgumentCompletions("re") ?? []).some((i) => i.value === "remove"));
@@ -439,7 +575,7 @@ const userEntry = (content) => ({ type: "message", message: { role: "user", cont
 	const { dir } = await makeRepo([]);
 	const info = await getRepoInfo(execRunner(), dir);
 	// Accepting the suggestion: the default fake editor returns its prefill.
-	const h = setup({
+	const h = await setup({ dir,
 		entries: [userEntry("fix the parser bug"), userEntry("yes, do it")],
 		config: { path: "wt", branchPrefix: "" },
 	});
@@ -457,7 +593,7 @@ const userEntry = (content) => ({ type: "message", message: { role: "user", cont
 	const { dir } = await makeRepo([]);
 	const info = await getRepoInfo(execRunner(), dir);
 	// Typing over the suggestion wins, and a stray newline is not part of the name.
-	const h = setup({
+	const h = await setup({ dir,
 		entries: [userEntry("fix the parser bug")],
 		editor: async () => "my-own-name\n",
 		config: { path: "wt", branchPrefix: "" },
@@ -475,7 +611,7 @@ const userEntry = (content) => ({ type: "message", message: { role: "user", cont
 	const { dir } = await makeRepo([]);
 	const info = await getRepoInfo(execRunner(), dir);
 	// Clearing the field cancels, as an empty submit always has.
-	const h = setup({ entries: [userEntry("fix the parser bug")], editor: async () => "  ", config: { path: "wt", branchPrefix: "" } });
+	const h = await setup({ dir, entries: [userEntry("fix the parser bug")], editor: async () => "  ", config: { path: "wt", branchPrefix: "" } });
 
 	await h.commands.dispatch(info, h.ctx, "new");
 
@@ -488,7 +624,7 @@ const userEntry = (content) => ({ type: "message", message: { role: "user", cont
 	const { dir } = await makeRepo([]);
 	const info = await getRepoInfo(execRunner(), dir);
 	// Esc is the same as an empty submit.
-	const h = setup({ entries: [userEntry("fix the parser bug")], editor: async () => undefined, config: { path: "wt", branchPrefix: "" } });
+	const h = await setup({ dir, entries: [userEntry("fix the parser bug")], editor: async () => undefined, config: { path: "wt", branchPrefix: "" } });
 
 	await h.commands.dispatch(info, h.ctx, "new");
 
@@ -501,7 +637,7 @@ const userEntry = (content) => ({ type: "message", message: { role: "user", cont
 	const { dir } = await makeRepo([]);
 	const info = await getRepoInfo(execRunner(), dir);
 	// Embedded newlines: only the first line is used.
-	const h = setup({
+	const h = await setup({ dir,
 		entries: [userEntry("fix the parser bug")],
 		editor: async () => "foo\nbar",
 		config: { path: "wt", branchPrefix: "" },
@@ -519,7 +655,7 @@ const userEntry = (content) => ({ type: "message", message: { role: "user", cont
 	const { dir } = await makeRepo([]);
 	const info = await getRepoInfo(execRunner(), dir);
 	// A leading blank line is trimmed, not treated as a cancel.
-	const h = setup({
+	const h = await setup({ dir,
 		entries: [userEntry("fix the parser bug")],
 		editor: async () => "\nfoo",
 		config: { path: "wt", branchPrefix: "" },
@@ -537,7 +673,7 @@ const userEntry = (content) => ({ type: "message", message: { role: "user", cont
 	const info = await getRepoInfo(execRunner(), dir);
 	// The suggested name is already taken: offer the suffixed one.
 	await pexec("git", ["worktree", "add", "-q", "-b", "fix-parser-bug", join(dir, "wt", "fix-parser-bug")], { cwd: dir });
-	const h = setup({ entries: [userEntry("fix the parser bug")], config: { path: "wt", branchPrefix: "" } });
+	const h = await setup({ dir, entries: [userEntry("fix the parser bug")], config: { path: "wt", branchPrefix: "" } });
 
 	await h.commands.dispatch(info, h.ctx, "new");
 
@@ -551,7 +687,7 @@ const userEntry = (content) => ({ type: "message", message: { role: "user", cont
 	const { dir } = await makeRepo([]);
 	const info = await getRepoInfo(execRunner(), dir);
 	// Non-interactive: no prompt to fall back on, so use the suggestion.
-	const h = setup({ hasUI: false, entries: [userEntry("fix the parser bug")], config: { path: "wt", branchPrefix: "" } });
+	const h = await setup({ dir, hasUI: false, entries: [userEntry("fix the parser bug")], config: { path: "wt", branchPrefix: "" } });
 
 	await h.commands.dispatch(info, h.ctx, "new");
 
@@ -565,7 +701,7 @@ const userEntry = (content) => ({ type: "message", message: { role: "user", cont
 	const { dir } = await makeRepo([]);
 	const info = await getRepoInfo(execRunner(), dir);
 	// No transcript at all: still a name, and still a worktree.
-	const h = setup({ hasUI: false, entries: [], config: { path: "wt", branchPrefix: "" } });
+	const h = await setup({ dir, hasUI: false, entries: [], config: { path: "wt", branchPrefix: "" } });
 
 	await h.commands.dispatch(info, h.ctx, "new");
 
@@ -582,7 +718,7 @@ const userEntry = (content) => ({ type: "message", message: { role: "user", cont
 {
 	const { dir, paths } = await makeRepo(["exp"]);
 	const info = await getRepoInfo(execRunner(), dir);
-	const t = setup({ config: { branchPrefix: "joel/", autoFocus: true } });
+	const t = await setup({ dir, config: { branchPrefix: "joel/", autoFocus: true } });
 	await pexec("git", ["branch", "joel/local-work"], { cwd: dir });
 
 	await t.commands.dispatch(info, t.ctx, "checkout joel/local-work");
@@ -610,7 +746,7 @@ const userEntry = (content) => ({ type: "message", message: { role: "user", cont
 	// miss, fetch once, and then succeed.
 	const { root, dir } = await makeClone({ shared: ["alice/hotfix"], remoteOnly: ["pushed-later"] });
 	const info = await getRepoInfo(execRunner(), dir);
-	const t = setup({ config: { branchPrefix: "joel/", autoFocus: false } });
+	const t = await setup({ dir, config: { branchPrefix: "joel/", autoFocus: false } });
 
 	await t.commands.dispatch(info, t.ctx, "checkout origin/alice/hotfix");
 	const hotfix = join(dir, ".claude/worktrees/alice-hotfix");
@@ -637,7 +773,7 @@ const userEntry = (content) => ({ type: "message", message: { role: "user", cont
 	// Non-interactive: no argument is an error, never a prompt.
 	const { dir } = await makeRepo([]);
 	const info = await getRepoInfo(execRunner(), dir);
-	const t = setup({ hasUI: false });
+	const t = await setup({ dir, hasUI: false });
 	await t.commands.dispatch(info, t.ctx, "checkout");
 	ok("checkout: no argument without a UI is an error", t.errors().at(-1)?.includes("required"), String(t.errors().at(-1)));
 	ok("checkout: no picker is shown without a UI", t.prompts.select.length === 0);
@@ -648,7 +784,7 @@ const userEntry = (content) => ({ type: "message", message: { role: "user", cont
 	// Interactive picker, and the marking of a branch already checked out.
 	const { dir } = await makeRepo(["exp"]);
 	const info = await getRepoInfo(execRunner(), dir);
-	const t = setup({ select: (labels) => labels.find((l) => l.startsWith("main")) });
+	const t = await setup({ dir, select: (labels) => labels.find((l) => l.startsWith("main")) });
 	await t.commands.dispatch(info, t.ctx, "checkout");
 	const labels = t.prompts.select.at(-1)?.labels ?? [];
 	ok("checkout: picker lists branches", labels.some((l) => l.startsWith("exp")), JSON.stringify(labels));
@@ -665,7 +801,7 @@ const userEntry = (content) => ({ type: "message", message: { role: "user", cont
 	// An explicit name is used verbatim; a derived one gets uniquified.
 	const { dir } = await makeRepo([]);
 	const info = await getRepoInfo(execRunner(), dir);
-	const t = setup({ config: { branchPrefix: "joel/" } });
+	const t = await setup({ dir, config: { branchPrefix: "joel/" } });
 	await pexec("git", ["branch", "joel/thing"], { cwd: dir });
 	await pexec("git", ["branch", "other/thing"], { cwd: dir });
 	await t.commands.dispatch(info, t.ctx, "checkout joel/thing custom-dir");
@@ -693,7 +829,7 @@ const userEntry = (content) => ({ type: "message", message: { role: "user", cont
 	// branch `/worktree new` just made without waiting for the next session.
 	const { dir } = await makeRepo([]);
 	const info = await getRepoInfo(execRunner(), dir);
-	const t = setup({ config: { branchPrefix: "joel/" } });
+	const t = await setup({ dir, config: { branchPrefix: "joel/" } });
 	ok("completions: nothing is cached before anything runs", t.commands.getArgumentCompletions("checkout ") === null);
 
 	await t.commands.dispatch(info, t.ctx, "new fresh-thing");
@@ -709,7 +845,9 @@ const userEntry = (content) => ({ type: "message", message: { role: "user", cont
 // ==================================================== completions
 
 {
-	const t = setup();
+	// Branch completions come from the cache alone, so this block needs no repo
+	// and no model.
+	const t = await setup();
 	t.commands.setKnownBranches({
 		local: ["main", "joel/fix-parser", "feature/joel/cleanup"],
 		remote: [{ remote: "origin", name: "alice/hotfix", full: "origin/alice/hotfix" }],
@@ -726,6 +864,85 @@ const userEntry = (content) => ({ type: "message", message: { role: "user", cont
 
 	t.commands.setKnownBranches({ local: [], remote: [], remotes: [] });
 	ok("completions: cleared cache offers nothing", t.commands.getArgumentCompletions("checkout ") === null);
+}
+
+// ==================================================== completions: from the model's shape
+
+{
+	// No repo or model needed: `setKnown` drives the cache directly, same as the
+	// `setKnownBranches` block above.
+	const h = await setup();
+	h.commands.setKnown([
+		{ name: "alpha", path: "/wt/alpha", branch: "jimothy/alpha", managed: true, status: "provisioned" },
+		{ name: "chosen", path: "/hand/dup", branch: "feature-y", managed: true, status: "not provisioned" },
+		{ name: "made", path: "/hand/made", branch: "feature-x", managed: false },
+	]);
+	const focus = h.commands.getArgumentCompletions("focus ") ?? [];
+	const values = focus.map((item) => item.value);
+	ok("offers registry names", values.includes("focus alpha") && values.includes("focus chosen"), JSON.stringify(values));
+	ok("offers unmanaged worktrees too", values.includes("focus made"), JSON.stringify(values));
+	ok("offers 'off' for focus", values.includes("focus off"), JSON.stringify(values));
+	const filtered = h.commands.getArgumentCompletions("focus al") ?? [];
+	ok("filters by prefix", filtered.length > 0 && filtered.every((item) => /al/.test(item.value)), JSON.stringify(filtered));
+	ok("returns null when nothing matches", h.commands.getArgumentCompletions("focus zzz") === null);
+}
+
+// ==================================================== refreshCached: lock-free
+
+{
+	// The whole point of `refreshCached` is that it costs no registry lock and no
+	// rewrite. A spy on `list()` (the reconciling call `refresh`/`refreshKnown`
+	// use) proves it: this would fail if `refreshCached` were implemented over
+	// `list()` instead of `snapshot()`.
+	const { dir } = await makeRepo();
+	const model = await openModel(execRunner(), dir);
+	let listed = 0;
+	const spyModel = {
+		...model,
+		registry: {
+			...model.registry,
+			list: async (...args) => {
+				listed++;
+				return model.registry.list(...args);
+			},
+			snapshot: (...args) => model.registry.snapshot(...args),
+		},
+	};
+	const commands = createCommands({
+		runner: execRunner(),
+		ui: { say: () => {}, report: () => {}, clearReport: () => {}, clearAll: () => {}, setStatus: () => {} },
+		getModel: () => spyModel,
+		getConfig: () => DEFAULT_CONFIG,
+		getConfigSources: () => [],
+		getFocus: () => undefined,
+		setFocus: () => {},
+	});
+
+	await commands.refreshCached();
+	ok("seeding the completion cache does not reconcile", listed === 0);
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+// ==================================================== refreshKnown: sees unmanaged worktrees
+
+{
+	// The reconciling read is the whole reason `refreshKnown` exists separately
+	// from `refreshCached`: `snapshot()` has no unmanaged half at all, so a
+	// worktree the model-facing tool just created through raw git would be
+	// invisible to completions until the next `/worktree` command, unless the
+	// tool calls this one instead.
+	const { dir, paths } = await makeRepo();
+	const h = await setup({ dir });
+
+	const seen = await h.commands.refreshKnown();
+	ok(
+		"refreshKnown sees the unmanaged worktree",
+		seen.some((wt) => wt.path === paths.exp && !wt.managed),
+		JSON.stringify(seen),
+	);
+
+	await rm(dir, { recursive: true, force: true });
 }
 done();
 

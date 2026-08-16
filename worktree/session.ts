@@ -19,6 +19,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import type { GitRunner, RepoInfo } from "../lib/git.ts";
 import { DEFAULT_CONFIG, type WorktreeConfig } from "./config.ts";
 import type { FocusTarget } from "./focus.ts";
+import type { Model } from "./jimothy.ts";
 import { resolveTarget } from "./pr.ts";
 import { createPrMonitor, type PrMonitor } from "./pr-monitor.ts";
 import type { Ui } from "./ui.ts";
@@ -44,6 +45,18 @@ export interface SessionOptions {
 	ctx: ExtensionContext;
 	/** Undefined outside a git repository; the session still exists. */
 	repo: RepoInfo | undefined;
+	/**
+	 * jimothy's worktree model, or undefined when it could not be opened.
+	 *
+	 * Per-session rather than per-process because the repository it is opened
+	 * over is: a replaced session can be standing in a different repository, or
+	 * the same one with different config, and must not inherit the old one's
+	 * model. Giving its deps the session's `AbortSignal`, so a child cannot
+	 * outlive the session that started it, is phase 3's wiring — not this one's.
+	 * Stated explicitly, like `repo`, so a missed wiring cannot hide behind a
+	 * default.
+	 */
+	model: Model | undefined;
 	config?: WorktreeConfig;
 	/** Config files that were applied, for `/worktree config`. */
 	configSources?: string[];
@@ -59,6 +72,7 @@ export interface SessionOptions {
 export interface WorktreeSession {
 	readonly ctx: ExtensionContext;
 	readonly repo: RepoInfo | undefined;
+	readonly model: Model | undefined;
 	readonly config: WorktreeConfig;
 	readonly configSources: string[];
 	readonly focus: FocusTarget | undefined;
@@ -74,7 +88,7 @@ export interface WorktreeSession {
 }
 
 export function createSession(options: SessionOptions): WorktreeSession {
-	const { pi, ui, ctx, repo } = options;
+	const { pi, ui, ctx, repo, model } = options;
 	const config = options.config ?? { ...DEFAULT_CONFIG };
 	const configSources = options.configSources ?? [];
 	const report = options.report ?? (() => {});
@@ -147,6 +161,7 @@ export function createSession(options: SessionOptions): WorktreeSession {
 	return {
 		ctx,
 		repo,
+		model,
 		config,
 		configSources,
 		get focus() {
