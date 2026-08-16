@@ -147,7 +147,15 @@ export function createFakePi({
 			own,
 			paints: own.statuses,
 			isProjectTrusted: () => projectTrusted,
-			sessionManager: { getBranch: () => entries(), getEntries: () => entries() },
+			// `getSessionId`/`getSessionFile` are what pi's own bash tool reads to
+			// build PI_SESSION_ID and PI_SESSION_FILE for the command's environment,
+			// so an extension that executes through a built-in definition needs them.
+			sessionManager: {
+				getBranch: () => entries(),
+				getEntries: () => entries(),
+				getSessionId: () => "fake-session-id",
+				getSessionFile: () => undefined,
+			},
 			getSystemPrompt: resolvePrompt,
 			ui: {
 				setStatus: (_key, value) => {
