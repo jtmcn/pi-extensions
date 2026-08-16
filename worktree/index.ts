@@ -153,13 +153,20 @@ export default function (pi: ExtensionAPI) {
 	const held = (decision: { lease: WorktreeLease; ageMs: number }) =>
 		describeLease({ state: "held", lease: decision.lease, ageMs: decision.ageMs });
 
-	/** Carry out a decision, and record what we ended up holding. */
+	/**
+	 * Carry out a decision, and record what we ended up holding.
+	 *
+	 * `retargetRetry` bounds the retarget row's re-decision: `true` on the first
+	 * call (from `takeLease`'s default), `false` on the recursive one, so a
+	 * lease that changes hands twice in a row is never chased a third time.
+	 */
 	const applyDecision = async (
 		active: WorktreeSession,
 		ctx: ExtensionContext,
 		model: Model,
 		record: WorktreeRecord | undefined,
 		decision: LeaseDecision,
+		retargetRetry: boolean,
 	) => {
 		if (!record || decision.kind === "unmanaged") return;
 		const hold = (runId: string) =>
@@ -185,11 +192,16 @@ export default function (pi: ExtensionAPI) {
 				});
 				// False means the lease changed hands between the read and this call —
 				// the launcher died and someone reclaimed it. Start again from the
-				// current facts rather than assuming. This re-decides exactly once: the
-				// launcher's lease is gone, so no second pass can reach this row again,
-				// and every other row is terminal.
+				// current facts rather than assuming, but only once: `retargetRetry`
+				// is what enforces that bound, since nothing about the decision shape
+				// itself stops a record that races back into the retarget row from
+				// recursing again. A lease that has changed hands twice under us in a
+				// millisecond is not safely ours to chase further, so the second
+				// failure is left unleased and reported by name. Exercised only by a
+				// real race between two processes, not by a test — see the report.
 				if (moved) hold(decision.runId);
-				else await takeLease(active, ctx);
+				else if (retargetRetry) await takeLease(active, ctx, false);
+				else say(ctx, `worktree "${record.name}" lease changed hands again; leaving it unleased`, "warning");
 				return;
 			}
 			case "adopt":
@@ -222,7 +234,7 @@ export default function (pi: ExtensionAPI) {
 	 *
 	 * Everything here is reported and nothing is fatal: pi is already running.
 	 */
-	const takeLease = async (active: WorktreeSession, ctx: ExtensionContext) => {
+	const takeLease = async (active: WorktreeSession, ctx: ExtensionContext, retargetRetry = true) => {
 		const model = active.model;
 		if (!model) return;
 		try {
@@ -236,7 +248,7 @@ export default function (pi: ExtensionAPI) {
 				ppid: process.ppid,
 				hasUI: ctx.hasUI,
 			});
-			await applyDecision(active, ctx, model, record, decision);
+			await applyDecision(active, ctx, model, record, decision, retargetRetry);
 		} catch (error) {
 			// Lock contention and a corrupt registry both arrive here as a UserError,
 			// and a session never dies of either.
