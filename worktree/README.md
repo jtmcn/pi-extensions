@@ -108,6 +108,18 @@ keeping jimothy's run id so jimothy's own release still matches. The handoff is
 recognised by parentage — the lease's owner has to be this process's parent — so
 pi must stay a direct child of jimothy for it to work.
 
+A lease this session took is released when the session ends, whatever ended it —
+`/reload`, `/new`, a fork, or quitting outright — because the runId decides who
+gives it back, not how it was obtained: even a lease this session only *adopted*
+(a hand-launched pi that reloaded and met its own lease under its own pid, with
+no launcher anywhere) is still this session's to release. A lease its launcher
+took, and only retargeted onto this process, is left alone: jimothy's own
+`finally` releases that one under the same run id, and a session that released
+it here would let jimothy's later release unlock a worktree someone else has
+since taken. A session killed outright releases nothing, and leaves a lease
+naming a pid that is now dead — which the next session to open that worktree
+reclaims, and says so.
+
 None of this is fatal. A registry that cannot be read, or a lock another process
 is holding, is reported as a warning; the session still starts, still focuses,
 and still monitors a PR.

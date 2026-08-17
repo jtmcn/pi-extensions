@@ -491,6 +491,24 @@ export default function (pi: ExtensionAPI) {
 				`  cd ${focus.path}`,
 			]);
 		}
+		// Ours to release, or the launcher's? The runId decides, not how we got it:
+		// a hand-launched pi that reloaded *adopted* its own lease and must still
+		// give it back, while a delegated one is released by jimothy's own finally,
+		// which matches on that same runId.
+		//
+		// This must run before replaceSession(undefined) below, not after: it reads
+		// the session's leases and its model, and a session that has already dropped
+		// its model cannot release anything.
+		const model = session?.model;
+		for (const lease of session?.leases ?? []) {
+			if (!model || lease.provenance !== "ours") continue;
+			// Reported, never fatal: pi is on its way out, and a lock we could not take
+			// leaves a lease whose pid is about to be dead — which the next run reclaims.
+			await model.registry.releaseLease(lease.name, lease.runId).catch((error: Error) => {
+				say(ctx, `could not release the worktree lease: ${error.message}`, "warning");
+			});
+		}
+
 		// Retire session and UI before awaiting the clear: if pi fires session_start
 		// before the clear resolves, a post-await replaceSession(undefined) would
 		// silently dispose the newly created session. Workspace tokens have no TTL,

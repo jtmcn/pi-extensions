@@ -670,8 +670,14 @@ const focusEntry = (data) => ({
 	await rm(dir, { recursive: true, force: true });
 }
 
-// --- a lease already ours survives a reload ------------------------------
+// --- a lease already ours is re-acquired cleanly across a reload -----------
 {
+	// Before release existed, the outgoing session's lease was still live at the
+	// next session_start, so it had to be *adopted* rather than re-acquired
+	// (acquireLease refuses a live lease, even our own). Now session_shutdown
+	// gives an "ours" lease back regardless of why it fired, so the replacement
+	// session meets a free record and acquires it afresh — which must still be
+	// silent and uncontested, not treated as a stranger's worktree.
 	const { dir, model, record } = await makeManaged();
 	const h = harness(record.path, []);
 	await h.fire("session_start");
@@ -681,12 +687,82 @@ const focusEntry = (data) => ({
 
 	const owner = await ownerOf(model, "alpha");
 	ok("the replacement session holds the lease", owner?.pid === process.pid, JSON.stringify(owner));
-	// Re-acquiring is not merely wasteful: acquireLease refuses a live lease, even
-	// our own, so a reload that tried would report the worktree as unavailable.
-	ok("by adopting it rather than taking it again", owner?.since === first?.since, `${first?.since} -> ${owner?.since}`);
+	ok("under the same run id", owner?.runId === first?.runId, JSON.stringify(owner));
+	ok("freshly acquired, not the same lease record", owner?.since !== first?.since, `${first?.since} -> ${owner?.since}`);
 	ok("and says nothing about it", h.messages().every((m) => !/lease/i.test(m)), JSON.stringify(h.notices));
 
 	await h.fire("session_shutdown");
+	await rm(dir, { recursive: true, force: true });
+}
+
+// --- release, by provenance ------------------------------------------------
+//
+// Provenance asks who will release the lease, not who took it: a lease we
+// acquired is ours to give back, a delegated one is jimothy's own finally's,
+// and a lease we adopted with no launcher anywhere is still ours.
+
+{
+	const { dir, model, record } = await makeManaged();
+	const h = harness(record.path, []);
+	await h.fire("session_start");
+	await h.fire("session_shutdown", { reason: "quit" });
+
+	ok("a lease we took is released", (await ownerOf(model, "alpha")) === undefined);
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// Delegated: jimothy's own `finally` releases this one, matching on its runId.
+	const { dir, model, record } = await makeManaged();
+	await model.registry.acquireLease("alpha", "launch-1", process.ppid, { label: "run" });
+	process.env.JIMOTHY_RUN_ID = "launch-1";
+	process.env.JIMOTHY_WORKTREE = record.path;
+	try {
+		const h = harness(record.path, []);
+		await h.fire("session_start");
+		await h.fire("session_shutdown", { reason: "quit" });
+
+		const owner = await ownerOf(model, "alpha");
+		ok("a delegated lease is left for its launcher", owner !== undefined, JSON.stringify(owner));
+		ok("still under the launcher's run id", owner?.runId === "launch-1", JSON.stringify(owner));
+	} finally {
+		delete process.env.JIMOTHY_RUN_ID;
+		delete process.env.JIMOTHY_WORKTREE;
+	}
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// The case a how-it-was-obtained rule gets wrong: hand-launched, reloaded, so
+	// the second session *adopted* its own lease — and must still release it.
+	const { dir, model, record } = await makeManaged();
+	const h = harness(record.path, []);
+	await h.fire("session_start");
+	await h.fire("session_shutdown", { reason: "reload" });
+	await h.fire("session_start");
+	await h.fire("session_shutdown", { reason: "quit" });
+
+	ok("an adopted lease with no launcher is released on the way out", (await ownerOf(model, "alpha")) === undefined);
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// A release that arrives after someone else has taken the worktree must not
+	// unlock it. `releaseLease` ignores a runId that is not the holder; this pins
+	// that the extension relies on it rather than deleting blindly.
+	const { dir, model, record } = await makeManaged();
+	const h = harness(record.path, []);
+	await h.fire("session_start");
+	await model.registry.breakLease("alpha", { force: true });
+	await model.registry.acquireLease("alpha", "someone-else", stranger.pid, { label: "pi session" });
+	await h.fire("session_shutdown", { reason: "quit" });
+
+	const owner = await ownerOf(model, "alpha");
+	ok("a late release does not unlock someone else's worktree", owner?.runId === "someone-else", JSON.stringify(owner));
+
 	await rm(dir, { recursive: true, force: true });
 }
 
