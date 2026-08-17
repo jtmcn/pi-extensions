@@ -211,9 +211,15 @@ export default function (pi: ExtensionAPI) {
 				return true;
 			}
 			case "adopt":
-				// Already ours: `session_shutdown` fires before the replacement's
-				// `session_start`, so this is the ordinary `/reload` path. Whether it is
-				// ours to release is the runId's business, not this row's.
+				// Already ours: `lease.pid === input.pid` in decideLease. An "ours" lease no
+				// longer reaches this row — session_shutdown releases it before the
+				// replacement's session_start runs, so that case takes the acquire row
+				// instead. What lands here now is a delegated lease: retargeted onto this
+				// pid at an earlier session_start, left alone by every shutdown since
+				// (jimothy's own `finally` owns it), and still naming the launcher's run
+				// id when the process reloads, forks, or is otherwise replaced. Whether it
+				// is ours to release is still the runId's business, not this row's — hold()
+				// classifies it as delegated below. Task 7 exercises this end to end.
 				hold(decision.runId);
 				return true;
 			case "warn":
@@ -495,6 +501,19 @@ export default function (pi: ExtensionAPI) {
 		// a hand-launched pi that reloaded *adopted* its own lease and must still
 		// give it back, while a delegated one is released by jimothy's own finally,
 		// which matches on that same runId.
+		//
+		// Unconditional across every `reason`, not just "quit": an "ours" lease left
+		// held past this shutdown is a lease with nobody left to release it. `/reload`
+		// and `/fork` replace the session object but keep the process, so releasing
+		// only on the terminal shutdown would leave that lease held by a live pid for
+		// the rest of the process's life — recoverable only with `jimothy wt release
+		// --force`, since no session object survives to know it should be freed. The
+		// cost accepted instead is a window, one event-loop turn wide, between this
+		// release and the replacement session's session_start re-acquiring the same
+		// name, in which another process could in principle take it. That failure is
+		// visible and self-correcting — the replacement session prompts, exactly as
+		// it would for any other stranger's lease — rather than the silent, permanent
+		// leak the alternative risks.
 		//
 		// This must run before replaceSession(undefined) below, not after: it reads
 		// the session's leases and its model, and a session that has already dropped

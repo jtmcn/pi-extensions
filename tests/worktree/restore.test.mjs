@@ -678,6 +678,11 @@ const focusEntry = (data) => ({
 	// gives an "ours" lease back regardless of why it fired, so the replacement
 	// session meets a free record and acquires it afresh — which must still be
 	// silent and uncontested, not treated as a stranger's worktree.
+	//
+	// The pairing to keep in mind: an "ours" lease is released and re-acquired
+	// here. A delegated lease is the one this shutdown deliberately leaves alone,
+	// so it is what still meets the adopt row on the far side of a reload — that
+	// case, and the launcher-run-id assertion it needs, is Task 7's.
 	const { dir, model, record } = await makeManaged();
 	const h = harness(record.path, []);
 	await h.fire("session_start");

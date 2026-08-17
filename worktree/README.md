@@ -120,6 +120,13 @@ since taken. A session killed outright releases nothing, and leaves a lease
 naming a pid that is now dead — which the next session to open that worktree
 reclaims, and says so.
 
+Releasing unconditionally, on every reason rather than only on the terminal
+quit, means a `/reload` or `/fork` briefly leaves the worktree unleased: the
+outgoing session gives it back before the replacement acquires it fresh, and
+for that one event-loop turn nothing here holds the name. A session that loses
+that race is told, exactly as it would be for any other stranger's lease — not
+left to continue silently against a worktree it no longer holds.
+
 None of this is fatal. A registry that cannot be read, or a lock another process
 is holding, is reported as a warning; the session still starts, still focuses,
 and still monitors a PR.
