@@ -41,6 +41,31 @@ const panels = await loadExt("lib/panels.ts");
 const { ok, done } = assertions();
 const extension = (await loadExt("worktree/index.ts")).default;
 const { openModel } = await loadExt("worktree/jimothy.ts");
+const { forgetLauncherEnv } = await loadExt("worktree/lease.ts");
+
+/**
+ * Become a process jimothy launched.
+ *
+ * The launcher's identity is captured once per *process* and kept on
+ * `globalThis`, because a session replacement rebuilds the extension closure and
+ * `/reload` re-imports the module: the second session's read would find an
+ * environment the first already scrubbed. This file is many processes' worth of
+ * sessions in one, so a block that cares says so, and says when it stops —
+ * except the block that is *about* the memory surviving, which forgets once and
+ * then deliberately does not.
+ */
+function launched(runId, worktree) {
+	forgetLauncherEnv();
+	process.env.JIMOTHY_RUN_ID = runId;
+	process.env.JIMOTHY_WORKTREE = worktree;
+}
+
+/** Stop being one, environment and memory alike. */
+function unlaunched() {
+	delete process.env.JIMOTHY_RUN_ID;
+	delete process.env.JIMOTHY_WORKTREE;
+	forgetLauncherEnv();
+}
 
 /** A repo on `main` with one commit and a linked worktree on `exp`. */
 async function makeRepo() {
@@ -229,15 +254,33 @@ const focusEntry = (data) => ({
 	await fake.fire("session_start");
 
 	// The model's deps reach pi through `pi.exec`, so the signal the session
-	// carries is observable as the one handed to the runner. Not `at(-1)`:
-	// session_start also runs git calls (ahead/behind, the stack panel, herdr)
-	// that go through `pi` directly rather than through the model's deps and so
-	// never carry a signal, and one of those is the last call the model's own
-	// calls always precede. A signal is unique to a model call, so filtering on
-	// its presence finds one unambiguously.
-	const before = fake.execCalls.filter((call) => call.options.signal !== undefined).at(-1);
-	ok("model calls carry a signal", before !== undefined);
-	ok("and it is live while the session is", before?.options.signal.aborted === false);
+	// carries is observable as the one handed to the runner. Deliberately not
+	// "whichever calls happen to carry a signal": that assertion is vacuously true
+	// of a call site nobody wired up, which is the failure worth catching. So the
+	// git reads pi makes for *itself* — repo info, branches, dirty, ahead/behind —
+	// are named by argv, and every other git call is a model call and must be
+	// cancellable. A new call site therefore has to be added here on purpose.
+	const piOwnReads = new Set([
+		"rev-parse --path-format=absolute --git-common-dir",
+		"rev-parse --show-toplevel",
+		"symbolic-ref --quiet --short HEAD",
+		"remote",
+		"for-each-ref --format=%(refname) refs/heads refs/remotes",
+		"status --porcelain",
+		"rev-list --left-right --count @{upstream}...HEAD",
+	]);
+	const modelCalls = fake.execCalls.filter(
+		(call) => call.command === "git" && !piOwnReads.has(call.args.join(" ")),
+	);
+	ok("the session made model calls", modelCalls.length > 0);
+	ok(
+		"every one of them carries a signal",
+		modelCalls.every((call) => call.options.signal !== undefined),
+		JSON.stringify(modelCalls.filter((call) => !call.options.signal).map((call) => call.args)),
+	);
+	ok("and it is one signal, not several", new Set(modelCalls.map((call) => call.options.signal)).size === 1);
+	const before = modelCalls[0];
+	ok("live while the session is", before?.options.signal.aborted === false);
 
 	await fake.fire("session_shutdown", { reason: "quit" });
 	ok("shutting down aborts it", before?.options.signal.aborted === true);
@@ -612,6 +655,42 @@ const focusEntry = (data) => ({
 	await rm(dir, { recursive: true, force: true });
 }
 
+{
+	// A prompt can outlive its session: the dialog waits on a human, and the user
+	// can quit — or `/new` — while it is open. The continuation then belongs to a
+	// session that has already been torn down, and must do nothing: a lease it
+	// recorded there is on a list nobody will read again, so the worktree stays
+	// held, and a `say()` through the context pi has since made stale throws out of
+	// session_start, on the one path that promises to report rather than die.
+	const { dir, model, record } = await makeManaged();
+	await model.registry.acquireLease("alpha", "someone-else", stranger.pid, { label: "pi session" });
+
+	const h = harness(record.path, [], {
+		selects: [
+			async () => {
+				// The session ends while the dialog is open, exactly as quitting does.
+				await h.fire("session_shutdown", { reason: "quit" });
+				return "Take over";
+			},
+		],
+	});
+	await h.fire("session_start");
+
+	ok("the user was asked", h.prompts.select.length === 1, JSON.stringify(h.prompts.select));
+	ok(
+		"but a consent that outlived its session takes nothing",
+		(await ownerOf(model, "alpha"))?.runId === "someone-else",
+		JSON.stringify(await ownerOf(model, "alpha")),
+	);
+	ok(
+		"and says nothing about a take-over that did not happen",
+		h.messages().every((m) => !/took over/.test(m)),
+		JSON.stringify(h.notices),
+	);
+
+	await rm(dir, { recursive: true, force: true });
+}
+
 // --- a live stranger, headless -------------------------------------------
 {
 	const { dir, model, record } = await makeManaged();
@@ -642,12 +721,12 @@ const focusEntry = (data) => ({
 	// The launcher holds it under *our parent's* pid, which is what proves this
 	// process is that launcher's agent.
 	await model.registry.acquireLease("alpha", "launch-1", process.ppid, { label: "run" });
-	// process.env is process-wide, but each test builds a fresh extension closure,
-	// so the latch that reads this once cannot leak into the tests below. The
-	// cleanup is here because a *failing* test would otherwise corrupt them: the
-	// extension is expected to have deleted both already, which is asserted.
-	process.env.JIMOTHY_RUN_ID = "launch-1";
-	process.env.JIMOTHY_WORKTREE = record.path;
+	// `launched` also forgets whatever a previous block captured: the capture is
+	// process-wide, not per closure. The cleanup is in a `finally` because a
+	// *failing* test would otherwise leave both variables behind for every block
+	// after it — the extension is expected to have scrubbed them already, which is
+	// what the last two assertions check.
+	launched("launch-1", record.path);
 	try {
 		const h = harness(record.path, []);
 		await h.fire("session_start");
@@ -664,8 +743,37 @@ const focusEntry = (data) => ({
 
 		await h.fire("session_shutdown");
 	} finally {
-		delete process.env.JIMOTHY_RUN_ID;
-		delete process.env.JIMOTHY_WORKTREE;
+		unlaunched();
+	}
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// Scrubbed *before* anything can spawn a child, which is a stronger claim than
+	// scrubbed at all: every subagent and every pi the model starts from bash
+	// inherits this environment, and an inherited launcher would retarget the live
+	// agent's lease onto a process about to exit. `readLauncherEnv`'s unit test
+	// proves both keys go; only this one proves when, so moving the read below the
+	// first git call fails here rather than passing everywhere.
+	const { dir, record } = await makeManaged();
+	const seen = [];
+	launched("launch-ordering", record.path);
+	try {
+		const h = harness(record.path, [], {
+			exec: (command) => {
+				seen.push(process.env.JIMOTHY_RUN_ID);
+				return command === "gh" ? { stdout: "", stderr: "", code: 1, killed: false } : undefined;
+			},
+		});
+		await h.fire("session_start");
+
+		ok("session_start does start children", seen.length > 0);
+		ok("and the first of them already sees a scrubbed environment", seen[0] === undefined, JSON.stringify(seen));
+		ok("as does every one after it", seen.every((value) => value === undefined), JSON.stringify(seen));
+
+		await h.fire("session_shutdown");
+	} finally {
+		unlaunched();
 	}
 	await rm(dir, { recursive: true, force: true });
 }
@@ -688,12 +796,21 @@ const focusEntry = (data) => ({
 	await h.fire("session_start");
 	const first = await ownerOf(model, "alpha");
 	await h.fire("session_shutdown", { reason: "reload" });
+	// The behaviour, rather than a timestamp: "freshly acquired" used to be
+	// `owner.since !== first.since`, which is two ISO strings racing the clock's
+	// millisecond. What actually distinguishes a release-and-reacquire from an
+	// adoption is that the lease is *gone* in between.
+	ok("the outgoing session gave the lease back", (await ownerOf(model, "alpha")) === undefined);
 	await h.fire("session_start");
 
 	const owner = await ownerOf(model, "alpha");
 	ok("the replacement session holds the lease", owner?.pid === process.pid, JSON.stringify(owner));
 	ok("under the same run id", owner?.runId === first?.runId, JSON.stringify(owner));
-	ok("freshly acquired, not the same lease record", owner?.since !== first?.since, `${first?.since} -> ${owner?.since}`);
+	ok(
+		"acquired from a free record, with nothing to reclaim",
+		h.messages().every((m) => !/reclaimed/.test(m)),
+		JSON.stringify(h.notices),
+	);
 	ok("and says nothing about it", h.messages().every((m) => !/lease/i.test(m)), JSON.stringify(h.notices));
 
 	await h.fire("session_shutdown");
@@ -721,8 +838,7 @@ const focusEntry = (data) => ({
 	// Delegated: jimothy's own `finally` releases this one, matching on its runId.
 	const { dir, model, record } = await makeManaged();
 	await model.registry.acquireLease("alpha", "launch-1", process.ppid, { label: "run" });
-	process.env.JIMOTHY_RUN_ID = "launch-1";
-	process.env.JIMOTHY_WORKTREE = record.path;
+	launched("launch-1", record.path);
 	try {
 		const h = harness(record.path, []);
 		await h.fire("session_start");
@@ -732,8 +848,44 @@ const focusEntry = (data) => ({
 		ok("a delegated lease is left for its launcher", owner !== undefined, JSON.stringify(owner));
 		ok("still under the launcher's run id", owner?.runId === "launch-1", JSON.stringify(owner));
 	} finally {
-		delete process.env.JIMOTHY_RUN_ID;
-		delete process.env.JIMOTHY_WORKTREE;
+		unlaunched();
+	}
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// ...and goes on being delegated after the session is replaced.
+	//
+	// `/new` rebuilds the extension closure and `/reload` re-imports the module, so
+	// the replacement reads the environment afresh — and finds nothing, because the
+	// first session scrubbed it seconds earlier. A replacement that concluded "no
+	// launcher" would classify the lease it inherits as its own and release it on
+	// the way out, which is the one thing the spec says the extension must never do
+	// to a lease jimothy is holding for a run that is still going.
+	const { dir, model, record } = await makeManaged();
+	await model.registry.acquireLease("alpha", "launch-1", process.ppid, { label: "run" });
+	launched("launch-1", record.path);
+	try {
+		const first = harness(record.path, []);
+		await first.fire("session_start");
+		await first.fire("session_shutdown", { reason: "reload" });
+		ok("the first session scrubbed the environment", process.env.JIMOTHY_RUN_ID === undefined);
+
+		// A second extension closure in the same process, which is what a replacement
+		// builds. No `forgetLauncherEnv()` in between, deliberately: the memory
+		// surviving the replacement is the thing under test.
+		const second = harness(record.path, []);
+		await second.fire("session_start");
+		const adopted = await ownerOf(model, "alpha");
+		ok("the replacement finds the lease still there", adopted?.runId === "launch-1", JSON.stringify(adopted));
+		await second.fire("session_shutdown", { reason: "quit" });
+
+		const owner = await ownerOf(model, "alpha");
+		ok("and still leaves it for jimothy", owner !== undefined, JSON.stringify(owner));
+		ok("under the launcher's run id", owner?.runId === "launch-1", JSON.stringify(owner));
+	} finally {
+		unlaunched();
 	}
 
 	await rm(dir, { recursive: true, force: true });
@@ -801,8 +953,7 @@ const focusEntry = (data) => ({
 
 	// jimothy leased alpha and launched pi there; the transcript focuses beta.
 	await model.registry.acquireLease("alpha", "launch-1", process.ppid, { label: "run" });
-	process.env.JIMOTHY_RUN_ID = "launch-1";
-	process.env.JIMOTHY_WORKTREE = alpha.path;
+	launched("launch-1", alpha.path);
 	try {
 		const h = harness(alpha.path, [focusEntry({ path: beta.path, branch: beta.branch })]);
 		await h.fire("session_start");
@@ -827,8 +978,7 @@ const focusEntry = (data) => ({
 			JSON.stringify(await ownerOf(model, "alpha")),
 		);
 	} finally {
-		delete process.env.JIMOTHY_RUN_ID;
-		delete process.env.JIMOTHY_WORKTREE;
+		unlaunched();
 	}
 
 	await rm(dir, { recursive: true, force: true });
@@ -845,8 +995,7 @@ const focusEntry = (data) => ({
 
 	await model.registry.acquireLease("alpha", "launch-1", process.ppid, { label: "run" });
 	await model.registry.acquireLease("beta", "someone-else", stranger.pid, { label: "pi session" });
-	process.env.JIMOTHY_RUN_ID = "launch-1";
-	process.env.JIMOTHY_WORKTREE = alpha.path;
+	launched("launch-1", alpha.path);
 	try {
 		const h = harness(alpha.path, [focusEntry({ path: beta.path, branch: beta.branch })], { selects: ["Quit"] });
 		await h.fire("session_start");
@@ -857,8 +1006,7 @@ const focusEntry = (data) => ({
 
 		await h.fire("session_shutdown");
 	} finally {
-		delete process.env.JIMOTHY_RUN_ID;
-		delete process.env.JIMOTHY_WORKTREE;
+		unlaunched();
 	}
 
 	await rm(dir, { recursive: true, force: true });
@@ -876,8 +1024,7 @@ const focusEntry = (data) => ({
 	const beta = snap.find((r) => r.name === "beta");
 
 	await model.registry.acquireLease("alpha", "someone-else", stranger.pid, { label: "pi session" });
-	process.env.JIMOTHY_RUN_ID = "launch-1";
-	process.env.JIMOTHY_WORKTREE = alpha.path;
+	launched("launch-1", alpha.path);
 	try {
 		const h = harness(alpha.path, [focusEntry({ path: beta.path, branch: beta.branch })], { selects: ["Take over"] });
 		await h.fire("session_start");
@@ -900,8 +1047,7 @@ const focusEntry = (data) => ({
 
 		await h.fire("session_shutdown");
 	} finally {
-		delete process.env.JIMOTHY_RUN_ID;
-		delete process.env.JIMOTHY_WORKTREE;
+		unlaunched();
 	}
 
 	await rm(dir, { recursive: true, force: true });
@@ -912,8 +1058,7 @@ const focusEntry = (data) => ({
 	// not two, and no double work.
 	const { dir, model, record } = await makeManaged();
 	await model.registry.acquireLease("alpha", "launch-1", process.ppid, { label: "run" });
-	process.env.JIMOTHY_RUN_ID = "launch-1";
-	process.env.JIMOTHY_WORKTREE = record.path;
+	launched("launch-1", record.path);
 	try {
 		const h = harness(record.path, []);
 		await h.fire("session_start");
@@ -926,8 +1071,7 @@ const focusEntry = (data) => ({
 
 		await h.fire("session_shutdown");
 	} finally {
-		delete process.env.JIMOTHY_RUN_ID;
-		delete process.env.JIMOTHY_WORKTREE;
+		unlaunched();
 	}
 
 	await rm(dir, { recursive: true, force: true });

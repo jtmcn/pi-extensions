@@ -19,6 +19,10 @@
  *   hand-launched pi that runs `/reload` meets its own lease and adopts it;
  *   classified by how it was obtained, that lease would never be released,
  *   because there is no launcher to release it.
+ * - **Which run launched this process is a fact about the process**, so
+ *   `captureLauncherEnv` keeps it on `globalThis` rather than in the extension
+ *   closure that read it: a session replacement rebuilds that closure, and the
+ *   environment it would read again has already been scrubbed.
  */
 
 import type { LeaseState, WorktreeLease, WorktreeRecord } from "jimothy/worktrees";
@@ -54,6 +58,58 @@ export function readLauncherEnv(env: NodeJS.ProcessEnv): LauncherEnv | undefined
 	delete env.JIMOTHY_WORKTREE;
 	if (!runId) return undefined;
 	return worktree ? { runId, worktree } : { runId };
+}
+
+/**
+ * Where the launcher's identity is remembered, keyed like `lib/panels.ts`'s
+ * registry and for the same reason: a well-known symbol on `globalThis` is the
+ * only in-process memory nothing can take away.
+ */
+const LAUNCHER_KEY = Symbol.for("pi-extensions.worktree.launcher");
+
+interface LauncherSlot {
+	env: LauncherEnv | undefined;
+}
+
+/**
+ * Read the launcher's variables once per *process*, scrubbing them every time.
+ *
+ * Which run launched this process is a fact about the process, not about a
+ * module or a session, and it has to be stored somewhere that outlives both.
+ * Measured under a pty rather than reasoned about:
+ *
+ *   /new      the extension module survives (one load, same instance), but the
+ *             factory re-runs, so an extension closure is rebuilt.
+ *   /reload   the module is re-imported as well, so module-level state goes too.
+ *
+ * Either way a fresh closure that read the environment again would find it
+ * already scrubbed and conclude there was no launcher — which classifies a
+ * *delegated* lease (held under the launcher's run id) as "ours", so the
+ * extension releases at the next shutdown a lease the spec says it must never
+ * release. `globalThis` survives both.
+ *
+ * The scrub is not latched with the value: every call deletes both keys, so a
+ * later session cannot inherit a variable something else put back.
+ */
+export function captureLauncherEnv(env: NodeJS.ProcessEnv): LauncherEnv | undefined {
+	const scrubbed = readLauncherEnv(env);
+	// Double cast: `globalThis` and an index signature do not overlap, so the
+	// single-step version is an error rather than a widening.
+	const host = globalThis as unknown as Record<symbol, LauncherSlot | undefined>;
+	host[LAUNCHER_KEY] ??= { env: scrubbed };
+	return host[LAUNCHER_KEY]?.env;
+}
+
+/**
+ * Forget what the launcher said, so the next capture reads the environment.
+ *
+ * For tests only: a real process is launched once and remembers for its life,
+ * which is the whole point of `captureLauncherEnv`. A test file is many
+ * processes' worth of sessions in one, and without this the first session in it
+ * would decide the launcher for every session after it.
+ */
+export function forgetLauncherEnv(): void {
+	delete (globalThis as unknown as Record<symbol, LauncherSlot | undefined>)[LAUNCHER_KEY];
 }
 
 export type LeaseDecision =
@@ -110,4 +166,20 @@ export function decideLease(input: {
  */
 export function leaseProvenance(runId: string, launcherRunId: string | undefined): "delegated" | "ours" {
 	return runId === launcherRunId ? "delegated" : "ours";
+}
+
+/**
+ * Is this the same holder the decision was made about?
+ *
+ * Both halves matter and neither alone is enough: a run that released and
+ * re-acquired keeps its runId under a new pid, and a pid that outlives one run
+ * and starts another keeps its pid under a new runId. Displacing either on a
+ * consent given about the other displaces a run nobody was shown.
+ *
+ * Here rather than at the call site because `decideLease` is meant to be the
+ * only place a lease situation is classified, and a re-check before breaking a
+ * lease is exactly that.
+ */
+export function sameHolder(a: WorktreeLease, b: WorktreeLease): boolean {
+	return a.runId === b.runId && a.pid === b.pid;
 }

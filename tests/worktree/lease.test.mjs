@@ -13,7 +13,8 @@
 import { assertions, loadExt } from "../harness.mjs";
 
 const { ok, done } = assertions();
-const { decideLease, leaseProvenance, readLauncherEnv } = await loadExt("worktree/lease.ts");
+const { captureLauncherEnv, decideLease, forgetLauncherEnv, leaseProvenance, readLauncherEnv, sameHolder } =
+	await loadExt("worktree/lease.ts");
 
 const record = { id: "r1", name: "alpha", path: "/wt/alpha", branch: "jimothy/alpha", baseCommit: "a1" };
 const lease = (over = {}) => ({ runId: "run-1", pid: 4242, since: "2026-08-14T12:00:00.000Z", ...over });
@@ -93,6 +94,18 @@ ok("with no launcher, everything is ours", leaseProvenance("pi-session-1", undef
 // reloads adopts its own lease, and must still release it on the way out.
 ok("an adopted lease with no launcher is still ours", leaseProvenance("pi-session-1", undefined) === "ours");
 
+// --- the same holder, or another one --------------------------------------
+//
+// Consent to take a worktree over names a holder, and is worth nothing about
+// any other. Both halves of the identity are needed: a run that released and
+// re-acquired keeps its runId under a new pid, and a pid that finished one run
+// and started another keeps its pid under a new runId.
+ok("the same run under the same pid is the same holder", sameHolder(lease(), lease()) === true);
+ok("even if it has held it longer", sameHolder(lease(), lease({ since: "2026-08-14T13:00:00.000Z" })) === true);
+ok("the same run under a different pid is not", sameHolder(lease(), lease({ pid: 99 })) === false);
+ok("nor a different run under the same pid", sameHolder(lease(), lease({ runId: "run-2" })) === false);
+ok("nor anything else", sameHolder(lease(), lease({ runId: "run-2", pid: 99 })) === false);
+
 // --- the launcher environment, which is read once and scrubbed -----------
 {
 	const env = { JIMOTHY_RUN_ID: "launch-1", JIMOTHY_WORKTREE: "/wt/alpha", PATH: "/usr/bin" };
@@ -117,5 +130,25 @@ ok("an adopted lease with no launcher is still ours", leaseProvenance("pi-sessio
 	ok("and is scrubbed anyway", "JIMOTHY_WORKTREE" in env === false);
 }
 ok("an ordinary environment has no launcher", readLauncherEnv({ PATH: "/usr/bin" }) === undefined);
+
+// --- the launcher, remembered for the life of the process ----------------
+//
+// A session replacement rebuilds the extension closure, and `/reload` re-imports
+// the module as well, so the second session's read finds an environment the
+// first one already scrubbed. Remembering the answer per process is what keeps a
+// delegated lease delegated across one — restore.test.mjs drives that end to end.
+{
+	forgetLauncherEnv();
+	const first = { JIMOTHY_RUN_ID: "launch-1", JIMOTHY_WORKTREE: "/wt/alpha" };
+	ok("the first read captures what the launcher said", captureLauncherEnv(first)?.runId === "launch-1");
+	ok("and scrubs it", "JIMOTHY_RUN_ID" in first === false);
+	ok("a later read of an empty environment still knows it", captureLauncherEnv({})?.runId === "launch-1");
+	const reappeared = { JIMOTHY_RUN_ID: "inherited", JIMOTHY_WORKTREE: "/wt/beta" };
+	ok("a variable that reappears does not change its mind", captureLauncherEnv(reappeared)?.runId === "launch-1");
+	ok("and is scrubbed anyway, so no child inherits it", "JIMOTHY_RUN_ID" in reappeared === false);
+	ok("both of them", "JIMOTHY_WORKTREE" in reappeared === false);
+	forgetLauncherEnv();
+	ok("forgetting is what lets a test file be many processes", captureLauncherEnv({}) === undefined);
+}
 
 done();

@@ -73,12 +73,18 @@ Two further preconditions, both of which fail confusingly when unmet:
 Two rules about the lease a session takes at startup, both of which are silent
 when broken:
 
-- **The launcher variables are read once and deleted.** `JIMOTHY_RUN_ID` and
-  `JIMOTHY_WORKTREE` are removed from `process.env` during the first
-  `session_start`, before any tool call can spawn anything, because every
-  subagent and every `pi` the model starts from bash inherits this environment —
-  and one that kept them would retarget the live agent's lease onto its own pid,
-  leaving the lease naming a dead process when it exited.
+- **The launcher variables are deleted at every `session_start`, and their
+  meaning is remembered once per process.** `JIMOTHY_RUN_ID` and
+  `JIMOTHY_WORKTREE` are removed from `process.env` before any tool call can
+  spawn anything, because every subagent and every `pi` the model starts from
+  bash inherits this environment — and one that kept them would retarget the
+  live agent's lease onto its own pid, leaving the lease naming a dead process
+  when it exited. What they said is kept on `globalThis`
+  (`captureLauncherEnv`), not in the extension closure: `/new` re-runs the
+  extension factory and `/reload` re-imports the module, so a replacement that
+  read the environment again would find it already scrubbed, conclude there was
+  no launcher, and release on its way out the delegated lease jimothy is still
+  holding for a live run.
 - **pi must stay a direct child of jimothy.** The retarget is guarded by
   `owner.pid === process.ppid`, so interposing a shell or a wrapper between
   jimothy and pi silently demotes every launched session to "held by a

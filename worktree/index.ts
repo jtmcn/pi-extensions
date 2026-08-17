@@ -18,13 +18,23 @@
  * Layout aware: ordinary repos, linked worktrees, and bare layouts
  * (`proj/.bare` + `proj/main` + siblings) all resolve correctly.
  *
- * This file is wiring only. The parts it wires together:
+ * Mostly wiring, and one thing that is not: `takeLease`, `applyDecision` and
+ * `retargetLaunched` below are the lease handshake — what this session does
+ * about jimothy's lease on the worktree it is going to write to. That is policy
+ * and it belongs in a module of its own; extracting it is the first task of
+ * phase 4, not a tidy-up to be done in passing here.
  *
- *   session.ts     per-session state, focus, and the session's PR monitor
+ * The parts this wires together:
+ *
+ *   session.ts     per-session state, focus, held leases, and the PR monitor
  *   pr-monitor.ts  the PR status state machine
  *   commands.ts    the /worktree command and its completions
  *   tool.ts        the model-facing tool
  *   ui.ts          notifications, reports, and the status segment
+ *   lease.ts       the lease decision table, and the launcher's identity
+ *   jimothy.ts     jimothy's worktree model: registry, deps, repo info
+ *   focus.ts       rewriting a tool call's paths into the focused worktree
+ *   panel.ts       the dashboard's location panel
  *
  * The one rule to preserve here: **the extension closure outlives the session**.
  * Commands and tools are registered once per process and must always act on the
@@ -48,7 +58,14 @@ import { createCommands } from "./commands.ts";
 import { DEFAULT_CONFIG, loadConfig } from "./config.ts";
 import { applyFocus } from "./focus.ts";
 import { type Model, openModel } from "./jimothy.ts";
-import { decideLease, type LauncherEnv, type LeaseDecision, leaseProvenance, readLauncherEnv } from "./lease.ts";
+import {
+	captureLauncherEnv,
+	decideLease,
+	type LauncherEnv,
+	type LeaseDecision,
+	leaseProvenance,
+	sameHolder,
+} from "./lease.ts";
 import {
 	beginLocationCycle,
 	clearLocationPanel,
@@ -103,15 +120,16 @@ export default function (pi: ExtensionAPI) {
 	/**
 	 * What jimothy told this process, read once and removed from the environment.
 	 *
-	 * In the closure rather than on the session because it must survive `/reload`
-	 * and `/fork`: provenance is defined against this run id, and a session that
-	 * had forgotten it would release a lease jimothy is going to release.
+	 * Neither on the session nor in this closure: a session replacement rebuilds
+	 * both, and the environment it would read again has already been scrubbed —
+	 * see `captureLauncherEnv`, which keeps it where a replacement cannot reach.
+	 * Provenance is defined against this run id, and a session that had forgotten
+	 * it would release a lease jimothy is going to release.
 	 *
-	 * Read at the first `session_start` rather than at load, so the delete happens
-	 * inside the handler pi awaits before any tool can run.
+	 * Captured at `session_start` rather than at load, so the delete happens inside
+	 * the handler pi awaits before any tool can run.
 	 */
 	let launcher: LauncherEnv | undefined;
-	let launcherRead = false;
 
 	/**
 	 * The only place `session` is assigned.
@@ -154,16 +172,31 @@ export default function (pi: ExtensionAPI) {
 		describeLease({ state: "held", lease: decision.lease, ageMs: decision.ageMs });
 
 	/**
+	 * Is `active` still the session this closure is running?
+	 *
+	 * The handshake below waits on a human at `ctx.ui.select` and on the registry
+	 * several times over, and the session can be replaced or torn down while it
+	 * does — the user quitting while the take-over prompt is open is enough. A
+	 * continuation that carried on regardless would record a lease on a disposed
+	 * session, which nothing is left to release, and would `say()` through a
+	 * context pi has since made stale, which throws out of `session_start` on the
+	 * one path that promises to report rather than die.
+	 */
+	const current = (active: WorktreeSession) => session === active;
+
+	/**
 	 * Carry out a decision, and record what we ended up holding.
 	 *
-	 * Returns whether the session should carry on starting: false only when the
-	 * user chose to quit, which is the one row that ends the process.
+	 * Returns whether the session should carry on starting: false when the user
+	 * chose to quit, which is the one row that ends the process, and false when
+	 * this session has been replaced under us and there is nothing left to start.
 	 *
-	 * `retargetRetry` bounds the retarget row's re-decision: `true` on the first
-	 * call (from `takeLease`'s default), `false` on the recursive one, so a
+	 * `retries.retarget` bounds the retarget row's re-decision: `true` on the
+	 * first call (from `takeLease`'s default), `false` on the recursive one, so a
 	 * lease that changes hands twice in a row is never chased a third time.
-	 * `takeoverRetry` bounds the prompt row's re-decision the same way, and for
-	 * the same reason — see that row.
+	 * `retries.takeover` bounds the prompt row's re-decision the same way, and for
+	 * the same reason — see that row. One object rather than two booleans because
+	 * two positional flags of the same type transpose silently.
 	 */
 	const applyDecision = async (
 		active: WorktreeSession,
@@ -171,8 +204,7 @@ export default function (pi: ExtensionAPI) {
 		model: Model,
 		record: WorktreeRecord | undefined,
 		decision: LeaseDecision,
-		retargetRetry: boolean,
-		takeoverRetry: boolean,
+		retries: { retarget: boolean; takeover: boolean },
 	): Promise<boolean> => {
 		if (!record || decision.kind === "unmanaged") return true;
 		const hold = (runId: string) =>
@@ -184,6 +216,7 @@ export default function (pi: ExtensionAPI) {
 				const result = await model.registry.acquireLease(record.name, runId, process.pid, {
 					label: LEASE_LABEL,
 				});
+				if (!current(active)) return false;
 				// A worktree that was "in use" a moment ago and now simply opens makes
 				// the lease look like it meant nothing.
 				if (result.reclaimed) say(ctx, describeReclaim(record.name, result.reclaimed), "info");
@@ -196,6 +229,7 @@ export default function (pi: ExtensionAPI) {
 					pid: process.pid,
 					label: LEASE_LABEL,
 				});
+				if (!current(active)) return false;
 				// False means the lease changed hands between the read and this call —
 				// the launcher died and someone reclaimed it. Start again from the
 				// current facts rather than assuming, but only once: `retargetRetry`
@@ -206,7 +240,7 @@ export default function (pi: ExtensionAPI) {
 				// failure is left unleased and reported by name. Exercised only by a
 				// real race between two processes, not by a test — see the report.
 				if (moved) hold(decision.runId);
-				else if (retargetRetry) return await takeLease(active, ctx, false, takeoverRetry);
+				else if (retries.retarget) return await takeLease(active, ctx, { ...retries, retarget: false });
 				else say(ctx, `worktree "${record.name}" lease changed hands again; leaving it unleased`, "warning");
 				return true;
 			}
@@ -233,6 +267,9 @@ export default function (pi: ExtensionAPI) {
 					"Quit",
 					"Take over",
 				]);
+				// The longest wait in here by far, and the one most likely to outlive the
+				// session that opened it.
+				if (!current(active)) return false;
 				// Dismissal is not consent: anything other than an explicit take-over
 				// leaves the other session alone.
 				//
@@ -256,18 +293,15 @@ export default function (pi: ExtensionAPI) {
 				// (`breakLease(name, { force, expected: { runId, pid } })`), which belongs
 				// to the phase that touches jimothy — this one does not edit it.
 				const latest = (await model.registry.snapshot()).managed.find((entry) => entry.path === record.path);
+				if (!current(active)) return false;
 				const state = latest ? checkLease(latest, model.deps.isPidAlive, model.deps.now()) : { state: "free" as const };
-				const sameHolder =
-					state.state === "held" &&
-					state.lease.runId === decision.lease.runId &&
-					state.lease.pid === decision.lease.pid;
-				if (!sameHolder) {
+				if (!(state.state === "held" && sameHolder(state.lease, decision.lease))) {
 					// Released, reclaimed, or taken by someone else. Decide again from the
 					// current facts and let the ordinary path have it — which asks afresh
 					// naming the new holder, acquires if it is now free, or warns. Bounded
 					// exactly as the retarget row is: once, so a worktree changing hands
 					// under every prompt cannot loop the session.
-					if (takeoverRetry) return await takeLease(active, ctx, retargetRetry, false);
+					if (retries.takeover) return await takeLease(active, ctx, { ...retries, takeover: false });
 					say(ctx, `worktree "${record.name}" changed hands again; leaving it unleased`, "warning");
 					return true;
 				}
@@ -275,10 +309,11 @@ export default function (pi: ExtensionAPI) {
 				// without it `breakLease` refuses. The displaced run is named, because
 				// someone is losing a worktree they are still working in.
 				const displaced = await model.registry.breakLease(record.name, { force: true });
+				if (!current(active)) return false;
 				if (displaced) {
 					say(ctx, `took over "${record.name}" from run ${displaced.runId} (pid ${displaced.pid})`, "warning");
 				}
-				return await applyDecision(active, ctx, model, record, { kind: "acquire" }, retargetRetry, takeoverRetry);
+				return await applyDecision(active, ctx, model, record, { kind: "acquire" }, retries);
 			}
 		}
 	};
@@ -318,6 +353,14 @@ export default function (pi: ExtensionAPI) {
 		// Only ever a retarget. On a re-entry through `takeLease`'s bounded retries
 		// the lease is already on this pid, so the decision is `adopt` and this
 		// returns without doing the work twice.
+		//
+		// The same short-circuit means that after a session replacement the delegated
+		// lease is *not* re-recorded on the new session's `leases`: the decision is
+		// `adopt`, and this returns before `addLease`. Harmless today — a delegated
+		// lease is never released by this extension, so a list that omits it costs
+		// nothing — but phase 4's focus transition is told to hand back what the
+		// session holds, starting from that list, and it will have to look at the
+		// registry rather than trust it.
 		if (decision.kind !== "retarget") return;
 		const moved = await model.registry.retargetLease(record.name, decision.runId, {
 			fromPid: decision.fromPid,
@@ -350,14 +393,14 @@ export default function (pi: ExtensionAPI) {
 	 * rewrite `registry.json` for all of them.
 	 *
 	 * Everything here is reported and nothing is fatal: pi is already running.
-	 * Returns whether the session should carry on starting — false only when the
-	 * user answered the prompt row with "quit".
+	 * Returns whether the session should carry on starting — false when the user
+	 * answered the prompt row with "quit", and false when this session was replaced
+	 * while the handshake was waiting.
 	 */
 	const takeLease = async (
 		active: WorktreeSession,
 		ctx: ExtensionContext,
-		retargetRetry = true,
-		takeoverRetry = true,
+		retries: { retarget: boolean; takeover: boolean } = { retarget: true, takeover: true },
 	): Promise<boolean> => {
 		const model = active.model;
 		if (!model) return true;
@@ -387,6 +430,7 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			const record = (await model.registry.snapshot()).managed.find((entry) => entry.path === target);
+			if (!current(active)) return false;
 			const decision = decideLease({
 				record,
 				state: record ? checkLease(record, model.deps.isPidAlive, model.deps.now()) : { state: "free" },
@@ -395,23 +439,23 @@ export default function (pi: ExtensionAPI) {
 				ppid: process.ppid,
 				hasUI: ctx.hasUI,
 			});
-			return await applyDecision(active, ctx, model, record, decision, retargetRetry, takeoverRetry);
+			return await applyDecision(active, ctx, model, record, decision, retries);
 		} catch (error) {
 			// Lock contention and a corrupt registry both arrive here as a UserError,
 			// and a session never dies of either.
+			if (!current(active)) return false;
 			say(ctx, `worktree lease unavailable: ${(error as Error).message}`, "warning");
 			return true;
 		}
 	};
 
 	pi.on("session_start", async (_event, ctx) => {
-		// Before anything can spawn a child: every subagent and every pi the model
-		// starts from bash inherits this environment, and an inherited launcher would
-		// retarget the live agent's lease onto a process about to exit.
-		if (!launcherRead) {
-			launcherRead = true;
-			launcher = readLauncherEnv(process.env);
-		}
+		// Before anything can spawn a child, and before any await: every subagent and
+		// every pi the model starts from bash inherits this environment, and an
+		// inherited launcher would retarget the live agent's lease onto a process about
+		// to exit. Unconditional — the scrub runs on every session even though the
+		// answer is only read once per process.
+		launcher = captureLauncherEnv(process.env);
 		replaceSession(undefined);
 		clearLocationPanel();
 		commands.setKnown([]);
@@ -513,8 +557,9 @@ export default function (pi: ExtensionAPI) {
 		// worktree that is gone: the lease belongs on the directory this session will
 		// actually write to, which for a reload, a resume or a fork is the restored
 		// focus rather than the cwd pi was started in.
-		// A false answer means the user chose to quit rather than displace another
-		// session, and `ctx.shutdown()` has already been called. Stop here: pi is
+		// A false answer means either that the user chose to quit rather than displace
+		// another session, and `ctx.shutdown()` has already been called, or that this
+		// session was replaced while the handshake waited. Stop here: pi is
 		// tearing this context down, and painting a footer and fetching git status
 		// on the way out is work nobody asked for on a context that is going away —
 		// the shutdown spike showed anything queued after that call may not run at
@@ -595,13 +640,17 @@ export default function (pi: ExtensionAPI) {
 		// the session's leases and its model, and a session that has already dropped
 		// its model cannot release anything.
 		const model = session?.model;
-		for (const lease of session?.leases ?? []) {
-			if (!model || lease.provenance !== "ours") continue;
-			// Reported, never fatal: pi is on its way out, and a lock we could not take
-			// leaves a lease whose pid is about to be dead — which the next run reclaims.
-			await model.registry.releaseLease(lease.name, lease.runId).catch((error: Error) => {
-				say(ctx, `could not release the worktree lease: ${error.message}`, "warning");
-			});
+		// A session that has no model cannot release anything, so the question is asked
+		// once rather than per lease.
+		if (model) {
+			for (const lease of session?.leases ?? []) {
+				if (lease.provenance !== "ours") continue;
+				// Reported, never fatal: pi is on its way out, and a lock we could not take
+				// leaves a lease whose pid is about to be dead — which the next run reclaims.
+				await model.registry.releaseLease(lease.name, lease.runId).catch((error: Error) => {
+					say(ctx, `could not release the worktree lease: ${error.message}`, "warning");
+				});
+			}
 		}
 
 		// Retire session and UI before awaiting the clear: if pi fires session_start
