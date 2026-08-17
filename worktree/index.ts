@@ -335,6 +335,10 @@ export default function (pi: ExtensionAPI) {
 	 */
 	const retargetLaunched = async (active: WorktreeSession, model: Model, path: string) => {
 		const record = (await model.registry.snapshot()).managed.find((entry) => entry.path === path);
+		// A session replaced while this snapshot was in flight has nothing left to
+		// retarget onto: recording a lease here would land it on `active.leases`
+		// after that session is disposed, with nothing left to release it.
+		if (!current(active)) return;
 		if (!record) return;
 		const decision = decideLease({
 			record,
@@ -367,6 +371,14 @@ export default function (pi: ExtensionAPI) {
 			pid: process.pid,
 			label: LEASE_LABEL,
 		});
+		// Same reasoning as the snapshot check above: a stale `active` here means
+		// `addLease` below would write onto a disposed session's list.
+		//
+		// Neither check in this function is reachable from a test: the only
+		// scriptable async gap in the whole handshake is `ctx.ui.select`, and this
+		// function never prompts (`hasUI: false` above) — it is always done, one
+		// way or another, before `takeLease` ever reaches a select. See the report.
+		if (!current(active)) return;
 		// False says the lease changed hands between the read and the call, which is
 		// the same answer as the rows above and gets the same treatment: silence and
 		// nothing held. Unlike the target's retarget row there is nothing to re-decide
@@ -406,6 +418,12 @@ export default function (pi: ExtensionAPI) {
 		if (!model) return true;
 		try {
 			const target = await realpath(active.focus?.path ?? ctx.cwd);
+			// A replacement here is not reachable from a test: `realpath` is not the
+			// select seam the rest of this handshake is exercised through, and nothing
+			// before it can prompt. Kept for the same reason the checks below are —
+			// see the report — a replaced session must record no lease, regardless of
+			// which await it was waiting on when it was replaced.
+			if (!current(active)) return false;
 
 			// Sandwiched deliberately, and only one order works: the launcher's worktree
 			// is interesting only by comparison with the target, so the target must be
@@ -426,7 +444,12 @@ export default function (pi: ExtensionAPI) {
 				// `catch`: the launcher's worktree can have been removed while pi ran, and
 				// a missing directory here says nothing about the one we are writing to.
 				const launched = await realpath(launcher.worktree).catch(() => undefined);
+				if (!current(active)) return false;
+				// `retargetLaunched` never prompts, so nothing inside it can be the point a
+				// session is replaced at in a test; this check exists for the same reason
+				// its own internal ones do — not reachable, still required.
 				if (launched && launched !== target) await retargetLaunched(active, model, launched);
+				if (!current(active)) return false;
 			}
 
 			const record = (await model.registry.snapshot()).managed.find((entry) => entry.path === target);
