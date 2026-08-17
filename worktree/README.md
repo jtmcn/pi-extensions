@@ -88,6 +88,14 @@ consent to take somebody's worktree. Taking over breaks a lease whose holder is
 still running, which is destructive to that session, so it names the run and pid
 it displaced before acquiring the lease for this one.
 
+The consent is to displace the run the question *named*. Answering takes seconds,
+and in that time the holder can release and another live session acquire, so the
+lease is re-read immediately before it is broken: if it changed hands the break
+is abandoned and the situation is decided again from scratch — asking afresh
+about the new holder, acquiring if it is now free, or warning. That happens at
+most once, so a worktree changing hands under every question ends with the
+session unleased rather than asking forever.
+
 A session with no UI cannot ask, so it warns that the worktree is in use, says it
 is continuing without a lease, and carries on. That is deliberately the wrong
 side of the one-agent-at-a-time rule: a prompt is impossible in a `pi -p` run,

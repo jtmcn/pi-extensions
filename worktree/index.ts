@@ -156,9 +156,14 @@ export default function (pi: ExtensionAPI) {
 	/**
 	 * Carry out a decision, and record what we ended up holding.
 	 *
+	 * Returns whether the session should carry on starting: false only when the
+	 * user chose to quit, which is the one row that ends the process.
+	 *
 	 * `retargetRetry` bounds the retarget row's re-decision: `true` on the first
 	 * call (from `takeLease`'s default), `false` on the recursive one, so a
 	 * lease that changes hands twice in a row is never chased a third time.
+	 * `takeoverRetry` bounds the prompt row's re-decision the same way, and for
+	 * the same reason — see that row.
 	 */
 	const applyDecision = async (
 		active: WorktreeSession,
@@ -167,8 +172,9 @@ export default function (pi: ExtensionAPI) {
 		record: WorktreeRecord | undefined,
 		decision: LeaseDecision,
 		retargetRetry: boolean,
-	) => {
-		if (!record || decision.kind === "unmanaged") return;
+		takeoverRetry: boolean,
+	): Promise<boolean> => {
+		if (!record || decision.kind === "unmanaged") return true;
 		const hold = (runId: string) =>
 			active.addLease({ name: record.name, runId, provenance: leaseProvenance(runId, launcher?.runId) });
 
@@ -182,7 +188,7 @@ export default function (pi: ExtensionAPI) {
 				// the lease look like it meant nothing.
 				if (result.reclaimed) say(ctx, describeReclaim(record.name, result.reclaimed), "info");
 				hold(runId);
-				return;
+				return true;
 			}
 			case "retarget": {
 				const moved = await model.registry.retargetLease(record.name, decision.runId, {
@@ -200,22 +206,22 @@ export default function (pi: ExtensionAPI) {
 				// failure is left unleased and reported by name. Exercised only by a
 				// real race between two processes, not by a test — see the report.
 				if (moved) hold(decision.runId);
-				else if (retargetRetry) await takeLease(active, ctx, false);
+				else if (retargetRetry) return await takeLease(active, ctx, false, takeoverRetry);
 				else say(ctx, `worktree "${record.name}" lease changed hands again; leaving it unleased`, "warning");
-				return;
+				return true;
 			}
 			case "adopt":
 				// Already ours: `session_shutdown` fires before the replacement's
 				// `session_start`, so this is the ordinary `/reload` path. Whether it is
 				// ours to release is the runId's business, not this row's.
 				hold(decision.runId);
-				return;
+				return true;
 			case "warn":
 				// A headless run is bounded and usually read-only; a prompt is
 				// impossible and killing a scripted run is worse than the warning. This
 				// is also the row every pi-inside-a-pi lands on.
 				say(ctx, `worktree "${record.name}" is ${held(decision)}; continuing without a lease`, "warning");
-				return;
+				return true;
 			case "prompt": {
 				const choice = await ctx.ui.select(`Worktree "${record.name}" is ${held(decision)}`, [
 					"Quit",
@@ -231,7 +237,33 @@ export default function (pi: ExtensionAPI) {
 				if (choice !== "Take over") {
 					say(ctx, `worktree "${record.name}" is held by another session`, "warning");
 					ctx.shutdown();
-					return;
+					return false;
+				}
+				// Consent was given to displace the run the prompt *named*, and nobody
+				// else. Answering takes seconds, `breakLease` breaks whoever holds it
+				// now, and in between the holder may have released and a second live
+				// session acquired — force-breaking that one displaces a run the user was
+				// never shown. So re-read and re-classify immediately before breaking.
+				//
+				// This narrows the window from human thinking time to two registry calls;
+				// it does not close it. Closing it needs a compare-and-break in the model
+				// (`breakLease(name, { force, expected: { runId, pid } })`), which belongs
+				// to the phase that touches jimothy — this one does not edit it.
+				const latest = (await model.registry.snapshot()).managed.find((entry) => entry.path === record.path);
+				const state = latest ? checkLease(latest, model.deps.isPidAlive, model.deps.now()) : { state: "free" as const };
+				const sameHolder =
+					state.state === "held" &&
+					state.lease.runId === decision.lease.runId &&
+					state.lease.pid === decision.lease.pid;
+				if (!sameHolder) {
+					// Released, reclaimed, or taken by someone else. Decide again from the
+					// current facts and let the ordinary path have it — which asks afresh
+					// naming the new holder, acquires if it is now free, or warns. Bounded
+					// exactly as the retarget row is: once, so a worktree changing hands
+					// under every prompt cannot loop the session.
+					if (takeoverRetry) return await takeLease(active, ctx, retargetRetry, false);
+					say(ctx, `worktree "${record.name}" changed hands again; leaving it unleased`, "warning");
+					return true;
 				}
 				// Force, because the whole point of this row is that the holder is alive:
 				// without it `breakLease` refuses. The displaced run is named, because
@@ -240,8 +272,7 @@ export default function (pi: ExtensionAPI) {
 				if (displaced) {
 					say(ctx, `took over "${record.name}" from run ${displaced.runId} (pid ${displaced.pid})`, "warning");
 				}
-				await applyDecision(active, ctx, model, record, { kind: "acquire" }, retargetRetry);
-				return;
+				return await applyDecision(active, ctx, model, record, { kind: "acquire" }, retargetRetry, takeoverRetry);
 			}
 		}
 	};
@@ -260,10 +291,17 @@ export default function (pi: ExtensionAPI) {
 	 * rewrite `registry.json` for all of them.
 	 *
 	 * Everything here is reported and nothing is fatal: pi is already running.
+	 * Returns whether the session should carry on starting — false only when the
+	 * user answered the prompt row with "quit".
 	 */
-	const takeLease = async (active: WorktreeSession, ctx: ExtensionContext, retargetRetry = true) => {
+	const takeLease = async (
+		active: WorktreeSession,
+		ctx: ExtensionContext,
+		retargetRetry = true,
+		takeoverRetry = true,
+	): Promise<boolean> => {
 		const model = active.model;
-		if (!model) return;
+		if (!model) return true;
 		try {
 			const target = await realpath(active.focus?.path ?? ctx.cwd);
 			const record = (await model.registry.snapshot()).managed.find((entry) => entry.path === target);
@@ -275,11 +313,12 @@ export default function (pi: ExtensionAPI) {
 				ppid: process.ppid,
 				hasUI: ctx.hasUI,
 			});
-			await applyDecision(active, ctx, model, record, decision, retargetRetry);
+			return await applyDecision(active, ctx, model, record, decision, retargetRetry, takeoverRetry);
 		} catch (error) {
 			// Lock contention and a corrupt registry both arrive here as a UserError,
 			// and a session never dies of either.
 			say(ctx, `worktree lease unavailable: ${(error as Error).message}`, "warning");
+			return true;
 		}
 	};
 
@@ -392,7 +431,13 @@ export default function (pi: ExtensionAPI) {
 		// worktree that is gone: the lease belongs on the directory this session will
 		// actually write to, which for a reload, a resume or a fork is the restored
 		// focus rather than the cwd pi was started in.
-		await takeLease(active, ctx);
+		// A false answer means the user chose to quit rather than displace another
+		// session, and `ctx.shutdown()` has already been called. Stop here: pi is
+		// tearing this context down, and painting a footer and fetching git status
+		// on the way out is work nobody asked for on a context that is going away —
+		// the shutdown spike showed anything queued after that call may not run at
+		// all, so a session that carries on is racing its own exit.
+		if (!(await takeLease(active, ctx))) return;
 
 		active.paint(ctx);
 		active.prMonitor.refresh();

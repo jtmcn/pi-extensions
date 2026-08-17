@@ -194,7 +194,13 @@ export function createFakePi({
 					return answer;
 				},
 				select: async (title, options) => {
-					const answer = answers.select.length ? answers.select.shift() : undefined;
+					// A scripted answer may be a *function*, called here and awaited, with
+					// its result used as the answer. That is the only moment a test can
+					// change the world while a prompt is open — which is exactly what the
+					// take-over path has to survive, since the user takes seconds to answer
+					// and the lease they were shown can be released in the meantime.
+					const scripted = answers.select.length ? answers.select.shift() : undefined;
+					const answer = typeof scripted === "function" ? await scripted() : scripted;
 					prompts.select.push({ title, options, answer, ctx });
 					return answer;
 				},

@@ -26,9 +26,15 @@ import { assertions, execRunner, loadExt, pexec } from "../harness.mjs";
  *
  * A lease held by a pid that is *not* alive is a stale lease and takes an
  * entirely different row, so the stranger rows below need a genuinely live
- * foreign process rather than an invented pid. Killed before `done()`.
+ * foreign process rather than an invented pid.
+ *
+ * Killed from an exit hook rather than at the end of the file: `done()` exits
+ * the process, and an assertion that throws before it would otherwise orphan
+ * this child for its full 60s. Unref'd so it can never hold the run open.
  */
 const stranger = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60_000)"], { stdio: "ignore" });
+stranger.unref();
+process.on("exit", () => stranger.kill());
 
 const panels = await loadExt("lib/panels.ts");
 
@@ -490,6 +496,10 @@ const focusEntry = (data) => ({
 	);
 	ok("choosing quit shuts pi down", h.shutdowns.length === 1, JSON.stringify(h.messages()));
 	ok("and the stranger keeps the lease", (await ownerOf(model, "alpha"))?.runId === "someone-else");
+	// pi is tearing this context down: painting a footer and fetching git status on
+	// the way out is work nobody asked for, and the shutdown spike showed it may
+	// not even run.
+	ok("and the session stops starting", h.ctx().own.statuses.length === 0, JSON.stringify(h.ctx().own.statuses));
 
 	await h.fire("session_shutdown");
 	await rm(dir, { recursive: true, force: true });
@@ -514,6 +524,72 @@ const focusEntry = (data) => ({
 	// One question, not two: the acquisition that follows a take-over must not
 	// come back round to the prompt row.
 	ok("asking once", h.prompts.select.length === 1, JSON.stringify(h.prompts.select));
+
+	await h.fire("session_shutdown");
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// Consent names a holder. The user takes seconds to answer, and in that time
+	// the run they were shown can release the lease and a *different* live session
+	// take it — force-breaking that one displaces a run nobody consented to lose.
+	const { dir, model, record } = await makeManaged();
+	await model.registry.acquireLease("alpha", "someone-else", stranger.pid, { label: "pi session" });
+
+	const h = harness(record.path, [], {
+		selects: [
+			// Run while the first prompt is open: the named holder goes away and a
+			// second live session takes the worktree, then the user says "Take over".
+			async () => {
+				await model.registry.breakLease("alpha", { force: true });
+				await model.registry.acquireLease("alpha", "someone-new", stranger.pid, { label: "pi session" });
+				return "Take over";
+			},
+			"Quit",
+		],
+	});
+	await h.fire("session_start");
+
+	const owner = await ownerOf(model, "alpha");
+	ok("the holder the user was never shown keeps its lease", owner?.runId === "someone-new", JSON.stringify(owner));
+	ok("the user is asked again", h.prompts.select.length === 2, JSON.stringify(h.prompts.select.map((p) => p.title)));
+	ok(
+		"and this time about the run that actually holds it",
+		/someone-new/.test(h.prompts.select[1]?.title ?? ""),
+		JSON.stringify(h.prompts.select[1]?.title),
+	);
+	ok("and quitting still quits", h.shutdowns.length === 1, JSON.stringify(h.messages()));
+
+	await h.fire("session_shutdown");
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// The re-decision is bounded exactly as the retarget row's is: a worktree that
+	// changes hands under every prompt leaves the session unleased rather than
+	// asking forever.
+	const { dir, model, record } = await makeManaged();
+	await model.registry.acquireLease("alpha", "holder-1", stranger.pid, { label: "pi session" });
+
+	const move = (to) => async () => {
+		await model.registry.breakLease("alpha", { force: true });
+		await model.registry.acquireLease("alpha", to, stranger.pid, { label: "pi session" });
+		return "Take over";
+	};
+	// The third answer must never be reached; scripted so that asking a third time
+	// would take the lease rather than silently resolving undefined.
+	const h = harness(record.path, [], { selects: [move("holder-2"), move("holder-3"), "Take over"] });
+	await h.fire("session_start");
+
+	ok("asking at most twice", h.prompts.select.length === 2, JSON.stringify(h.prompts.select.map((p) => p.title)));
+	const held = await ownerOf(model, "alpha");
+	ok("the last holder keeps the lease", held?.runId === "holder-3", JSON.stringify(held));
+	ok(
+		"and the session is told it is running unleased",
+		h.messages().some((m) => /changed hands again; leaving it unleased/.test(m)),
+		JSON.stringify(h.notices),
+	);
+	ok("without shutting down", h.shutdowns.length === 0, JSON.stringify(h.messages()));
 
 	await h.fire("session_shutdown");
 	await rm(dir, { recursive: true, force: true });
@@ -652,5 +728,4 @@ const focusEntry = (data) => ({
 	await rm(dir, { recursive: true, force: true });
 }
 
-stranger.kill();
 done();
