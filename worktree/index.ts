@@ -284,6 +284,59 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	/**
+	 * Move the launcher's lease onto this process, for a worktree that is not the
+	 * one this session will write to.
+	 *
+	 * Deliberately narrow: every other row — free, stale, a stranger — belongs to
+	 * the worktree we are actually writing to, and acting on any of them here would
+	 * take a lease on a directory nobody is going to touch. A launcher whose lease
+	 * has already been reclaimed by someone else therefore leaves with nothing
+	 * happening, which is correct: it is no longer ours to move.
+	 *
+	 * The lease this holds is `delegated`, so `session_shutdown` deliberately
+	 * leaves it: jimothy's own `finally` releases it under the same run id. Giving
+	 * it back when the agent settles on the other worktree is phase 4's focus
+	 * transition, not an omission here.
+	 */
+	const retargetLaunched = async (active: WorktreeSession, model: Model, path: string) => {
+		const record = (await model.registry.snapshot()).managed.find((entry) => entry.path === path);
+		if (!record) return;
+		const decision = decideLease({
+			record,
+			state: checkLease(record, model.deps.isPidAlive, model.deps.now()),
+			launcherRunId: launcher?.runId,
+			pid: process.pid,
+			ppid: process.ppid,
+			// Never prompt about this one: the question the user answers is about the
+			// worktree the agent is going to write to, and asking twice at startup —
+			// once about a directory they did not choose — is worse than silence. This
+			// is a deliberate use of the warn row *for its silence*, not a claim about
+			// the terminal: if a later phase makes `warn` say something, this call site
+			// needs its own quieter path.
+			hasUI: false,
+		});
+		// Only ever a retarget. On a re-entry through `takeLease`'s bounded retries
+		// the lease is already on this pid, so the decision is `adopt` and this
+		// returns without doing the work twice.
+		if (decision.kind !== "retarget") return;
+		const moved = await model.registry.retargetLease(record.name, decision.runId, {
+			fromPid: decision.fromPid,
+			pid: process.pid,
+			label: LEASE_LABEL,
+		});
+		// False says the lease changed hands between the read and the call, which is
+		// the same answer as the rows above and gets the same treatment: silence and
+		// nothing held. Unlike the target's retarget row there is nothing to re-decide
+		// — a worktree this session will not write to has no other row it may take.
+		if (!moved) return;
+		active.addLease({
+			name: record.name,
+			runId: decision.runId,
+			provenance: leaseProvenance(decision.runId, launcher?.runId),
+		});
+	};
+
+	/**
 	 * Lease the worktree this session will write to.
 	 *
 	 * The target is the restored focus when there is one, because every tool call
@@ -310,6 +363,29 @@ export default function (pi: ExtensionAPI) {
 		if (!model) return true;
 		try {
 			const target = await realpath(active.focus?.path ?? ctx.cwd);
+
+			// Sandwiched deliberately, and only one order works: the launcher's worktree
+			// is interesting only by comparison with the target, so the target must be
+			// resolved above this; and the retarget must land before the target is
+			// acquired below. The reading order is the reverse — what the target's rows
+			// do is the main story and this is the aside — so it is written down here
+			// rather than left to be inferred from where the lines happen to sit.
+			//
+			// The launcher's worktree is not always the one we will write to: a resumed
+			// session restores focus from its transcript, so jimothy can hold A while
+			// the agent's target is B. Retargeting A first is what makes the failure
+			// case right as well — if B cannot be acquired, focus is dropped and the
+			// agent falls back to cwd, which is A, and we are holding it.
+			//
+			// Only ever a retarget: this is a lease already taken in our name. A
+			// worktree we were not launched into takes the ordinary path below.
+			if (launcher?.worktree) {
+				// `catch`: the launcher's worktree can have been removed while pi ran, and
+				// a missing directory here says nothing about the one we are writing to.
+				const launched = await realpath(launcher.worktree).catch(() => undefined);
+				if (launched && launched !== target) await retargetLaunched(active, model, launched);
+			}
+
 			const record = (await model.registry.snapshot()).managed.find((entry) => entry.path === target);
 			const decision = decideLease({
 				record,

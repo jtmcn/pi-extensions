@@ -108,6 +108,21 @@ keeping jimothy's run id so jimothy's own release still matches. The handoff is
 recognised by parentage — the lease's owner has to be this process's parent — so
 pi must stay a direct child of jimothy for it to work.
 
+The worktree jimothy leased is not always the one the session will write to: a
+resumed session restores focus from its transcript, so jimothy can hold A while
+the agent's target is B. The session then holds *two* leases — the launcher's,
+retargeted onto its own pid so a killed launcher cannot strand it, and the one
+it is writing to, acquired under its own run id. The launcher's other worktree
+is only ever retargeted: it is never acquired, never prompted about and never
+warned about, because every other situation — free, stale, a stranger — belongs
+to the worktree the agent actually writes to, and a question at startup about a
+directory the user did not choose is worse than silence. The retarget happens
+*before* the target is acquired, which is what makes the failure case right: if
+the target turns out to be held by a stranger the focus is dropped and the agent
+falls back to the directory pi was started in, which is the launcher's worktree,
+and that one is held. On the way out the two part company by provenance — the
+one the session took is released, the launcher's is left for jimothy.
+
 A lease this session took is released when the session ends, whatever ended it —
 `/reload`, `/new`, a fork, or quitting outright — because the runId decides who
 gives it back, not how it was obtained: even a lease this session only *adopted*

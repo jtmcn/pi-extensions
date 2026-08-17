@@ -786,6 +786,153 @@ const focusEntry = (data) => ({
 	await rm(dir, { recursive: true, force: true });
 }
 
+// --- launched into one worktree, resuming into another ---------------------
+//
+// `JIMOTHY_WORKTREE` names the worktree the launcher leased, which is not always
+// the one the session will write to: a resumed session restores focus from its
+// transcript, so jimothy can hold A while the agent's target is B. Both have to
+// end up held, and by this process.
+{
+	const { dir, model } = await makeManaged("alpha");
+	await model.registry.create("beta", { base: "main" });
+	const snap = (await model.registry.snapshot()).managed;
+	const alpha = snap.find((r) => r.name === "alpha");
+	const beta = snap.find((r) => r.name === "beta");
+
+	// jimothy leased alpha and launched pi there; the transcript focuses beta.
+	await model.registry.acquireLease("alpha", "launch-1", process.ppid, { label: "run" });
+	process.env.JIMOTHY_RUN_ID = "launch-1";
+	process.env.JIMOTHY_WORKTREE = alpha.path;
+	try {
+		const h = harness(alpha.path, [focusEntry({ path: beta.path, branch: beta.branch })]);
+		await h.fire("session_start");
+
+		const launched = await ownerOf(model, "alpha");
+		ok("the launcher's lease is retargeted onto this process", launched?.pid === process.pid, JSON.stringify(launched));
+		ok("keeping its run id, so jimothy still releases it", launched?.runId === "launch-1", JSON.stringify(launched));
+		const target = await ownerOf(model, "beta");
+		ok("and the worktree the agent writes to is leased too", target?.pid === process.pid, JSON.stringify(target));
+		ok("under this session's own run id", target?.runId === "fake-session-id", JSON.stringify(target));
+		// Never two questions at startup: the one a user answers is about the worktree
+		// the agent will write to, and the launcher's is not theirs to be asked about.
+		ok("asking about neither", h.prompts.select.length === 0, JSON.stringify(h.prompts.select));
+
+		// The two leases part company here: the one this session took is given back,
+		// the launcher's is left for jimothy's own finally to release.
+		await h.fire("session_shutdown", { reason: "quit" });
+		ok("the lease this session took is released", (await ownerOf(model, "beta")) === undefined);
+		ok(
+			"the launcher's is left behind for jimothy",
+			(await ownerOf(model, "alpha"))?.runId === "launch-1",
+			JSON.stringify(await ownerOf(model, "alpha")),
+		);
+	} finally {
+		delete process.env.JIMOTHY_RUN_ID;
+		delete process.env.JIMOTHY_WORKTREE;
+	}
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// If B cannot be had, we are still holding A — which is where the agent falls
+	// back to. Retargeting first is what makes that true.
+	const { dir, model } = await makeManaged("alpha");
+	await model.registry.create("beta", { base: "main" });
+	const snap = (await model.registry.snapshot()).managed;
+	const alpha = snap.find((r) => r.name === "alpha");
+	const beta = snap.find((r) => r.name === "beta");
+
+	await model.registry.acquireLease("alpha", "launch-1", process.ppid, { label: "run" });
+	await model.registry.acquireLease("beta", "someone-else", stranger.pid, { label: "pi session" });
+	process.env.JIMOTHY_RUN_ID = "launch-1";
+	process.env.JIMOTHY_WORKTREE = alpha.path;
+	try {
+		const h = harness(alpha.path, [focusEntry({ path: beta.path, branch: beta.branch })], { selects: ["Quit"] });
+		await h.fire("session_start");
+
+		const launched = await ownerOf(model, "alpha");
+		ok("we hold the worktree we were launched into", launched?.pid === process.pid, JSON.stringify(launched));
+		ok("and the stranger keeps theirs", (await ownerOf(model, "beta"))?.runId === "someone-else");
+
+		await h.fire("session_shutdown");
+	} finally {
+		delete process.env.JIMOTHY_RUN_ID;
+		delete process.env.JIMOTHY_WORKTREE;
+	}
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// Only ever a retarget. The launcher's lease can have been reclaimed by a live
+	// stranger while pi ran, and that is not this session's business: every other
+	// row — free, stale, a stranger — belongs to the worktree we are writing to, and
+	// asking about a directory the user did not choose is worse than silence.
+	const { dir, model } = await makeManaged("alpha");
+	await model.registry.create("beta", { base: "main" });
+	const snap = (await model.registry.snapshot()).managed;
+	const alpha = snap.find((r) => r.name === "alpha");
+	const beta = snap.find((r) => r.name === "beta");
+
+	await model.registry.acquireLease("alpha", "someone-else", stranger.pid, { label: "pi session" });
+	process.env.JIMOTHY_RUN_ID = "launch-1";
+	process.env.JIMOTHY_WORKTREE = alpha.path;
+	try {
+		const h = harness(alpha.path, [focusEntry({ path: beta.path, branch: beta.branch })], { selects: ["Take over"] });
+		await h.fire("session_start");
+
+		ok("nobody is asked about the launcher's worktree", h.prompts.select.length === 0, JSON.stringify(h.prompts.select));
+		// Nor warned: a warning about a directory the user did not choose, at every
+		// start of a session that will never write there, is noise about somebody
+		// else's business.
+		ok(
+			"and nothing is said about it either",
+			h.messages().every((m) => !/alpha/.test(m)),
+			JSON.stringify(h.notices),
+		);
+		ok(
+			"and the stranger holding it is left alone",
+			(await ownerOf(model, "alpha"))?.runId === "someone-else",
+			JSON.stringify(await ownerOf(model, "alpha")),
+		);
+		ok("while the worktree we write to is leased", (await ownerOf(model, "beta"))?.pid === process.pid);
+
+		await h.fire("session_shutdown");
+	} finally {
+		delete process.env.JIMOTHY_RUN_ID;
+		delete process.env.JIMOTHY_WORKTREE;
+	}
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// The ordinary case: launched into the worktree we are writing to. One lease,
+	// not two, and no double work.
+	const { dir, model, record } = await makeManaged();
+	await model.registry.acquireLease("alpha", "launch-1", process.ppid, { label: "run" });
+	process.env.JIMOTHY_RUN_ID = "launch-1";
+	process.env.JIMOTHY_WORKTREE = record.path;
+	try {
+		const h = harness(record.path, []);
+		await h.fire("session_start");
+
+		const held = (await model.registry.snapshot()).managed.filter((r) => r.owner);
+		ok("exactly one lease is held", held.length === 1, JSON.stringify(held.map((r) => r.name)));
+		ok("on the worktree we were launched into", held[0]?.name === "alpha", JSON.stringify(held[0]?.name));
+		ok("under the launcher's run id", held[0]?.owner?.runId === "launch-1", JSON.stringify(held[0]?.owner));
+		ok("retargeted onto this process", held[0]?.owner?.pid === process.pid, JSON.stringify(held[0]?.owner));
+
+		await h.fire("session_shutdown");
+	} finally {
+		delete process.env.JIMOTHY_RUN_ID;
+		delete process.env.JIMOTHY_WORKTREE;
+	}
+
+	await rm(dir, { recursive: true, force: true });
+}
+
 // --- failure is reported, never fatal ------------------------------------
 {
 	// A corrupt registry is the cheapest real failure that lands *inside* the
