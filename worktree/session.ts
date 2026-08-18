@@ -121,7 +121,10 @@ export interface WorktreeSession {
 	setFocus: (ctx: ExtensionContext, target: FocusTarget | undefined, announce?: boolean) => void;
 	/** Adopt focus restored from the transcript, without announcing or persisting it. */
 	restoreFocus: (target: FocusTarget | undefined) => void;
-	/** Record a lease this session took, replacing any it already held on that worktree. */
+	/**
+	 * Record a lease this session took, replacing any it already held on that
+	 * worktree and cancelling any release queued for it.
+	 */
 	addLease: (lease: HeldLease) => void;
 	/** Forget a lease this session held, returning it so the caller can release it. */
 	dropLease: (path: string) => HeldLease | undefined;
@@ -240,6 +243,17 @@ export function createSession(options: SessionOptions): WorktreeSession {
 			const existing = leases.findIndex((held) => held.name === lease.name);
 			if (existing === -1) leases.push(lease);
 			else leases[existing] = lease;
+			// Taking a worktree back cancels the release it was queued for, and this is
+			// the symmetrical partner of the replace-by-name rule above: one place owns
+			// "this session holds it again". Two transitions inside one non-idle turn —
+			// focus beta, then focus off — leave alpha queued from the first and
+			// re-acquired by the second, and a drain that still named it would release a
+			// worktree the agent is writing in, which is exactly the unleased-agent
+			// failure the transition exists to prevent. The runId guard does not help:
+			// both leases are this session's, under the same run id.
+			for (let index = deferred.length - 1; index >= 0; index--) {
+				if (deferred[index].name === lease.name) deferred.splice(index, 1);
+			}
 		},
 		// Returned rather than released here: this object owns state, not the
 		// registry, and whoever dropped the lease is the one who knows whether it can

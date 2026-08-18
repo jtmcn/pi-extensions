@@ -236,4 +236,26 @@ function setup({ noRepo = false, hasUI = true, exec } = {}) {
 	ok("deferRelease: a disposed session queues nothing", h.session.takeDeferredReleases().length === 0);
 }
 
+{
+	// Two transitions inside one non-idle turn: focus leaves alpha (queued for
+	// release) and then comes back to it. Draining the queue afterwards would
+	// release a worktree the session is holding *and writing in* — an unleased
+	// agent, which is the failure the whole transition exists to prevent.
+	const h = setup();
+	h.session.addLease({ name: "alpha", path: "/wt/alpha", runId: "run-1", provenance: "ours" });
+	const alpha = h.session.dropLease("/wt/alpha");
+	h.session.deferRelease(alpha);
+	h.session.deferRelease({ name: "beta", path: "/wt/beta", runId: "run-1", provenance: "ours" });
+
+	h.session.addLease({ name: "alpha", path: "/wt/alpha", runId: "run-1", provenance: "ours" });
+
+	const drained = h.session.takeDeferredReleases();
+	ok(
+		"addLease: re-acquiring cancels the release queued for that worktree",
+		drained.map((l) => l.name).join(",") === "beta",
+		JSON.stringify(drained),
+	);
+	ok("addLease: and it is still held", h.session.leases.map((l) => l.name).join(",") === "alpha", JSON.stringify(h.session.leases));
+}
+
 done();

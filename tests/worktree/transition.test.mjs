@@ -142,6 +142,32 @@ function lastFocus(h) {
 	await rm(dir, { recursive: true, force: true });
 }
 
+{
+	// Two transitions inside one turn, the second going back where the first came
+	// from. The origin's release is still queued when it is re-acquired, so a drain
+	// that took the queue at face value would release a worktree the agent is
+	// writing in *right now* — focused, and holding nothing.
+	const { dir, model, alpha } = await makeTwoManaged();
+	const h = harness(alpha.path);
+	await h.fire("session_start");
+
+	h.idle = false; // one agent run, two focus changes inside it
+	await h.command("worktree", "focus beta");
+	await h.command("worktree", "focus off");
+	ok("focus came home", lastFocus(h) === undefined, JSON.stringify(h.appended));
+
+	await h.fire("agent_settled", { type: "agent_settled" });
+	ok(
+		"a worktree focus returned to is not released by the queue it left behind",
+		(await ownerOf(model, "alpha"))?.pid === process.pid,
+		JSON.stringify(await ownerOf(model, "alpha")),
+	);
+	ok("and the one focus actually left is released", (await ownerOf(model, "beta")) === undefined);
+
+	await h.fire("session_shutdown");
+	await rm(dir, { recursive: true, force: true });
+}
+
 // ===================================================== a destination that cannot be held
 
 {
@@ -300,6 +326,31 @@ function lastFocus(h) {
 	ok("focus is cleared even though the move was refused", lastFocus(h) === undefined, JSON.stringify(h.appended));
 	ok("the vanished worktree's lease is still handed back", (await ownerOf(model, "beta")) === undefined);
 	ok("and the stranger keeps the one we could not have", (await ownerOf(model, "alpha"))?.runId === "someone-else");
+
+	await h.fire("session_shutdown");
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// Focusing the worktree that has just been declared gone. `from` is captured
+	// before that is noticed, so a short-circuit on "already focused there" would
+	// put focus straight back onto the missing directory, without a lease, one line
+	// after saying focus had been cleared.
+	const { dir, model, alpha, beta } = await makeTwoManaged();
+	const h = harness(alpha.path);
+	await h.fire("session_start");
+	await h.command("worktree", "focus beta");
+	await rm(beta.path, { recursive: true, force: true });
+
+	await h.command("worktree", "focus beta");
+
+	ok("focusing the vanished worktree again does not re-focus it", lastFocus(h) === undefined, JSON.stringify(h.appended));
+	ok(
+		"and the refusal says the directory is missing",
+		h.messages().some((m) => /no longer exists/.test(m)),
+		JSON.stringify(h.notices),
+	);
+	ok("nothing is left holding it", (await ownerOf(model, "beta")) === undefined);
 
 	await h.fire("session_shutdown");
 	await rm(dir, { recursive: true, force: true });

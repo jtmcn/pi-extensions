@@ -476,7 +476,16 @@ export async function takeLeaseOn(
 		// there is nothing to gain by moving the agent's writes into a worktree whose
 		// owner we failed to look up.
 		if (!env.current(active)) return false;
-		env.say(ctx, `worktree lease unavailable: ${(error as Error).message}`, "warning");
+		// A worktree removed from another terminal is the commonest way to get here,
+		// and `realpath`'s ENOENT reads as an internal fault rather than as the one
+		// fact the user needs. Name the directory and say what is wrong with it: an
+		// opaque error about a path they never typed is precisely what the vanished
+		// worktree check exists to stop.
+		const message =
+			(error as NodeJS.ErrnoException).code === "ENOENT"
+				? `worktree ${path} no longer exists; focus not moved`
+				: `worktree lease unavailable: ${(error as Error).message}`;
+		env.say(ctx, message, "warning");
 		return false;
 	}
 }

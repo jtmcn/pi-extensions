@@ -1,10 +1,15 @@
 /**
- * The one path that moves focus.
+ * Moving focus, and the worktree lease with it.
  *
- * Every entry point goes through here — `/worktree focus`, `new` and `checkout`
- * with `autoFocus`, and the model-facing tool — because the rules cannot be
- * allowed to differ per door: that is the two-models bug in miniature, and it is
- * what this whole integration exists to end.
+ * Today one door goes through here: `/worktree focus`. The rest do not yet —
+ * `new` and `checkout` with `autoFocus`, `remove` clearing the focus it just
+ * deleted (all three in `commands.ts`), and the model-facing tool (`tool.ts`)
+ * still call `setFocus` directly, so they still move the agent without moving
+ * the lease. Porting them is the rest of this phase, and they are named here
+ * rather than left to be discovered because the rules cannot be allowed to
+ * differ per door: that is the two-models bug in miniature, and it is what this
+ * whole integration exists to end. When the last of them is ported this becomes
+ * what it is meant to be — the one path that moves focus.
  *
  * The rules, all three of which have a failure behind them:
  *
@@ -92,7 +97,7 @@ export async function moveFocus(
 	next: FocusTarget | undefined,
 	opts: { announce?: boolean } = {},
 ): Promise<boolean> {
-	const from = active.focus?.path ?? env.home;
+	let from: string | undefined = active.focus?.path ?? env.home;
 
 	// Checked here rather than only at `session_start`, because a worktree can go
 	// away mid-session — another session's `/worktree remove`, or `jimothy wt rm`
@@ -100,9 +105,14 @@ export async function moveFocus(
 	// directory that no longer exists. The error names a path the user never
 	// typed, so it reads as a broken shell rather than a missing worktree.
 	//
-	// `from` is left naming the vanished worktree deliberately: the transition
-	// below still has an origin to leave, it is simply one whose lease has already
-	// been handed back here.
+	// It also leaves the transition below with no origin at all, which `from`
+	// records by becoming undefined. Neither of the two paths that look like one is
+	// usable: the vanished worktree cannot be the origin — it is gone, and its lease
+	// was handed back inside this block, so a `from === to` short-circuit would
+	// re-focus a missing directory a line after saying focus was cleared; and
+	// `env.home` cannot be it either — focusing away released home's lease, so
+	// short-circuiting `focus off` against it would leave the session focused on a
+	// worktree it does not hold.
 	if (active.focus && !(await exists(active.focus.path))) {
 		if (!env.lease.current(active)) return false;
 		env.lease.say(ctx, `focused worktree ${active.focus.path} is gone; focus cleared`, "warning");
@@ -112,7 +122,14 @@ export async function moveFocus(
 		const orphan = active.dropLease(active.focus.path);
 		active.setFocus(ctx, undefined, false);
 		if (orphan) await releaseOrigin(env, active, ctx, orphan);
+		from = undefined;
 	}
+
+	// Hoisted rather than repeated inside the `from === to` branch below: it covers
+	// both awaits above it — `exists` and the release — for everything that follows,
+	// including the branch that calls `setFocus` and so reaches `pi.appendEntry` and
+	// `pi.sendMessage`, neither of which is guarded by `disposed` the way `paint` is.
+	if (!env.lease.current(active)) return false;
 
 	const to = next?.path ?? env.home;
 
@@ -132,7 +149,9 @@ export async function moveFocus(
 
 	active.setFocus(ctx, next, opts.announce);
 
-	const origin = active.dropLease(from);
+	// `from` is undefined only when the block above cleared focus, and that block
+	// already handed the lease back; there is nothing left to drop.
+	const origin = from === undefined ? undefined : active.dropLease(from);
 	if (origin) await releaseOrigin(env, active, ctx, origin);
 	return true;
 }
