@@ -17,7 +17,11 @@
  *      into a worktree it was refused.
  *   2. **Release the origin when the agent settles**, not when focus moves.
  *      Focus is applied at `tool_call` time, so a call already in flight is
- *      still writing into the origin.
+ *      still writing into the origin. A release still queued for the
+ *      *destination* is therefore cancelled on the way in, before the registry is
+ *      read: it is proof this session still holds that worktree, and a drain
+ *      landing between the read and `addLease` would hand back a lease the
+ *      transition is about to record as held.
  *   3. **Release it whatever its provenance** — see `releaseOrigin`.
  */
 
@@ -139,9 +143,29 @@ export async function moveFocus(
 		return true;
 	}
 
+	// A release still queued for the destination has not happened yet, so this
+	// session still holds that worktree: take the queue entry back *before* the
+	// registry is read below. `addLease` cancels a queued release too, but only
+	// after the read — and `agent_settled` can drain the queue during it, which
+	// leaves the registry free, this session believing it holds the worktree, and
+	// the agent writing into it unleased. That is the failure the whole transition
+	// exists to prevent, so the cancellation happens where nothing can drain
+	// between it and the decision.
+	//
+	// Safe because a queued release *is* the proof we hold it: the decision below
+	// can only be `adopt`, which records this same lease again.
+	const queued = active.cancelRelease(to);
+
 	// Destination first, always. If it cannot be held, focus does not move: the
 	// alternative is an agent writing into a worktree it was refused.
-	if (!(await takeLeaseOn(env.lease, active, ctx, env.model, to))) return false;
+	if (!(await takeLeaseOn(env.lease, active, ctx, env.model, to))) {
+		// Focus did not move, so a release cancelled above is still owed — back through
+		// the same door, which defers it again while a tool call may still be writing
+		// there. (A session replaced during the refusal loses it to its own disposal,
+		// which is the window `releaseOrigin` has always had for the origin.)
+		if (queued) await releaseOrigin(env, active, ctx, queued);
+		return false;
+	}
 	// A session replaced while the destination was being acquired has no focus
 	// worth setting and no lease list worth editing.
 	if (!env.lease.current(active)) return false;

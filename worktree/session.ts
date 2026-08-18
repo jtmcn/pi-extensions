@@ -135,6 +135,21 @@ export interface WorktreeSession {
 	 * being written.
 	 */
 	deferRelease: (lease: HeldLease) => void;
+	/**
+	 * Take a queued release back out of the queue, if there is one for that path.
+	 *
+	 * The queue's other half: without it a pending release can only be drained, and
+	 * two callers need to *see* one. A transition returning to a worktree whose
+	 * release is still queued has to cancel it before it reads the registry — a
+	 * drain landing in between frees the lease the transition then records. And
+	 * `/worktree remove` has to hand our own lease back before jimothy will remove
+	 * the worktree, which `dropLease` alone cannot do for a lease that is merely
+	 * pending: the removal was refused, naming this very session as the holder.
+	 *
+	 * Returned rather than released, like `dropLease`: whoever cancels it decides
+	 * whether it is being taken back or given away.
+	 */
+	cancelRelease: (path: string) => HeldLease | undefined;
 	/** Drain the queue. Empty after a dispose, like everything else here. */
 	takeDeferredReleases: () => HeldLease[];
 	/** Repaint the footer segment. */
@@ -270,6 +285,13 @@ export function createSession(options: SessionOptions): WorktreeSession {
 		deferRelease: (lease) => {
 			if (disposed) return;
 			deferred.push(lease);
+		},
+		// By path, like `dropLease`, because both callers know where the agent was
+		// writing rather than what the registry calls it — and the two are
+		// interchangeable here, since `addLease` keeps at most one entry per worktree.
+		cancelRelease: (path) => {
+			const index = deferred.findIndex((lease) => lease.path === path);
+			return index === -1 ? undefined : deferred.splice(index, 1)[0];
 		},
 		takeDeferredReleases: () => deferred.splice(0, deferred.length),
 		paint,

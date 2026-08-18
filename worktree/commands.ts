@@ -12,7 +12,7 @@
  * step — and one path that can move where the agent writes.
  */
 
-import { stat } from "node:fs/promises";
+import { realpath, stat } from "node:fs/promises";
 import { basename } from "node:path";
 import type { ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
@@ -146,6 +146,17 @@ export interface CommandDeps {
 	 * these commands are registered once per process.
 	 */
 	moveFocus: (ctx: ExtensionContext, next: FocusTarget | undefined, opts?: { announce?: boolean }) => Promise<boolean>;
+	/**
+	 * Take the worktree lease on one path, for a session that is already writing
+	 * there. Bound by `index.ts` to the same lease machinery a transition uses.
+	 *
+	 * Only `adopt` needs it, and needs it because adoption is the one door that can
+	 * make the worktree the agent is *currently* writing in leasable for the first
+	 * time: before it there is no record to hold, after it there is a record nothing
+	 * holds — managed, unleased, being written to, and offered to the next session
+	 * with no prompt. Not `moveFocus`, because focus is not moving.
+	 */
+	takeLease: (ctx: ExtensionContext, path: string) => Promise<boolean>;
 }
 
 export interface Commands {
@@ -171,7 +182,7 @@ export interface Commands {
 }
 
 export function createCommands(deps: CommandDeps): Commands {
-	const { runner, ui, getModel, getSession, getConfig, getConfigSources, getFocus, moveFocus } = deps;
+	const { runner, ui, getModel, getSession, getConfig, getConfigSources, getFocus, moveFocus, takeLease } = deps;
 	const say = ui.say;
 	const report = ui.report;
 
@@ -527,7 +538,7 @@ export function createCommands(deps: CommandDeps): Commands {
 	 * below is the affordance, and completing arbitrary paths would invite
 	 * adopting something that is not a worktree of this repository at all.
 	 */
-	const doAdopt = async (_info: RepoInfo, ctx: ExtensionCommandContext, args: string) => {
+	const doAdopt = async (info: RepoInfo, ctx: ExtensionCommandContext, args: string) => {
 		const model = getModel();
 		if (!model) {
 			say(ctx, MODEL_UNAVAILABLE, "error");
@@ -562,6 +573,20 @@ export function createCommands(deps: CommandDeps): Commands {
 			const record = await model.registry.adopt(target);
 			await refresh();
 			say(ctx, `adopted ${record.name} (${record.branch})`, "info");
+			// Adopting the worktree this session writes in is the one adoption that leaves
+			// a hole: it was unleased because there was nothing to lease, and now there is
+			// a record nobody holds while the agent goes on writing there — so the next
+			// session to open it is handed it with no prompt. Through the same lease
+			// machinery a transition uses, and reported rather than fatal, like every other
+			// lease failure here: the adoption itself succeeded either way.
+			//
+			// The write target is the focused worktree, or the session's own when nothing
+			// is focused. Realpath'd because records store resolved paths, and an
+			// unresolved one silently matches nothing — a session in a symlinked worktree
+			// would adopt it and leave it unleased, which is the state this closes.
+			const writing = getFocus()?.path ?? info.worktreeRoot;
+			const resolved = writing ? await realpath(writing).catch(() => writing) : undefined;
+			if (resolved === record.path) await takeLease(ctx, record.path);
 		} catch (error) {
 			say(ctx, (error as Error).message, "error");
 		}
@@ -604,6 +629,13 @@ export function createCommands(deps: CommandDeps): Commands {
 	 * holding the worktree it is focused on is the failure this ordering must never
 	 * hide. No retry: whoever holds it now holds it, and asking again would only ask
 	 * the same question.
+	 *
+	 * A lease taken out of the deferred queue for the removal comes back as *held*
+	 * rather than pending, which is a deliberate simplification: the worktree the
+	 * queue entry belonged to is one focus has already left, so nothing will drop it
+	 * again and it goes back at shutdown instead of at the next settle. Held a while
+	 * longer is the safe direction — the unsafe one is an agent writing in a worktree
+	 * this session no longer holds.
 	 */
 	const regainLease = async (ctx: ExtensionCommandContext, model: Model, lease: HeldLease) => {
 		try {
@@ -677,7 +709,15 @@ export function createCommands(deps: CommandDeps): Commands {
 			// which is exactly what that check is for. So it is handed *back* first —
 			// releasing is not `breakLease`, which would take a lease held by another
 			// agent too, and that refusal is the one thing here worth keeping.
-			const held = getSession()?.dropLease(target.path);
+			//
+			// From the deferred queue too, not just the session's list: a transition away
+			// from this worktree drops the lease the moment focus moves but defers the
+			// release to `agent_settled`, and a `dropLease` that could not see that queue
+			// left the removal refused — naming *this* session as the holder that made it
+			// impossible. At most one of the two can have it: `addLease` cancels a queued
+			// release when the worktree is taken back.
+			const session = getSession();
+			const held = session?.dropLease(target.path) ?? session?.cancelRelease(target.path);
 			released = held;
 			if (held) await model.registry.releaseLease(held.name, held.runId);
 

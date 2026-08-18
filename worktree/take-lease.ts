@@ -12,6 +12,13 @@
  * must record no lease: `active.addLease` on a disposed session is a lease
  * nothing will ever release, which wedges the worktree until someone runs
  * `jimothy wt release --force`.
+ *
+ * The other horn of that same fault is easy to miss: a bail *after* a successful
+ * acquisition must also hand the lease back. Recording nothing is not enough —
+ * the registry would hold the worktree under this live pid and a run id no
+ * session answers for, so nothing releases it for the life of the pi process and
+ * every other agent is told it is in use by a session that no longer exists. See
+ * the `acquire` row.
  */
 
 import { realpath } from "node:fs/promises";
@@ -133,7 +140,17 @@ const applyDecision = async (
 			const result = await model.registry.acquireLease(record.name, runId, process.pid, {
 				label: LEASE_LABEL,
 			});
-			if (!env.current(active)) return false;
+			if (!env.current(active)) {
+				// Taken for a session that no longer exists, so give it straight back:
+				// this is the one place holding it is worse than not recording it. The
+				// prompt row lands here too, which is where it matters most — it can
+				// displace a live stranger and then bail, and bailing while still holding
+				// what it took is the worst of both. Swallowed rather than reported: the
+				// context is stale from the moment `current` went false, and touching it
+				// throws out of the handler.
+				await model.registry.releaseLease(record.name, runId).catch(() => {});
+				return false;
+			}
 			// A worktree that was "in use" a moment ago and now simply opens makes
 			// the lease look like it meant nothing.
 			if (result.reclaimed) env.say(ctx, describeReclaim(record.name, result.reclaimed), "info");

@@ -258,4 +258,28 @@ function setup({ noRepo = false, hasUI = true, exec } = {}) {
 	ok("addLease: and it is still held", h.session.leases.map((l) => l.name).join(",") === "alpha", JSON.stringify(h.session.leases));
 }
 
+{
+	// The queue's other half. `takeDeferredReleases` can only drain, which left two
+	// callers unable to see a pending release at all: a transition returning to that
+	// worktree (it must cancel the release *before* it reads the registry, or a drain
+	// landing in between frees a lease the session then records), and `/worktree
+	// remove` (which has to hand our own lease back, and was refused by jimothy
+	// naming this very session as the holder).
+	const h = setup();
+	h.session.deferRelease({ name: "alpha", path: "/wt/alpha", runId: "run-1", provenance: "ours" });
+	h.session.deferRelease({ name: "beta", path: "/wt/beta", runId: "run-1", provenance: "delegated" });
+
+	ok("cancelRelease: a path with nothing queued cancels nothing", h.session.cancelRelease("/wt/gamma") === undefined);
+	const taken = h.session.cancelRelease("/wt/alpha");
+	ok("cancelRelease: the queued lease is handed to the caller", taken?.name === "alpha", JSON.stringify(taken));
+	ok("cancelRelease: and is no longer queued", h.session.cancelRelease("/wt/alpha") === undefined);
+	const drained = h.session.takeDeferredReleases();
+	ok(
+		"cancelRelease: a later drain releases only what is left",
+		drained.map((l) => l.name).join(",") === "beta",
+		JSON.stringify(drained),
+	);
+	ok("cancelRelease: and cancelling does not make it held", h.session.leases.length === 0, JSON.stringify(h.session.leases));
+}
+
 done();

@@ -61,7 +61,7 @@ import {
 	readStack,
 } from "./panel.ts";
 import { createSession, FOCUS_ENTRY_TYPE, type WorktreeSession } from "./session.ts";
-import { type LeaseEnv, takeLeaseForSession } from "./take-lease.ts";
+import { type LeaseEnv, takeLeaseForSession, takeLeaseOn } from "./take-lease.ts";
 import { createWorktreeTool } from "./tool.ts";
 import { moveFocus } from "./transition.ts";
 import { createUi } from "./ui.ts";
@@ -511,6 +511,24 @@ export default function (pi: ExtensionAPI) {
 		return await moveFocus({ lease: leaseEnv(), model: active.model, home }, active, ctx, next, opts);
 	};
 
+	/**
+	 * Take the lease on a worktree this session is already writing in.
+	 *
+	 * Bound to the live session for the reason `moveFocusHere` is, and sharing its
+	 * machinery rather than acquiring anything itself: `/worktree adopt` can make the
+	 * agent's own worktree leasable for the first time, and a record nothing then
+	 * holds is offered to the next session with no prompt. `false` is a refusal that
+	 * has already said why — there is no focus to undo, so the caller only reports
+	 * its own success.
+	 */
+	const takeLeaseHere = async (ctx: ExtensionContext, path: string): Promise<boolean> => {
+		const active = session;
+		// No model is no registry, so there is nothing to hold — and nothing was
+		// adopted either, since adoption goes through the same model.
+		if (!active?.model) return false;
+		return await takeLeaseOn(leaseEnv(), active, ctx, active.model, path);
+	};
+
 	const commands = createCommands({
 		runner: pi,
 		ui,
@@ -520,6 +538,7 @@ export default function (pi: ExtensionAPI) {
 		getConfigSources: () => session?.configSources ?? [],
 		getFocus: () => session?.focus,
 		moveFocus: moveFocusHere,
+		takeLease: takeLeaseHere,
 	});
 
 	pi.registerCommand("worktree", {

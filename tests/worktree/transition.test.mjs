@@ -44,6 +44,8 @@ process.on("exit", () => stranger.kill());
 const { ok, done } = assertions();
 const extension = (await loadExt("worktree/index.ts")).default;
 const { openModel } = await loadExt("worktree/jimothy.ts");
+const { moveFocus } = await loadExt("worktree/transition.ts");
+const { createSession } = await loadExt("worktree/session.ts");
 
 /**
  * A repo with two jimothy-managed worktrees, created through the model so the
@@ -374,6 +376,132 @@ function lastFocus(h) {
 	ok("a session that ends first releases what it deferred", (await ownerOf(model, "alpha")) === undefined);
 	ok("along with the lease it was holding", (await ownerOf(model, "beta")) === undefined);
 
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// The same two transitions, with the drain landing *inside* the second one.
+	//
+	// One level below the harness, deliberately. What is under test is an
+	// interleaving — `agent_settled` draining the queue between the transition's
+	// registry read and the moment it records the lease — and the fake pi has no
+	// async seam inside that window to hang the drain on (the only scriptable one is
+	// `ctx.ui.select`, which this row never reaches). Driving `moveFocus` over a real
+	// session, a real registry and the real deferred queue keeps everything that
+	// matters real and makes the schedule controllable: `snapshot()` *is* the read,
+	// so wrapping it is exactly "the queue was drained during the decision".
+	const { dir, model, alpha, beta } = await makeTwoManaged();
+	const appended = [];
+	const pi = {
+		exec: async () => ({ stdout: "", stderr: "", code: 1, killed: false }),
+		appendEntry: (customType, data) => appended.push({ customType, data }),
+		sendMessage: () => {},
+	};
+	const ui = { say: () => {}, report: () => {}, clearReport: () => {}, clearAll: () => {}, setStatus: () => {} };
+	// Never idle: a tool call is in flight for the whole block, which is what defers
+	// the release and so creates the queue entry this is about.
+	const ctx = {
+		cwd: alpha.path,
+		hasUI: false,
+		mode: "interactive",
+		isIdle: () => false,
+		sessionManager: { getSessionId: () => "fake-session-id" },
+	};
+	const session = createSession({
+		pi,
+		ui,
+		ctx,
+		repo: { projectRoot: dir, worktreeRoot: alpha.path, branch: "jimothy/alpha", bare: false },
+		model,
+		abort: new AbortController(),
+	});
+	const notices = [];
+	const env = {
+		lease: {
+			launcher: undefined,
+			say: (_ctx, message, level) => notices.push({ message, level }),
+			current: () => true,
+		},
+		model,
+		home: alpha.path,
+	};
+
+	// Where `session_start` leaves a session standing in a worktree jimothy manages.
+	await model.registry.acquireLease("alpha", "fake-session-id", process.pid, { label: "pi session" });
+	session.addLease({ name: "alpha", path: alpha.path, runId: "fake-session-id", provenance: "ours" });
+
+	await moveFocus(env, session, ctx, { path: beta.path, branch: beta.branch });
+	ok("the origin is still held with its release queued", (await ownerOf(model, "alpha"))?.pid === process.pid);
+
+	const read = model.registry.snapshot.bind(model.registry);
+	let drained = false;
+	model.registry.snapshot = async (...args) => {
+		const result = await read(...args);
+		// After the read, before the decision is applied: the exact window in which a
+		// drain frees a worktree the transition is about to record as held.
+		if (!drained) {
+			drained = true;
+			for (const lease of session.takeDeferredReleases()) {
+				await model.registry.releaseLease(lease.name, lease.runId);
+			}
+		}
+		return result;
+	};
+	try {
+		await moveFocus(env, session, ctx, undefined);
+	} finally {
+		model.registry.snapshot = read;
+	}
+
+	ok("the drain ran inside the transition", drained);
+	ok(
+		"a drain landing mid-transition cannot free the worktree focus returned to",
+		(await ownerOf(model, "alpha"))?.pid === process.pid,
+		JSON.stringify(await ownerOf(model, "alpha")),
+	);
+	ok(
+		"and the session's own list agrees with the registry",
+		session.leases.some((lease) => lease.path === alpha.path),
+		JSON.stringify(session.leases),
+	);
+	ok("focus came home", session.focus === undefined, JSON.stringify(session.focus));
+
+	session.dispose();
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// Cancelling the destination's queued release is a loan, not a write-off: a
+	// transition that is then *refused* still owes it. Here the session's own
+	// worktree is deleted from under it, so `focus off` cannot resolve the
+	// destination at all — and the release cancelled a moment earlier must still
+	// happen when the agent settles, or the lease is lost to a local variable and the
+	// worktree stays held by a live pid for the rest of the process's life.
+	const { dir, model, alpha, beta } = await makeTwoManaged();
+	const h = harness(alpha.path);
+	await h.fire("session_start");
+	h.idle = false;
+	await h.command("worktree", "focus beta");
+	ok("the session's own worktree is queued for release", (await ownerOf(model, "alpha"))?.pid === process.pid);
+	await rm(alpha.path, { recursive: true, force: true });
+
+	await h.command("worktree", "focus off");
+
+	ok(
+		"a destination that no longer exists refuses the move",
+		h.messages().some((m) => /no longer exists/.test(m)),
+		JSON.stringify(h.notices),
+	);
+	ok("focus stays where it was", lastFocus(h) === beta.path, JSON.stringify(h.appended));
+
+	await h.fire("agent_settled", { type: "agent_settled" });
+	ok(
+		"and the release the refused transition took out of the queue still happens",
+		(await ownerOf(model, "alpha")) === undefined,
+		JSON.stringify(await ownerOf(model, "alpha")),
+	);
+
+	await h.fire("session_shutdown");
 	await rm(dir, { recursive: true, force: true });
 }
 

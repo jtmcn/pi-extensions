@@ -186,12 +186,14 @@ async function setup({
 	config = {},
 	withModel = true,
 	leases = [],
+	pending = [],
 	withSession = true,
 	install = { stdout: "", stderr: "", code: 0, killed: false },
 } = {}) {
 	const said = [];
 	const reported = [];
 	const focusCalls = [];
+	const leaseCalls = [];
 	const answers = [...confirms];
 	const prompts = { confirm: [], select: [], input: [], editor: [] };
 	let focus;
@@ -235,13 +237,27 @@ async function setup({
 	// worktree this session holds must be handed *back* before the removal, and
 	// `dropLease` is how the real session gives one up. Only the part `commands.ts`
 	// touches, for the reason its header gives — session state lives in the caller.
+	//
+	// `pending` is the deferred-release queue: a lease this session has dropped for a
+	// focus change but not yet handed back, because a tool call in flight is still
+	// writing there. `remove` has to find its own lease in *either* place — a version
+	// that saw only the list was refused by jimothy, naming this very session as the
+	// holder that made the removal impossible.
 	const held = leases.map((lease) => ({ ...lease }));
+	const deferred = pending.map((lease) => ({ ...lease }));
 	const dropped = [];
 	const session = {
 		dropLease: (path) => {
 			const index = held.findIndex((lease) => lease.path === path);
 			if (index === -1) return undefined;
 			const [lease] = held.splice(index, 1);
+			dropped.push(lease);
+			return lease;
+		},
+		cancelRelease: (path) => {
+			const index = deferred.findIndex((lease) => lease.path === path);
+			if (index === -1) return undefined;
+			const [lease] = deferred.splice(index, 1);
 			dropped.push(lease);
 			return lease;
 		},
@@ -275,6 +291,14 @@ async function setup({
 		moveFocus: async (_ctx, target) => {
 			focus = target;
 			focusCalls.push(target);
+			return true;
+		},
+		// Recorded rather than performed, exactly like `moveFocus` above: whether the
+		// acquisition really lands is `take-lease.ts`'s business and is driven against
+		// the real registry in `lease-doors.test.mjs`. What this file owns is *which*
+		// worktree a door decides to lease.
+		takeLease: async (_ctx, path) => {
+			leaseCalls.push(path);
 			return true;
 		},
 	});
@@ -312,7 +336,9 @@ async function setup({
 		reported,
 		prompts,
 		focusCalls,
+		leaseCalls,
 		held,
+		deferred,
 		dropped,
 		gitCalls,
 		installCalls,
@@ -509,6 +535,39 @@ async function setup({
 }
 
 {
+	// The same lease, one step earlier in its life: dropped by a focus change and
+	// queued for release because a tool call in flight is still writing there. It is
+	// no longer on the session's list, so a `dropLease`-only removal handed nothing
+	// back and jimothy refused — reporting that the worktree was in use by this very
+	// session, which is the opposite of what the README promises.
+	const { dir, model, records } = await makeManagedRepo(["spike"]);
+	await model.registry.acquireLease("spike", "run-1", process.pid, { label: "pi session" });
+	const h = await setup({
+		dir,
+		confirms: [true, false],
+		pending: [{ name: "spike", path: records.spike.path, runId: "run-1", provenance: "ours" }],
+	});
+
+	const info = await getRepoInfo(execRunner(), dir);
+	await h.commands.dispatch(info, h.ctx, "remove spike");
+
+	ok(
+		"a release still queued does not refuse this session's own removal",
+		!h.errors().some((m) => /in use by/.test(m)),
+		JSON.stringify(h.said),
+	);
+	ok("the worktree is gone", !(await exists(records.spike.path)), JSON.stringify(h.said));
+	ok("its record with it", (await readRegistry(dir)).worktrees.length === 0, JSON.stringify(await readRegistry(dir)));
+	ok(
+		"and the queued release is taken out of the queue, not left to fire at a deleted worktree",
+		h.deferred.length === 0 && h.dropped[0]?.path === records.spike.path,
+		JSON.stringify({ deferred: h.deferred, dropped: h.dropped }),
+	);
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
 	// The case the release above must not accidentally cover. A dirty worktree the
 	// user confirms maps to `force`, which is about files; another agent holding the
 	// worktree is about leases, and no confirmation here has anything to say about
@@ -688,6 +747,53 @@ async function setup({
 	ok("adopt: keeps the existing branch", record?.branch === "scratch", JSON.stringify(record));
 	ok("adopt: not jimothy's to delete", record?.branchCreated === false, JSON.stringify(record));
 	ok("adopt: reports what happened", h.messages().some((m) => m.includes("adopted scratch (scratch)")), JSON.stringify(h.said));
+	ok(
+		"adopt: a worktree this session is not writing in is left unleased",
+		h.leaseCalls.length === 0,
+		JSON.stringify(h.leaseCalls),
+	);
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// Adopting the worktree the agent is *writing in* is the one adoption that has to
+	// take a lease: before it there was no record to hold, after it there is a record
+	// nobody holds — leasable, unleased, being written to, and offered to the next
+	// session with no prompt. The write target is the focused worktree here; the
+	// session's own is the case below.
+	const { dir, paths } = await makeRepo(["scratch"]);
+	const info = await getRepoInfo(execRunner(), dir);
+	const h = await setup({ dir });
+	h.setFocus({ path: await realpath(paths.scratch), branch: "scratch" });
+
+	await h.commands.dispatch(info, h.ctx, `adopt ${paths.scratch}`);
+
+	const record = await recordFor(dir, "scratch");
+	ok(
+		"adopt: the focused worktree is leased once it becomes leasable",
+		h.leaseCalls.length === 1 && h.leaseCalls[0] === record?.path,
+		JSON.stringify({ leaseCalls: h.leaseCalls, record: record?.path }),
+	);
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// The same, with nothing focused: the session's own worktree, adopted in place.
+	// `worktreeRoot` is the write target then, because every tool call resolves there.
+	const { dir, paths } = await makeRepo(["scratch"]);
+	const info = await getRepoInfo(execRunner(), paths.scratch);
+	const h = await setup({ dir });
+
+	await h.commands.dispatch(info, h.ctx, `adopt ${paths.scratch}`);
+
+	const record = await recordFor(dir, "scratch");
+	ok(
+		"adopt: the session's own worktree is leased when it is adopted in place",
+		h.leaseCalls.length === 1 && h.leaseCalls[0] === record?.path,
+		JSON.stringify({ leaseCalls: h.leaseCalls, record: record?.path }),
+	);
 
 	await rm(dir, { recursive: true, force: true });
 }
