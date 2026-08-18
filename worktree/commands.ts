@@ -51,7 +51,7 @@ import { type CommandRunner, pruneWorktrees } from "./worktrees.ts";
  * difference matters most on `remove`, where the second reading invites the user
  * to create a duplicate of something that is still there.
  */
-const MODEL_UNAVAILABLE = "jimothy's worktree model is unavailable, so worktrees cannot be listed";
+export const MODEL_UNAVAILABLE = "jimothy's worktree model is unavailable, so worktrees cannot be listed";
 
 /** Is there still a directory there? */
 const exists = async (path: string): Promise<boolean> => {

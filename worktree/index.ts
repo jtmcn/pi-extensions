@@ -544,14 +544,18 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool(
 		createWorktreeTool({
 			runner: pi,
-			getRepo: () => session?.repo,
+			getModel: () => session?.model,
 			getConfig: () => session?.config ?? DEFAULT_CONFIG,
 			getSessionCtx: () => session?.ctx,
-			setFocus,
-			// A create through the tool bypasses the model's write paths (phase 4),
-			// so what it just made is unmanaged until then — snapshot() cannot see
-			// an unmanaged worktree at all, so the reconciling read is the one that
-			// must run here, not refreshCached's lock-free one.
+			// The same transition every other door goes through, bound the same way
+			// `commands.ts` is: acquire before release, and a refusal is reported
+			// rather than silently kept as a success.
+			moveFocus: moveFocusHere,
+			// The reconciling read, not the lock-free one: what this tool just
+			// created is real the instant `createAndProvision` returns, and a
+			// snapshot cannot see an unmanaged worktree at all — irrelevant here
+			// since the create is managed, but still the read every other creating
+			// door uses.
 			refreshKnown: commands.refreshKnown,
 			setKnownBranches: commands.setKnownBranches,
 		}),

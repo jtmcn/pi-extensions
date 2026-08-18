@@ -68,9 +68,10 @@ those unmanaged rows for a different reason: jimothy leaves it out of its own
 listing because nothing it does applies to it, and this extension puts it back,
 because it has always been listable and focusable — it is excluded from what
 `/worktree adopt` offers and refused if named explicitly. The model's
-`worktree` tool is different: its own `list` action still calls git directly
-and prints bare paths, with no registry name and no unmanaged label; porting it
-to the registry is a later phase.
+`worktree` tool's `list` action renders through the same `describeKnown` this
+command does, so the model and the user read the same spelling of the same
+worktree — including the `unmanaged` label, the model's only cue that
+`/worktree adopt` exists (the tool itself cannot adopt anything).
 
 Reading the registry this way is not free of side effects: the reconciling read
 behind `/worktree list`, `focus`, `remove`, `new`, `checkout` and `prune` takes
@@ -315,21 +316,34 @@ nothing, and it says so instead of leaving it to be discovered.
 ## Tool
 
 The model gets a `worktree` tool with `action: "list" | "create"`. It can spin
-up an isolated worktree for a parallel experiment.
+up an isolated worktree for a parallel experiment. `create` goes through the
+same `createAndProvision` as `/worktree new`: a record in jimothy's registry,
+then jimothy's own provisioning — `link`/`copy` entries plus a package install
+when the checkout has a lockfile — so a worktree the model makes is
+indistinguishable from one a person made with `/worktree new`. A name is
+optional; without one `registry.suggestName` generates one, the same as an
+empty prompt does for `/worktree new`. A **provisioning** failure does not fail
+the tool call: the worktree is real and usable, the failure is retryable, and
+the result text says both what was created and that setup failed.
 
 `create` focuses the new worktree when `autoFocus` is on (the default), so the
 model keeps working where it just landed instead of threading an absolute path
 through every later call. The footer shows the focus and `/worktree focus off`
 undoes it. Set `"autoFocus": false` for the old behaviour, where the tool only
-returns the path. The tool still cannot focus an *existing* worktree or check
-out an *existing* branch — switching between worktrees, and starting work on a
-branch that already exists, stay user decisions.
+returns the path. Focus now moves through the same transition every other door
+uses, which can refuse a destination held by a live stranger — a tool call has
+no UI to prompt with, so the result says focus could not move rather than
+claiming the model is working somewhere it was refused. The tool still cannot
+focus an *existing* worktree or check out an *existing* branch — switching
+between worktrees, and starting work on a branch that already exists, stay
+user decisions.
 
-Note that `create` runs the configured `postCreate` command, so a model tool
-call can execute the project's setup command. `postCreate` therefore only comes
-from `~/.pi/agent/worktree.json` or from a **trusted** project's
-`.pi/worktree.json` — the same trust boundary as the rest of pi's project
-config.
+`postCreate` is **not** run by the tool any more: provisioning is jimothy's,
+and jimothy has no `postCreate` equivalent (a later phase may add one). Nothing
+in this extension calls its own `createWorktree` any more — `new`, `checkout`
+and the tool all provision through jimothy now — so `postCreate` and
+`config.path` are orphaned until a later phase deletes them; `/worktree config`
+still displays them for now.
 
 ## Layouts
 
@@ -342,9 +356,10 @@ repo/.git (file)        linked worktree        -> main repo root/<config.path>
 proj/.bare + proj/main  bare layout            -> proj/<config.path>
 ```
 
-`config.path` no longer decides where `/worktree new` puts a worktree — that is
-jimothy's `baseDir`, per repository — nor `checkout`'s, now ported the same way;
-only the model's tool still uses it, until it is ported too.
+`config.path` no longer decides where any worktree lands — that is jimothy's
+`baseDir`, per repository, for `new`, `checkout` and the model's tool alike.
+The key and the diagram above are what a later phase deletes; nothing in this
+extension still reads `config.path` to place a worktree.
 
 ## Configuration
 
@@ -361,8 +376,10 @@ Later files win:
   // convention so both agents find the same worktrees in a shared checkout.
   "path": ".claude/worktrees",
 
-  // Prepended to branch names created by /worktree checkout and the model's
-  // tool. `/worktree new` uses jimothy's prefix instead.
+  // No longer prepended to any branch name jimothy creates — `/worktree new`,
+  // `checkout` and the model's tool all use jimothy's own `branchPrefix`
+  // instead. What is left: stripped from the branch shown in the status bar,
+  // and echoed by `/worktree config`.
   "branchPrefix": "joel/",
 
   // Copied from the current worktree into a new one. Useful for gitignored
@@ -370,9 +387,9 @@ Later files win:
   // provisions through jimothy, so it uses jimothy's `link`/`copy` instead.
   "copyFiles": [".env", ".env.local"],
 
-  // Shell command run inside a newly created worktree. Executed via `bash -lc`,
-  // including when the model creates a worktree through the tool. Not run by
-  // `/worktree new`, which provisions through jimothy.
+  // Shell command run inside a newly created worktree. Executed via `bash -lc`.
+  // Not run by `/worktree new` or the model's tool, both of which provision
+  // through jimothy, which has no equivalent step (a later phase may add one).
   "postCreate": "npm install",
 
   // Focus a newly created worktree automatically — both `/worktree new` and the
@@ -507,7 +524,7 @@ worktree/branches.ts     branch listing, resolution and naming (pure + two git c
 worktree/focus.ts        tool-input rewriting (pure, heavily tested)
 worktree/select.ts       argument parsing and name matching (pure)
 worktree/suggest.ts      the transcript-derived name seed `new` offers (pure)
-worktree/worktrees.ts    prune, plus the create the model's tool still calls (its remove has none)
+worktree/worktrees.ts    prune, plus a create/remove no door calls any more (see Layouts, Tool)
 worktree/pr.ts           PR display formatting and poll cadence (pure)
 worktree/gh.ts           the gh calls behind the PR status display
 ```
