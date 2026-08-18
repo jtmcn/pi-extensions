@@ -372,12 +372,17 @@ export default function (pi: ExtensionAPI) {
 		// A session that has no model cannot release anything, so the question is asked
 		// once rather than per lease.
 		if (outgoing && model) {
-			// The deferred queue first, and regardless of provenance: a transition has
-			// already decided these worktrees are no longer this session's to hold, and
-			// `agent_settled` is the only other thing that drains them. `/reload` and
-			// `/fork` end a session without ending the process, so one left queued here
-			// would stay held by a *live* pid for the rest of that process's life —
-			// recoverable only with `jimothy wt release --force`.
+			// The deferred queue first: a transition has already decided these worktrees
+			// are no longer this session's to hold, and `agent_settled` is the only other
+			// thing that drains them. Not literally "regardless of provenance", though —
+			// `drainDeferredReleases`'s own guard skips an entry the session's lease list
+			// shows held again, and that is right even for a delegated one taken back:
+			// jimothy's own `finally` owns it exactly as it owns any other lease this
+			// session currently holds. Reachable only inside the residual window that
+			// guard's own doc comment describes; everything else queued here really is no
+			// longer held. `/reload` and `/fork` end a session without ending the process,
+			// so one left queued here would stay held by a *live* pid for the rest of that
+			// process's life — recoverable only with `jimothy wt release --force`.
 			//
 			// Through the same drain `agent_settled` uses, guards included: a shutdown is
 			// exactly when a queue that has outlived its transitions is emptied, and a

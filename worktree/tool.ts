@@ -157,7 +157,11 @@ export function createWorktreeTool(deps: ToolDeps) {
 				// stays aborted for the rest of its life. Hence "did not finish" rather
 				// than "was cancelled": it stays true in the narrow case where the install
 				// had already failed on its own before the abort arrived, where either of
-				// the definite wordings would be a guess.
+				// the definite wordings would be a guess. `signal` here is this call's own,
+				// not the merged one `result.aborted` answers for, so a session ending
+				// (rather than the call itself) under the install still picks "failed" — and
+				// can then read "Provisioning failed: … was cancelled", the session's own
+				// abort speaking through `result.failed.message` where this line cannot see it.
 				const provisionNotes =
 					"failed" in result
 						? [`Provisioning ${signal?.aborted ? "did not finish" : "failed"}: ${result.failed.message}`]

@@ -123,10 +123,12 @@ all silent when broken:
   and `since`; `expectedPid` catches what the session cannot see, a lease
   retargeted onto another live pid, where the registry is the only witness and
   the run id survives the move. Narrowed, not closed: a re-acquisition landing
-  between the check and jimothy's write is still released, and nothing inside
-  one process can close that, because the adoption leaves nothing to compare
-  against. A release that declines returns `false` and is not an error — the
-  drain has nobody to tell, and losing that race is the outcome asked for.
+  between the check and jimothy's write is still released. No registry-side
+  comparison closes that, because the adoption leaves nothing to compare
+  against; closing it in-process would need the transition to await a release
+  already in flight rather than race it, which is not implemented. A release
+  that declines returns `false` and is not an error — the drain has nobody to
+  tell, and losing that race is the outcome asked for.
 
 Do **not** add `@earendil-works/*` to this collection's `package.json`. pi loads
 extensions through jiti with an alias table that maps those specifiers onto the

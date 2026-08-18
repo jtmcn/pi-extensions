@@ -151,8 +151,12 @@ export interface WorktreeSession {
 	 */
 	cancelRelease: (path: string) => HeldLease | undefined;
 	/**
-	 * The releases still queued. For a caller that needs to *see* the queue
-	 * without draining it.
+	 * The releases still queued, for a test to observe without draining it.
+	 *
+	 * Tests only — nothing in this extension calls it. `readonly` is a
+	 * compile-time label, not a runtime one: the array underneath is `deferred`
+	 * itself, and the tests that read this are `.mjs`, so nothing stops one from
+	 * mutating it. Do not wire production logic to it on the strength of the type.
 	 */
 	readonly deferredReleases: readonly HeldLease[];
 	/**
@@ -166,7 +170,13 @@ export interface WorktreeSession {
 	 * Popped one at a time, the rest of the queue stays cancellable while a release
 	 * is in flight.
 	 *
-	 * Empty after a dispose, like everything else here.
+	 * Not empty after a dispose — `dispose()` never clears `deferred`, only
+	 * `deferRelease` goes inert, so a transition that drops a lease after that point
+	 * has nowhere left to queue it. An entry queued before the dispose is still
+	 * handed back here: it is what `session_shutdown`'s own drain runs over. The
+	 * existing test proves only the first half — that `deferRelease` refuses a new
+	 * entry once disposed — not this one, since nothing there calls
+	 * `nextDeferredRelease` after a dispose.
 	 */
 	nextDeferredRelease: () => HeldLease | undefined;
 	/** Repaint the footer segment. */

@@ -109,6 +109,14 @@ const releaseOrigin = async (
  * it is released outright instead, and swallowed rather than reported, exactly
  * as an acquire abandoned mid-flight is (`take-lease.ts`, the acquire row): the
  * context is stale from the moment `current` went false.
+ *
+ * Releasing outright reopens the residual `drainDeferredReleases` documents, in a
+ * second place: `expectedPid` does not bite here — there is no pid guard on this
+ * call at all — so this can free a lease a *replacement* session has since
+ * adopted, because adoption keeps the old run id and the run-id guard passes too.
+ * Reachability is thin: the destination's focus entry is only appended after this
+ * session has already gone stale, so a replacement restores the previous focus
+ * rather than this destination.
  */
 const releaseCancelled = async (
 	env: TransitionEnv,
@@ -145,12 +153,17 @@ const releaseCancelled = async (
  *      the run id alone does not tell the two apart — a retarget keeps it.
  *
  * **Narrowed, not closed.** A re-acquisition that lands between the check and
- * jimothy's write is still released. Nothing in one process closes that: an
- * adoption leaves no trace in the registry for a compare-and-release to compare
- * against, so the window is as small as the check can make it and no smaller.
- * What it does close is the whole *rest* of the queue: entries are popped one at a
- * time (see `nextDeferredRelease`), so a transition can still cancel them while an
- * earlier release is in flight.
+ * jimothy's write is still released — and the same window opens anywhere an
+ * adoption is invisible to a registry-side comparison, not only here (see
+ * `releaseCancelled` above for a second place it reappears). No comparison
+ * against the registry can close it: an adoption writes nothing there to
+ * compare against, so the window is as small as the check can make it and no
+ * smaller. Closing it in-process would need the transition to await a release
+ * already in flight rather than race it — publishing the popped entry so
+ * `moveFocus` could wait on one for its destination before deciding — and that
+ * is not implemented. What it does close is the whole *rest* of the queue:
+ * entries are popped one at a time (see `nextDeferredRelease`), so a transition
+ * can still cancel them while an earlier release is in flight.
  *
  * A release that declines returns `false` rather than throwing, and nothing is
  * done with it: this is a background drain with nobody to report to, and "the
@@ -168,7 +181,11 @@ export async function drainDeferredReleases(
 		const queued = lease;
 		// Taken back by a transition while an earlier release was in flight: the
 		// session holds this worktree again, and the agent may already be writing in it.
-		if (active.leases.some((held) => held.name === queued.name)) continue;
+		// Matched by path, like `cancelRelease` and `dropLease` (session.ts): both know
+		// where the agent was writing rather than what the registry calls it, and the
+		// two are interchangeable here since `addLease` keeps at most one entry per
+		// worktree.
+		if (active.leases.some((held) => held.path === queued.path)) continue;
 		await model.registry
 			.releaseLease(queued.name, queued.runId, { expectedPid: process.pid })
 			.catch((error: Error) => onError(queued, error));

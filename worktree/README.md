@@ -198,13 +198,15 @@ and neither can answer the other's:
   from whatever holds that name now.
 
 **Narrowed, not closed.** A re-acquisition that lands between the check and
-jimothy's write is still released, and nothing inside one pi process closes
-that: the adoption leaves no trace in the registry for a compare-and-release to
-compare against, so a session can still, in principle, end a turn focused on a
-worktree it no longer holds. What is closed is the whole rest of the queue,
-which stays cancellable while an earlier release is in flight. A release that
-declines is not an error and nothing is reported: a background drain has nobody
-to tell, and losing that race is the outcome asked for.
+jimothy's write is still released. No registry-side comparison closes that: the
+adoption leaves no trace in the registry for a compare-and-release to compare
+against, so a session can still, in principle, end a turn focused on a worktree
+it no longer holds. Closing it in-process would need the transition to await a
+release already in flight rather than race it, which is not implemented. What
+is closed is the whole rest of the queue, which stays cancellable while an
+earlier release is in flight. A release that declines is not an error and
+nothing is reported: a background drain has nobody to tell, and losing that
+race is the outcome asked for.
 
 A focused worktree that has *disappeared* — removed by another session, or by
 `jimothy wt rm` in another terminal — is noticed by the next transition and
