@@ -37,7 +37,6 @@ const LEASE_LABEL = "pi session";
  * replaced under us — which is exactly what `current` exists to answer.
  */
 export interface LeaseEnv {
-	model: Model | undefined;
 	launcher: LauncherEnv | undefined;
 	say: (ctx: ExtensionContext, message: string, level: "info" | "warning" | "error") => void;
 	/**

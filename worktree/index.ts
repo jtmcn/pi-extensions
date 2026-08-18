@@ -268,7 +268,6 @@ export default function (pi: ExtensionAPI) {
 		// the shutdown spike showed anything queued after that call may not run at
 		// all, so a session that carries on is racing its own exit.
 		const leaseEnv: LeaseEnv = {
-			model,
 			launcher,
 			say,
 			current: (candidate) => session === candidate,
