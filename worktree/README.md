@@ -206,7 +206,8 @@ repository's default branch. An unquoted multi-word name is therefore an error
 rather than a mystery branch — and a name is no longer slugified for you:
 `/worktree new "My Feature!"` is refused rather than quietly becoming
 `my-feature`, because silently renaming what someone typed is worse than saying
-no. (`checkout`'s explicit name still slugifies; that door is a later task.)
+no. `checkout`'s explicit name is refused the same way, for the same reason —
+see below.
 
 With no name, the prompt is prefilled with a suggestion. The transcript half
 stays here — only pi has one: the newest thing you asked for, reduced to up to
@@ -241,11 +242,22 @@ ago is still found. A stale remote-tracking ref is the accepted gap: it matches
 immediately, so the worktree can start a few commits behind. A fetch that fails
 is a warning, not an error.
 
-The directory name drops the remote and `branchPrefix`, so with
-`"branchPrefix": "joel/"`, `origin/joel/fix-parser` becomes `fix-parser` and
-`origin/alice/hotfix` becomes `alice-hotfix`. A derived name that collides gets
-`-2`; a name you pass yourself is never adjusted and fails instead. `autoFocus`
-applies exactly as it does for `new`.
+The directory name drops the remote and jimothy's `branchPrefix` — set in
+`jimothy.config.json`, not this extension's own `branchPrefix` key documented
+below, which no longer reaches `checkout` — so with jimothy's `branchPrefix`
+set to `"joel/"`, `origin/joel/fix-parser` becomes `fix-parser` and
+`origin/alice/hotfix` becomes `alice-hotfix`. A name you pass yourself is never
+adjusted and fails instead if it is illegal or already taken.
+
+For an ordinary existing local branch, a derived name colliding with `-2` is not
+an edge case but the normal outcome: `checkout feature`'s directory-name seed is
+derived from `feature` itself, and `registry.suggestName`'s taken-set already
+contains every branch in the repo (stripped of jimothy's prefix) — including the
+very branch being checked out — so it always looks taken and the directory lands
+in `feature-2`, not `feature`, even though nothing else has that name. This is a
+known wart in jimothy's `suggestName`, not a choice made here; a later change is
+expected to fix it on the jimothy side, and the suffix this documents will
+change when it does. `autoFocus` applies exactly as it does for `new`.
 
 The model's `worktree` tool deliberately does not expose this. With auto-focus
 on, checking out an existing branch could put the model to work directly on a
@@ -283,8 +295,8 @@ proj/.bare + proj/main  bare layout            -> proj/<config.path>
 ```
 
 `config.path` no longer decides where `/worktree new` puts a worktree — that is
-jimothy's `baseDir`, per repository — but `checkout` and the model's tool still
-use it until they are ported.
+jimothy's `baseDir`, per repository — nor `checkout`'s, now ported the same way;
+only the model's tool still uses it, until it is ported too.
 
 ## Configuration
 

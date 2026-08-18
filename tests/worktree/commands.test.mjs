@@ -971,7 +971,7 @@ async function recordFor(dir, name) {
 	ok("checkout: the branch is kept as the user named it, unprefixed", record?.branch === "joel/local-work", JSON.stringify(record));
 	ok("checkout: not jimothy's to delete", record?.branchCreated === false, JSON.stringify(record));
 	ok("checkout: jimothy's branchPrefix stripped before uniquifying", record?.name === "local-work-2", JSON.stringify(record));
-	ok("checkout: focused", t.focusCalls.at(-1)?.path === record.path, JSON.stringify(t.focusCalls.at(-1)));
+	ok("checkout: focused", t.focusCalls.at(-1)?.path === record?.path, JSON.stringify(t.focusCalls.at(-1)));
 	// Through `moveFocus`, which carries the lease; `setFocus` would leave the
 	// agent writing into a worktree this session never acquired.
 	ok("checkout: through moveFocus, not setFocus", t.setFocusCalls.length === 0, JSON.stringify(t.setFocusCalls));
@@ -1068,6 +1068,23 @@ async function recordFor(dir, name) {
 		"checkout: explicit name is never uniquified",
 		t.errors().at(-1)?.includes("already exists") && (await recordFor(dir, "custom-dir-2")) === undefined,
 		String(t.errors().at(-1)),
+	);
+
+	// Same policy as `new` (README): a name the user typed is refused on its own
+	// terms rather than silently slugified into something legal.
+	// A different, still-uncheckouted branch: `joel/thing` is already checked out
+	// above, and that refusal must not be mistaken for this one.
+	const beforeIllegal = (await readRegistry(dir)).worktrees.length;
+	await t.commands.dispatch(info, t.ctx, "checkout third/thing 'My Dir!'");
+	ok(
+		"checkout: an illegal explicit name is refused, not slugified",
+		t.errors().at(-1)?.includes("invalid worktree name"),
+		String(t.errors().at(-1)),
+	);
+	ok(
+		"checkout: and nothing is added for it",
+		(await readRegistry(dir)).worktrees.length === beforeIllegal,
+		JSON.stringify(await readRegistry(dir)),
 	);
 
 	await t.commands.dispatch(info, t.ctx, "checkout other/thing");
