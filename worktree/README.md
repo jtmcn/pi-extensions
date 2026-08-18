@@ -327,6 +327,18 @@ empty prompt does for `/worktree new`. A **provisioning** failure does not fail
 the tool call: the worktree is real and usable, the failure is retryable, and
 the result text says both what was created and that setup failed.
 
+A cancelled call stops its **install**. The call's own `AbortSignal` is checked
+before anything starts and then handed to the provisioner, which forwards it to
+the install and nothing else: `create` itself is a registry write and a `git
+worktree add`, both done in about the time an abort takes to arrive, and
+linking and copying are filesystem work that would be finished before one
+could. An install is the step that can take minutes, so it is the one worth
+stopping — before this it ran on until the session ended. A cancelled install is
+not reported as a failed one: `worktree/jimothy.ts` tells pi's `killed` child
+apart by *why* it was killed, so the result says the setup did not finish and
+that the dependencies are simply not installed, instead of sending the model
+after a dependency problem that does not exist.
+
 `create` focuses the new worktree when `autoFocus` is on (the default), so the
 model keeps working where it just landed instead of threading an absolute path
 through every later call. The footer shows the focus and `/worktree focus off`

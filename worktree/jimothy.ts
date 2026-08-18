@@ -55,6 +55,22 @@ export interface DepsOptions {
 	timeoutCeilingMs?: number;
 }
 
+/**
+ * One signal for pi out of the two reasons a child here can be stopped: the
+ * session ending, and the single call that started it being cancelled.
+ *
+ * `pi.exec` takes one `signal`, and neither reason may be dropped — a cancelled
+ * `worktree` tool call must stop its install, and a session that ends under an
+ * install must stop it too. The single-signal cases are passed through by
+ * identity rather than wrapped, so a caller (and a test) can still see which
+ * signal reached pi; `AbortSignal.any` is only for the case that needs it.
+ */
+const eitherSignal = (session?: AbortSignal, call?: AbortSignal): AbortSignal | undefined => {
+	if (session === undefined) return call;
+	if (call === undefined) return session;
+	return AbortSignal.any([session, call]);
+};
+
 export function createDeps(runner: CommandRunner, options: DepsOptions = {}): Deps {
 	const ceiling = options.timeoutCeilingMs ?? INSTALL_TIMEOUT_CEILING_MS;
 
@@ -71,27 +87,36 @@ export function createDeps(runner: CommandRunner, options: DepsOptions = {}): De
 			}
 			// Clamped rather than passed through: see INSTALL_TIMEOUT_CEILING_MS.
 			const timeout = opts.timeoutMs === undefined ? undefined : Math.min(opts.timeoutMs, ceiling);
+			// The caller's signal as well as the session's: the model forwards one to the
+			// install alone, and that is how a cancelled tool call stops an install
+			// instead of leaving it to run until the session ends.
+			const signal = eitherSignal(options.signal, opts.signal);
 			const result = await runner.exec(command, args, {
 				...(opts.cwd === undefined ? {} : { cwd: opts.cwd }),
 				...(timeout === undefined ? {} : { timeout }),
-				...(options.signal === undefined ? {} : { signal: options.signal }),
+				...(signal === undefined ? {} : { signal }),
 			});
 			// `killed` covers a timeout and an abort alike, and the model tells the
 			// user something different for each — so the distinction is made here,
-			// where the two causes are still distinguishable. This is a snapshot at
-			// resolution time, not an ordering of the two causes: a genuine timeout
-			// whose kill is raced by a session abort that lands just before `exec`
-			// resolves is reported as an abort, not a timeout. Fixing that needs a
-			// local timer racing pi's own, which was rejected on purpose — it would
-			// reintroduce the second source of truth for child lifetime that this
-			// file exists to hand back to pi, to fix one misworded message about a
-			// run the session was cancelling anyway.
-			const timedOut = result.killed && timeout !== undefined && options.signal?.aborted !== true;
+			// where the two causes are still distinguishable. `aborted` is reported
+			// rather than left for the model to infer from the signal, because a
+			// signal stays aborted for the rest of its life: an abort arriving just
+			// after a *successful* install must not turn it into a cancellation.
+			// This is a snapshot at resolution time, not an ordering of the two
+			// causes: a genuine timeout whose kill is raced by an abort that lands
+			// just before `exec` resolves is reported as an abort, not a timeout.
+			// Fixing that needs a local timer racing pi's own, which was rejected on
+			// purpose — it would reintroduce the second source of truth for child
+			// lifetime that this file exists to hand back to pi, to fix one misworded
+			// message about a run somebody was cancelling anyway.
+			const aborted = result.killed && signal?.aborted === true;
+			const timedOut = result.killed && timeout !== undefined && !aborted;
 			return {
 				code: result.code,
 				stdout: result.stdout,
 				stderr: result.stderr,
 				...(timedOut ? { timedOut: true } : {}),
+				...(aborted ? { aborted: true } : {}),
 			};
 		},
 
