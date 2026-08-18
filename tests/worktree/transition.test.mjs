@@ -190,6 +190,14 @@ function lastFocus(h) {
 		/in use by pi session someone-else/.test(h.prompts.select[0]?.title ?? ""),
 		JSON.stringify(h.prompts.select[0]?.title),
 	);
+	// A transition that declines does not quit pi — unlike session_start's prompt,
+	// which really does — so the decline button must not read "Quit" here: that
+	// would tell the user something is about to happen that is not.
+	ok(
+		"the decline option says what actually happens, not session_start's wording",
+		h.prompts.select[0]?.options[0] === "Stay here",
+		JSON.stringify(h.prompts.select[0]?.options),
+	);
 	ok("focus does not move", lastFocus(h) === undefined, JSON.stringify(h.appended));
 	ok("the stranger keeps the destination", (await ownerOf(model, "beta"))?.runId === "someone-else");
 	ok(

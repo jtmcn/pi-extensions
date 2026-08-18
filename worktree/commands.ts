@@ -307,7 +307,8 @@ export function createCommands(deps: CommandDeps): Commands {
 	};
 
 	const showList = async (info: RepoInfo, ctx: ExtensionContext) => {
-		if (!getModel()) {
+		const model = getModel();
+		if (!model) {
 			say(ctx, MODEL_UNAVAILABLE, "error");
 			return;
 		}
@@ -326,7 +327,18 @@ export function createCommands(deps: CommandDeps): Commands {
 		// Excludes the main working tree `refresh()` puts back above: it is
 		// unmanaged too, but nothing jimothy does applies to it, so it is never
 		// what this hint means by "adopt".
-		if (worktrees.some((wt) => !wt.managed && wt.path !== info.projectRoot)) {
+		//
+		// Compared against jimothy's `model.info.mainWorktree`, not this function's
+		// own `info.projectRoot` — two different `RepoInfo` shapes coexist here
+		// (the design spec calls this out as a named risk): `info` is this
+		// extension's, read from `lib/git.ts` and equal to the *dirname of the
+		// common dir*; `model.info` is jimothy's, and `.mainWorktree` is the
+		// directory `refresh()` actually unshifted above. They coincide for an
+		// ordinary repo and diverge in a `proj/.bare` layout, where `projectRoot`
+		// is `proj` and the main worktree is `proj/main` — comparing against the
+		// wrong one prints "can be adopted" for a repository whose only unmanaged
+		// row is the one thing that cannot be.
+		if (worktrees.some((wt) => !wt.managed && wt.path !== model.info.mainWorktree)) {
 			lines.push("", "unmanaged worktrees can be adopted with /worktree adopt");
 		}
 		report(ctx, `Worktrees in ${info.projectRoot}:`, lines);
@@ -636,13 +648,26 @@ export function createCommands(deps: CommandDeps): Commands {
 	 * again and it goes back at shutdown instead of at the next settle. Held a while
 	 * longer is the safe direction — the unsafe one is an agent writing in a worktree
 	 * this session no longer holds.
+	 *
+	 * `active` is the session `doRemove` captured before the removal — the one the
+	 * lease was dropped from — checked again here for the same reason `take-lease.ts`'s
+	 * `acquire` row re-checks `env.current`: the acquire above crosses an await, and a
+	 * session replaced in that window must record no lease. Re-reading `getSession()`
+	 * and adding to whatever it returns *now* — the previous shape — either lands the
+	 * lease on an unrelated replacement session or, if none is live, drops it with
+	 * nothing recorded, and either way the registry is left holding the worktree under
+	 * a live pid that nothing will ever release: the same leak `take-lease.ts`'s
+	 * `acquire` row was fixed for. So a session mismatch here hands the lease straight
+	 * back instead.
 	 */
-	const regainLease = async (ctx: ExtensionCommandContext, model: Model, lease: HeldLease) => {
+	const regainLease = async (ctx: ExtensionCommandContext, model: Model, active: WorktreeSession | undefined, lease: HeldLease) => {
 		try {
 			await model.registry.acquireLease(lease.name, lease.runId, process.pid, { label: LEASE_LABEL });
-			// Re-read rather than captured: the session can have been replaced while the
-			// removal ran, and the lease belongs on whichever one is live to release it.
-			getSession()?.addLease(lease);
+			if (getSession() !== active) {
+				await model.registry.releaseLease(lease.name, lease.runId).catch(() => {});
+				return;
+			}
+			active?.addLease(lease);
 		} catch (error) {
 			say(
 				ctx,
@@ -668,6 +693,32 @@ export function createCommands(deps: CommandDeps): Commands {
 			return;
 		}
 
+		// Above both confirmations, not after them: an unmanaged worktree is refused
+		// regardless of what the user answers, so asking "N uncommitted file(s) will
+		// be lost" and "also delete branch" first only makes the eventual refusal read
+		// as if consent mattered when it never did.
+		if (!target.managed) {
+			if (target.path === model.info.mainWorktree) {
+				// A main working tree can never be adopted — jimothy refuses that
+				// outright — so the ordinary "adopt it first" advice below is a dead
+				// end for this one row. Say plainly that it cannot be removed at all,
+				// rather than pointing at a command that will only refuse again.
+				say(ctx, `"${target.name}" is the repository's main working tree and cannot be removed`, "error");
+				return;
+			}
+			// `Registry.remove` takes a registry name, and an unmanaged worktree has
+			// none — the extension's own git-level removal used to delete it anyway,
+			// so this is a capability regression, acceptable only because the fix is
+			// named rather than left for the user to guess: adopt, then remove.
+			say(
+				ctx,
+				`"${target.name}" is not managed by jimothy, so there is nothing to remove — run ` +
+					`/worktree adopt ${target.path} first, then remove it`,
+				"error",
+			);
+			return;
+		}
+
 		const dirty = await countDirty(runner, target.path);
 		if (ctx.hasUI) {
 			const message = dirty > 0 ? `${dirty} uncommitted file(s) will be lost.` : "This cannot be undone.";
@@ -688,22 +739,12 @@ export function createCommands(deps: CommandDeps): Commands {
 			);
 		}
 
-		if (!target.managed) {
-			// `Registry.remove` takes a registry name, and an unmanaged worktree has
-			// none — the extension's own git-level removal used to delete it anyway,
-			// so this is a capability regression, acceptable only because the fix is
-			// named rather than left for the user to guess: adopt, then remove.
-			say(
-				ctx,
-				`"${target.name}" is not managed by jimothy, so there is nothing to remove — run ` +
-					`/worktree adopt ${target.path} first, then remove it`,
-				"error",
-			);
-			return;
-		}
-
-		// Held across the removal so a failure can hand it back: see the catch.
+		// Held across the removal so a failure can hand it back: see the catch. `session`
+		// is captured here too, alongside `released`, because `regainLease` must check
+		// identity against *this* session, not whichever one `getSession()` returns after
+		// the removal has run.
 		let released: HeldLease | undefined;
+		let session: WorktreeSession | undefined;
 		try {
 			// Our own lease would make `remove` refuse: it is live, under a live pid,
 			// which is exactly what that check is for. So it is handed *back* first —
@@ -716,7 +757,7 @@ export function createCommands(deps: CommandDeps): Commands {
 			// left the removal refused — naming *this* session as the holder that made it
 			// impossible. At most one of the two can have it: `addLease` cancels a queued
 			// release when the worktree is taken back.
-			const session = getSession();
+			session = getSession();
 			const held = session?.dropLease(target.path) ?? session?.cancelRelease(target.path);
 			released = held;
 			if (held) await model.registry.releaseLease(held.name, held.runId);
@@ -757,7 +798,7 @@ export function createCommands(deps: CommandDeps): Commands {
 				// The removal really did not happen, so the lease released for it is owed
 				// back: without this the session holds nothing on a worktree it may still
 				// be focused on, which is the state this whole ordering must not produce.
-				if (released) await regainLease(ctx, model, released);
+				if (released) await regainLease(ctx, model, session, released);
 				return;
 			}
 			// Gone, so everything the success path does has to happen anyway. Skipping it

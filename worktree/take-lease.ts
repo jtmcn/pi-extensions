@@ -204,10 +204,15 @@ const applyDecision = async (
 			return atStart;
 		}
 		case "prompt": {
-			const choice = await ctx.ui.select(`Worktree "${record.name}" is ${held(decision)}`, [
-				"Quit",
-				"Take over",
-			]);
+			// The row already knows which entry it is, so the decline label can say what
+			// actually happens instead of one wording doing duty for two outcomes: at
+			// session start declining really does quit (see below); on a transition
+			// nothing ends, the move is simply refused and pi keeps running where it
+			// already was. A button reading "Quit" on that path would be a lie the user
+			// has no way to catch before clicking it.
+			const atStart = target.entry === "session-start";
+			const decline = atStart ? "Quit" : "Stay here";
+			const choice = await ctx.ui.select(`Worktree "${record.name}" is ${held(decision)}`, [decline, "Take over"]);
 			// The longest wait in here by far, and the one most likely to outlive the
 			// session that opened it.
 			if (!env.current(active)) return false;
@@ -223,7 +228,7 @@ const applyDecision = async (
 				// See `Target.entry`: a session that cannot have the worktree it is about
 				// to write to has nowhere to go; a transition that cannot have the one it
 				// was moving to stays where it is.
-				if (target.entry === "session-start") ctx.shutdown();
+				if (atStart) ctx.shutdown();
 				return false;
 			}
 			// Consent was given to displace the run the prompt *named*, and nobody

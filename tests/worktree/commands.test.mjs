@@ -345,6 +345,13 @@ async function setup({
 		setFocus: (target) => {
 			focus = target;
 		},
+		// For the one test that has to prove a session vanishing mid-`regainLease`
+		// leaks no lease: flips what `getSession()` returns without touching the
+		// session mock itself, so `held`/`dropped` still read off the same object
+		// `doRemove` captured.
+		dropSession: () => {
+			withSession = false;
+		},
 		messages: () => said.map((s) => s.message),
 		errors: () => said.filter((s) => s.level === "error").map((s) => s.message),
 	};
@@ -386,8 +393,12 @@ async function setup({
 // ============================================ remove: dirty worktrees
 
 {
-	const { dir, paths } = await makeRepo();
-	await writeFile(join(paths.exp, "uncommitted.txt"), "precious\n");
+	// Managed, not `makeRepo`'s raw git worktree: the unmanaged refusal now runs
+	// before either confirmation (see the "remove: unmanaged" section below), so a
+	// fixture this test wants to exercise for its *dirtiness* has to be one
+	// `Registry.remove` would otherwise accept.
+	const { dir, records } = await makeManagedRepo();
+	await writeFile(join(records.exp.path, "uncommitted.txt"), "precious\n");
 
 	const h = await setup({ dir, hasUI: false });
 	const info = await getRepoInfo(execRunner(), dir);
@@ -398,21 +409,21 @@ async function setup({
 		h.errors().some((m) => m.includes("refusing to remove a dirty worktree")),
 		JSON.stringify(h.said),
 	);
-	ok("the uncommitted file survives", await exists(join(paths.exp, "uncommitted.txt")));
+	ok("the uncommitted file survives", await exists(join(records.exp.path, "uncommitted.txt")));
 
 	await rm(dir, { recursive: true, force: true });
 }
 
 {
-	const { dir, paths } = await makeRepo();
-	await writeFile(join(paths.exp, "uncommitted.txt"), "precious\n");
+	const { dir, records } = await makeManagedRepo();
+	await writeFile(join(records.exp.path, "uncommitted.txt"), "precious\n");
 
 	// Interactive, and the user declines.
 	const h = await setup({ dir, confirms: [false] });
 	const info = await getRepoInfo(execRunner(), dir);
 	await h.commands.dispatch(info, h.ctx, "remove exp");
 
-	ok("declining the confirmation removes nothing", await exists(join(paths.exp, "uncommitted.txt")));
+	ok("declining the confirmation removes nothing", await exists(join(records.exp.path, "uncommitted.txt")));
 	ok("the prompt says what will be lost", h.prompts.confirm[0]?.detail.includes("uncommitted file(s) will be lost"), JSON.stringify(h.prompts.confirm));
 	ok("and no branch question is asked after declining", h.prompts.confirm.length === 1);
 
@@ -669,6 +680,51 @@ async function setup({
 }
 
 {
+	// The same shape `take-lease.ts`'s `acquire` row was fixed for (finding 5 of the
+	// whole-branch review), reached from `regainLease` instead: the re-acquire above
+	// crosses an await, and a session gone by the time it resolves must not get the
+	// lease recorded — and the registry must not be left holding the worktree under a
+	// live pid that nothing will ever release.
+	const { dir, model, records } = await makeManagedRepo(["spike"]);
+	await model.registry.acquireLease("spike", "run-1", process.pid, { label: "pi session" });
+	await reserve(dir, {
+		name: "spike",
+		path: records.spike.path,
+		branch: records.spike.branch,
+		kind: "create",
+		owner: { runId: "another-jimothy", pid: stranger.pid, since: new Date().toISOString() },
+	});
+
+	const h = await setup({
+		dir,
+		confirms: [true, false],
+		leases: [{ name: "spike", path: records.spike.path, runId: "run-1", provenance: "ours" }],
+	});
+	// The session vanishes in the window `regainLease`'s own re-acquire is awaiting —
+	// the only registry call on this path, since `remove` itself never reaches git
+	// (the reservation refuses it first).
+	const realAcquire = h.model.registry.acquireLease.bind(h.model.registry);
+	h.model.registry.acquireLease = async (...args) => {
+		const result = await realAcquire(...args);
+		h.dropSession();
+		return result;
+	};
+
+	const info = await getRepoInfo(execRunner(), dir);
+	await h.commands.dispatch(info, h.ctx, "remove spike");
+
+	const owner = await ownerOf(dir, "spike");
+	ok(
+		"a session gone before the lease could be recorded is handed straight back, not leaked",
+		owner === undefined,
+		JSON.stringify(owner),
+	);
+	ok("and nothing is recorded on the vanished session either", h.held.length === 0, JSON.stringify(h.held));
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
 	// The race that re-acquiring leaves, made real: our lease is released before
 	// `remove`, and a stranger takes it in the window. Wrapped at the registry call
 	// for the same reason the ordering test above wraps it — that is the one moment a
@@ -726,6 +782,36 @@ async function setup({
 		h.errors().some((m) => /not managed by jimothy/.test(m) && /\/worktree adopt/.test(m)),
 		JSON.stringify(h.said),
 	);
+	// The refusal needs nothing either confirmation would produce, so it must run
+	// before them — asking "N uncommitted file(s) will be lost" for a worktree that
+	// cannot be removed no matter the answer is a confirmation that lied about
+	// mattering.
+	ok("and neither confirmation was ever asked", h.prompts.confirm.length === 0, JSON.stringify(h.prompts.confirm));
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// The repository's *main* working tree, removed from inside a linked one: the
+	// session's-own-worktree guard does not fire (a different path is focused), so
+	// this used to fall all the way to the unmanaged branch, ask both destructive
+	// confirmations, and only then refuse with "run /worktree adopt <path> first" —
+	// advice jimothy refuses outright for a main working tree. It needs its own
+	// message, and it needs to come before either confirmation.
+	const { dir, paths } = await makeRepo();
+	const info = await getRepoInfo(execRunner(), paths.exp);
+	const h = await setup({ dir, confirms: [true, true] });
+
+	await h.commands.dispatch(info, h.ctx, `remove ${basename(dir)}`);
+
+	ok(
+		"refuses to remove the repository's main working tree",
+		h.errors().some((m) => /main working tree/.test(m) && /cannot be removed/.test(m)),
+		JSON.stringify(h.said),
+	);
+	ok("it never suggests an adopt jimothy would refuse anyway", h.errors().every((m) => !/\/worktree adopt/.test(m)), JSON.stringify(h.said));
+	ok("and never asks either confirmation first", h.prompts.confirm.length === 0, JSON.stringify(h.prompts.confirm));
+	ok("and it is still there", await exists(join(dir, "file.txt")));
 
 	await rm(dir, { recursive: true, force: true });
 }
@@ -1151,6 +1237,12 @@ async function setup({
 	ok("bare layout: labelled unmanaged", /unmanaged/.test(String(main)), String(main));
 	ok("bare layout: with its checked-out branch", /\(main\)/.test(String(main)), String(main));
 	ok("bare layout: marked as the session's", /session/.test(String(main)), String(main));
+	// The adopt hint used to compare against this function's own `info.projectRoot`
+	// (the dirname of the common dir, `proj`) instead of jimothy's
+	// `model.info.mainWorktree` (`proj/main`, the row `refresh()` actually built).
+	// They diverge in exactly this layout, and the only unmanaged row here is the
+	// one thing that can never be adopted — so the hint must not print.
+	ok("bare layout: and the adopt hint does not print for it", !block.some((l) => l.includes("/worktree adopt")), JSON.stringify(block));
 
 	await rm(root, { recursive: true, force: true });
 }
