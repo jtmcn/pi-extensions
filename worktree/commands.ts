@@ -107,6 +107,7 @@ const SUBCOMMANDS = [
 	{ value: "checkout", label: "checkout <branch>", description: "Create a worktree for an existing branch" },
 	{ value: "focus", label: "focus <name|off>", description: "Redirect tool calls into a worktree" },
 	{ value: "remove", label: "remove <name>", description: "Remove a worktree" },
+	{ value: "adopt", label: "adopt [path]", description: "Take an existing worktree into the registry" },
 	{ value: "prune", label: "prune", description: "Prune stale worktree metadata" },
 	{ value: "config", label: "config", description: "Show effective configuration" },
 ];
@@ -320,6 +321,12 @@ export function createCommands(deps: CommandDeps): Commands {
 			return `${describeKnown(wt)}${marks.length ? `  — ${marks.join(", ")}` : ""}`;
 		});
 		if (lines.length === 0) lines.push("(none)");
+		// Excludes the main working tree `refresh()` puts back above: it is
+		// unmanaged too, but nothing jimothy does applies to it, so it is never
+		// what this hint means by "adopt".
+		if (worktrees.some((wt) => !wt.managed && wt.path !== info.projectRoot)) {
+			lines.push("", "unmanaged worktrees can be adopted with /worktree adopt");
+		}
 		report(ctx, `Worktrees in ${info.projectRoot}:`, lines);
 	};
 
@@ -519,6 +526,56 @@ export function createCommands(deps: CommandDeps): Commands {
 		}
 	};
 
+	/**
+	 * `/worktree adopt [path]` — take an existing worktree into the registry.
+	 *
+	 * The path defaults to a chosen unmanaged worktree rather than to cwd (which
+	 * is what `jimothy wt adopt` does): in a session the interesting ones are the
+	 * repository's *other* worktrees, and cwd is usually already managed. No
+	 * filesystem completions are offered for the argument — the selection prompt
+	 * below is the affordance, and completing arbitrary paths would invite
+	 * adopting something that is not a worktree of this repository at all.
+	 */
+	const doAdopt = async (_info: RepoInfo, ctx: ExtensionCommandContext, args: string) => {
+		const model = getModel();
+		if (!model) {
+			say(ctx, MODEL_UNAVAILABLE, "error");
+			return;
+		}
+
+		let target = args.trim();
+		if (!target) {
+			// The reconciling read: a worktree just created by hand (`git worktree
+			// add`) must show up here without a prior `/worktree list`.
+			const { unmanaged } = await model.registry.list();
+			const candidates = unmanaged.filter(
+				(entry) => !entry.bare && entry.path !== model.info.mainWorktree,
+			);
+			if (candidates.length === 0) {
+				say(ctx, "no unmanaged worktrees to adopt", "info");
+				return;
+			}
+			if (!ctx.hasUI) {
+				say(ctx, "a path is required in non-interactive mode", "error");
+				return;
+			}
+			const labels = candidates.map(
+				(entry) => `${basename(entry.path)}  (${entry.branch ?? "detached"})  ${entry.path}`,
+			);
+			const choice = await ctx.ui.select("Adopt which worktree?", labels);
+			if (!choice) return;
+			target = candidates[labels.indexOf(choice)].path;
+		}
+
+		try {
+			const record = await model.registry.adopt(target);
+			await refresh();
+			say(ctx, `adopted ${record.name} (${record.branch})`, "info");
+		} catch (error) {
+			say(ctx, (error as Error).message, "error");
+		}
+	};
+
 	const doFocus = async (info: RepoInfo, ctx: ExtensionCommandContext, args: string) => {
 		const query = args.trim();
 		// Every branch here goes through `moveFocus` rather than `setFocus`: focus is
@@ -606,6 +663,20 @@ export function createCommands(deps: CommandDeps): Commands {
 				`Also delete branch "${target.branch}"?`,
 				"Kept if it is not fully merged.",
 			);
+		}
+
+		if (!target.managed) {
+			// `Registry.remove` takes a registry name, and an unmanaged worktree has
+			// none — the extension's own git-level removal used to delete it anyway,
+			// so this is a capability regression, acceptable only because the fix is
+			// named rather than left for the user to guess: adopt, then remove.
+			say(
+				ctx,
+				`"${target.name}" is not managed by jimothy, so there is nothing to remove — run ` +
+					`/worktree adopt ${target.path} first, then remove it`,
+				"error",
+			);
+			return;
 		}
 
 		// Held across the removal so a failure can hand it back: see the catch.
@@ -716,6 +787,8 @@ export function createCommands(deps: CommandDeps): Commands {
 			case "remove":
 			case "rm":
 				return doRemove(info, ctx, rest);
+			case "adopt":
+				return doAdopt(info, ctx, rest);
 			case "prune": {
 				const out = await pruneWorktrees(runner, info.projectRoot);
 				await refresh();

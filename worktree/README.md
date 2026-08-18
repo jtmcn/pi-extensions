@@ -43,6 +43,7 @@ already resolved, but a hand-written `/var` vs `/private/var` will not match.
 /worktree focus <name>    redirect tool calls into a worktree
 /worktree focus off       stop redirecting
 /worktree remove <name>   remove a worktree (prompts about dirt and the branch)
+/worktree adopt [path]    take an existing (unmanaged) worktree into the registry
 /worktree prune           prune stale worktree metadata
 /worktree config          show effective configuration and where it came from
 ```
@@ -51,12 +52,25 @@ For the `/worktree` command, which worktrees exist is answered by jimothy's
 registry, not by a raw `git worktree list`: one jimothy created or adopted is
 shown under the name the registry gave it, with its status (held, provisioned,
 or not), and anything else is listed too but labelled `unmanaged` — jimothy will
-not provision, lease or remove it. The repository's main working tree is one of
-those: jimothy leaves it out of its own listing because nothing it does applies
-to it, and this extension puts it back, because it has always been listable and
-focusable. The model's `worktree` tool is different: its own `list` action still
-calls git directly and prints bare paths, with no registry name and no
-unmanaged label; porting it to the registry is a later phase.
+not provision, lease or remove it until it is adopted. `/worktree adopt [path]`
+is what makes those rows actionable: it takes an existing worktree into the
+registry in place (nothing moves), deriving its name from the directory unless
+one is given, and records `branchCreated: false` so a later `/worktree remove`
+never deletes a branch jimothy did not make. With no path and a UI it offers a
+picker of the unmanaged worktrees, excluding the repository's main working tree
+and any bare entry; without a UI a path is required, since there is no
+transcript to derive one from as `new` does. A worktree that is already
+managed, is the main working tree, is bare, or is on a detached HEAD is
+refused — `WorktreeRecord.branch` is required, and every renderer and
+`remove`'s branch logic assume it exists, so a detached worktree cannot be
+adopted at all, not even readably. The repository's main working tree is one of
+those unmanaged rows for a different reason: jimothy leaves it out of its own
+listing because nothing it does applies to it, and this extension puts it back,
+because it has always been listable and focusable — it is excluded from what
+`/worktree adopt` offers and refused if named explicitly. The model's
+`worktree` tool is different: its own `list` action still calls git directly
+and prints bare paths, with no registry name and no unmanaged label; porting it
+to the registry is a later phase.
 
 Reading the registry this way is not free of side effects: the reconciling read
 behind `/worktree list`, `focus`, `remove`, `new`, `checkout` and `prune` takes
@@ -269,8 +283,8 @@ shared branch instead of a scratch one, so it stays a user decision — like
 `/worktree remove <name>` is a `Registry.remove`, so what it accepts is a name
 the registry knows. A worktree jimothy did not create has no record and is now
 refused — `unmanaged` in the listing means unmanaged here too, where the
-extension's own git-level removal used to delete it anyway. Taking one into the
-registry first is a later phase.
+extension's own git-level removal used to delete it anyway. The refusal names
+the route back: `/worktree adopt <path>` first, then remove it.
 
 The two confirmations are two different questions, and neither leaks into the
 other. The first is about *files*: `<n> uncommitted file(s) will be lost` is what

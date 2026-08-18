@@ -661,8 +661,10 @@ async function setup({
 {
 	// A worktree only git knows about has no record, and `Registry.remove` takes a
 	// registry name — so `/worktree remove` now refuses one where the extension's
-	// own git-level implementation used to remove it. Pinned rather than left to be
-	// discovered: it is the gap `/worktree adopt` exists to close.
+	// own git-level implementation used to remove it. That capability regression
+	// is acceptable only because the refusal names the route back: adopt it,
+	// then remove it — not jimothy's raw "no worktree named" message, which is a
+	// registry concept for a directory the user can plainly see in the listing.
 	const { dir, paths } = await makeRepo(["scratch"]);
 	const h = await setup({ dir, confirms: [true, false] });
 	const info = await getRepoInfo(execRunner(), dir);
@@ -670,9 +672,165 @@ async function setup({
 
 	ok("an unmanaged worktree is refused", await exists(paths.scratch), JSON.stringify(h.said));
 	ok(
-		"and the refusal names it",
-		h.errors().some((m) => /no worktree named "scratch"/.test(m)),
+		"and the refusal says it is unmanaged and names the fix",
+		h.errors().some((m) => /not managed by jimothy/.test(m) && /\/worktree adopt/.test(m)),
 		JSON.stringify(h.said),
+	);
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+// ============================================ adopt
+
+{
+	// The heart of it: an explicit path git already knows about becomes a record,
+	// keeping the path and the branch it already has — nothing moves.
+	const { dir, paths } = await makeRepo(["scratch"]);
+	const info = await getRepoInfo(execRunner(), dir);
+	const h = await setup({ dir });
+
+	await h.commands.dispatch(info, h.ctx, `adopt ${paths.scratch}`);
+
+	const record = await recordFor(dir, "scratch");
+	ok("adopt: creates a record", record !== undefined, JSON.stringify(await readRegistry(dir)));
+	ok("adopt: keeps the existing path", record?.path === (await realpath(paths.scratch)), String(record?.path));
+	ok("adopt: keeps the existing branch", record?.branch === "scratch", JSON.stringify(record));
+	ok("adopt: not jimothy's to delete", record?.branchCreated === false, JSON.stringify(record));
+	ok("adopt: reports what happened", h.messages().some((m) => m.includes("adopted scratch (scratch)")), JSON.stringify(h.said));
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// With no argument and a UI, the unmanaged worktrees are the offer — not a raw
+	// path prompt, which is why there is no editor or input step here.
+	const { dir, paths } = await makeRepo(["scratch"]);
+	const info = await getRepoInfo(execRunner(), dir);
+	const h = await setup({ dir, select: (labels) => labels.find((l) => l.startsWith("scratch")) });
+
+	await h.commands.dispatch(info, h.ctx, "adopt");
+
+	ok("adopt: offers a picker with no argument", h.prompts.select.length === 1, JSON.stringify(h.prompts.select));
+	ok(
+		"adopt: the picker names the unmanaged worktree and its path",
+		h.prompts.select[0]?.labels.some((l) => l.includes("scratch") && l.includes(paths.scratch)),
+		JSON.stringify(h.prompts.select),
+	);
+	const record = await recordFor(dir, "scratch");
+	ok("adopt: choosing it adopts it", record !== undefined, JSON.stringify(await readRegistry(dir)));
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// The main working tree is unmanaged too, but adopting it is nonsensical —
+	// jimothy's own registry refuses it, and it must never be offered.
+	const { dir } = await makeRepo([]);
+	const info = await getRepoInfo(execRunner(), dir);
+	const h = await setup({ dir });
+
+	await h.commands.dispatch(info, h.ctx, "adopt");
+
+	ok(
+		"adopt: says there is nothing to adopt rather than offering the main working tree",
+		h.messages().some((m) => /no unmanaged worktrees/.test(m)),
+		JSON.stringify(h.said),
+	);
+	ok("adopt: and never prompts", h.prompts.select.length === 0);
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// No path and no UI: nothing to fall back on, unlike `new`, which has a
+	// transcript-derived suggestion to use instead.
+	const { dir } = await makeRepo(["scratch"]);
+	const info = await getRepoInfo(execRunner(), dir);
+	const h = await setup({ dir, hasUI: false });
+
+	await h.commands.dispatch(info, h.ctx, "adopt");
+
+	ok(
+		"adopt: a path is required in non-interactive mode",
+		h.errors().some((m) => /required in non-interactive mode/.test(m)),
+		JSON.stringify(h.said),
+	);
+	ok("adopt: and nothing was created", (await readRegistry(dir)).worktrees.length === 0);
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// Already managed is refused, not silently re-adopted.
+	const { dir, records } = await makeManagedRepo(["spike"]);
+	const info = await getRepoInfo(execRunner(), dir);
+	const h = await setup({ dir });
+
+	await h.commands.dispatch(info, h.ctx, `adopt ${records.spike.path}`);
+
+	ok(
+		"adopt: a worktree jimothy already manages is refused",
+		h.errors().some((m) => /already managed/.test(m)),
+		JSON.stringify(h.said),
+	);
+	ok("adopt: still exactly one record", (await readRegistry(dir)).worktrees.length === 1);
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// A detached worktree is refused, and the message names the real limitation:
+	// `WorktreeRecord.branch` is required, so there is nothing to record.
+	const { dir } = await makeRepo([]);
+	const detachedPath = join(dir, "wt", "detached");
+	await pexec("git", ["worktree", "add", "-q", "--detach", detachedPath], { cwd: dir });
+	const info = await getRepoInfo(execRunner(), dir);
+	const h = await setup({ dir });
+
+	await h.commands.dispatch(info, h.ctx, `adopt ${detachedPath}`);
+
+	ok(
+		"adopt: a detached worktree is refused, and the message says why",
+		h.errors().some((m) => /not on a branch/.test(m)),
+		JSON.stringify(h.said),
+	);
+	ok("adopt: no record is created for it", (await readRegistry(dir)).worktrees.length === 0, JSON.stringify(await readRegistry(dir)));
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// `/worktree list` is what makes the unmanaged rows discoverable as
+	// adoptable in the first place.
+	const { dir } = await makeRepo(["scratch"]);
+	const info = await getRepoInfo(execRunner(), dir);
+	const h = await setup({ dir });
+
+	await h.commands.dispatch(info, h.ctx, "list");
+	const lines = h.reported[0]?.lines ?? [];
+	ok(
+		"list: hints that unmanaged worktrees can be adopted",
+		lines.some((l) => l.includes("/worktree adopt")),
+		JSON.stringify(lines),
+	);
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// The hint must not fire from the main working tree alone — it is unmanaged
+	// too, but never what "adopt" means, and a repository with nothing else
+	// unmanaged must not suggest a command that has nothing to do.
+	const { dir } = await makeManagedRepo(["spike"]);
+	const info = await getRepoInfo(execRunner(), dir);
+	const h = await setup({ dir });
+
+	await h.commands.dispatch(info, h.ctx, "list");
+	const lines = h.reported[0]?.lines ?? [];
+	ok(
+		"list: no adopt hint when nothing is unmanaged",
+		!lines.some((l) => l.includes("/worktree adopt")),
+		JSON.stringify(lines),
 	);
 
 	await rm(dir, { recursive: true, force: true });
