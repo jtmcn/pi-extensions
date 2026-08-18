@@ -64,7 +64,7 @@ import {
 import { createSession, FOCUS_ENTRY_TYPE, type WorktreeSession } from "./session.ts";
 import { type LeaseEnv, takeLeaseForSession, takeLeaseOn } from "./take-lease.ts";
 import { createWorktreeTool } from "./tool.ts";
-import { moveFocus } from "./transition.ts";
+import { drainDeferredReleases, moveFocus } from "./transition.ts";
 import { createUi } from "./ui.ts";
 
 const STATUS_KEY = "worktree";
@@ -367,22 +367,31 @@ export default function (pi: ExtensionAPI) {
 		// This must run before replaceSession(undefined) below, not after: it reads
 		// the session's leases and its model, and a session that has already dropped
 		// its model cannot release anything.
-		const model = session?.model;
+		const outgoing = session;
+		const model = outgoing?.model;
 		// A session that has no model cannot release anything, so the question is asked
 		// once rather than per lease.
-		if (model) {
-			// The deferred queue first, and regardless of provenance: a transition has
-			// already decided these worktrees are no longer this session's to hold, and
-			// `agent_settled` is the only other thing that drains them. `/reload` and
-			// `/fork` end a session without ending the process, so one left queued here
-			// would stay held by a *live* pid for the rest of that process's life —
-			// recoverable only with `jimothy wt release --force`.
-			for (const lease of session?.takeDeferredReleases() ?? []) {
-				await model.registry.releaseLease(lease.name, lease.runId).catch((error: Error) => {
-					say(ctx, `could not release the worktree lease: ${error.message}`, "warning");
-				});
-			}
-			for (const lease of session?.leases ?? []) {
+		if (outgoing && model) {
+			// The deferred queue first: a transition has already decided these worktrees
+			// are no longer this session's to hold, and `agent_settled` is the only other
+			// thing that drains them. Not literally "regardless of provenance", though —
+			// `drainDeferredReleases`'s own guard skips an entry the session's lease list
+			// shows held again, and that is right even for a delegated one taken back:
+			// jimothy's own `finally` owns it exactly as it owns any other lease this
+			// session currently holds. Reachable only inside the residual window that
+			// guard's own doc comment describes; everything else queued here really is no
+			// longer held. `/reload` and `/fork` end a session without ending the process,
+			// so one left queued here would stay held by a *live* pid for the rest of that
+			// process's life — recoverable only with `jimothy wt release --force`.
+			//
+			// Through the same drain `agent_settled` uses, guards included: a shutdown is
+			// exactly when a queue that has outlived its transitions is emptied, and a
+			// second copy of "which of these are still ours?" is how the two came to
+			// disagree in the first place.
+			await drainDeferredReleases(model, outgoing, (_lease, error) => {
+				say(ctx, `could not release the worktree lease: ${error.message}`, "warning");
+			});
+			for (const lease of outgoing.leases) {
 				if (lease.provenance !== "ours") continue;
 				// Reported, never fatal: pi is on its way out, and a lock we could not take
 				// leaves a lease whose pid is about to be dead — which the next run reclaims.
@@ -427,16 +436,14 @@ export default function (pi: ExtensionAPI) {
 		const active = session;
 		const model = active?.model;
 		if (!active || !model) return;
-		for (const lease of active.takeDeferredReleases()) {
-			await model.registry.releaseLease(lease.name, lease.runId).catch((error: Error) => {
-				// Reported only while this is still the live session: a replaced one's
-				// `ctx` is stale, and touching it throws out of the handler. The release
-				// itself is attempted either way — it is runId-guarded, so a late one
-				// cannot unlock a worktree someone else has taken.
-				if (session !== active) return;
-				say(ctx, `could not release worktree "${lease.name}": ${error.message}`, "warning");
-			});
-		}
+		await drainDeferredReleases(model, active, (lease, error) => {
+			// Reported only while this is still the live session: a replaced one's
+			// `ctx` is stale, and touching it throws out of the handler. The release
+			// itself is attempted either way — it is runId- and pid-guarded, so a late
+			// one cannot unlock a worktree someone else has taken.
+			if (session !== active) return;
+			say(ctx, `could not release worktree "${lease.name}": ${error.message}`, "warning");
+		});
 	});
 
 	// Reports stay up until the user does something else.

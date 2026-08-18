@@ -178,6 +178,36 @@ an early release cannot unlock a worktree somebody else has taken. The cost,
 named so it is not rediscovered as a bug: pi's own cwd is still A, so a user
 typing into the terminal is working in a worktree the session no longer holds.
 
+That queue is drained **one entry at a time**, and each release is guarded
+twice. One at a time because a release takes the registry's lock, which is long
+enough to matter: draining by taking the whole queue up front left every entry
+after the first invisible for the rest of the drain, so a transition returning
+to one of those worktrees found nothing to cancel and ended up focused on a
+worktree the drain then freed. The two guards answer two different questions,
+and neither can answer the other's:
+
+- **`session.leases`, checked immediately before each release.** A
+  re-acquisition by *this session* writes nothing to the registry at all — the
+  decision is `adopt`, and the lease keeps its run id, its pid and its `since`
+  — so the session's own lease list is the only witness that the worktree is
+  held again.
+- **`expectedPid`, inside jimothy's own write.** This catches what the list
+  cannot see: a lease that has moved onto another *live pid*, which is what a
+  launcher handing over produces. A retarget keeps the run id, so the pid is
+  the only thing that distinguishes the lease the queue entry was written for
+  from whatever holds that name now.
+
+**Narrowed, not closed.** A re-acquisition that lands between the check and
+jimothy's write is still released. No registry-side comparison closes that: the
+adoption leaves no trace in the registry for a compare-and-release to compare
+against, so a session can still, in principle, end a turn focused on a worktree
+it no longer holds. Closing it in-process would need the transition to await a
+release already in flight rather than race it, which is not implemented. What
+is closed is the whole rest of the queue, which stays cancellable while an
+earlier release is in flight. A release that declines is not an error and
+nothing is reported: a background drain has nobody to tell, and losing that
+race is the outcome asked for.
+
 A focused worktree that has *disappeared* — removed by another session, or by
 `jimothy wt rm` in another terminal — is noticed by the next transition and
 dropped, with its lease. Without that the session goes on redirecting every tool
@@ -263,15 +293,15 @@ it set to `"joel/"`, `origin/joel/fix-parser` becomes `fix-parser` and
 `origin/alice/hotfix` becomes `alice-hotfix`. A name you pass yourself is never
 adjusted and fails instead if it is illegal or already taken.
 
-For an ordinary existing local branch, a derived name colliding with `-2` is not
-an edge case but the normal outcome: `checkout feature`'s directory-name seed is
-derived from `feature` itself, and `registry.suggestName`'s taken-set already
-contains every branch in the repo (stripped of jimothy's prefix) — including the
-very branch being checked out — so it always looks taken and the directory lands
-in `feature-2`, not `feature`, even though nothing else has that name. This is a
-known wart in jimothy's `suggestName`, not a choice made here; a later change is
-expected to fix it on the jimothy side, and the suffix this documents will
-change when it does. `autoFocus` applies exactly as it does for `new`.
+A derived name is not suffixed by the branch it is derived from. `checkout
+feature` lands in `feature`, because this door tells `registry.suggestName` it is
+`creatingBranch: false`: the branch half of that taken set exists to protect a
+caller about to mint `${branchPrefix}<name>`, which `new` does and `checkout`
+never does, so counting it here would make every seed collide with the very
+branch being checked out — `feature-2`, and a message pointing at a `feature`
+nobody created. Records, worktrees git reports and an explicit name are
+unaffected: those are what `create` actually enforces. `autoFocus` applies
+exactly as it does for `new`.
 
 The model's `worktree` tool deliberately does not expose this. With auto-focus
 on, checking out an existing branch could put the model to work directly on a
@@ -326,6 +356,18 @@ optional; without one `registry.suggestName` generates one, the same as an
 empty prompt does for `/worktree new`. A **provisioning** failure does not fail
 the tool call: the worktree is real and usable, the failure is retryable, and
 the result text says both what was created and that setup failed.
+
+A cancelled call stops its **install**. The call's own `AbortSignal` is checked
+before anything starts and then handed to the provisioner, which forwards it to
+the install and nothing else: `create` itself is a registry write and a `git
+worktree add`, both done in about the time an abort takes to arrive, and
+linking and copying are filesystem work that would be finished before one
+could. An install is the step that can take minutes, so it is the one worth
+stopping — before this it ran on until the session ended. A cancelled install is
+not reported as a failed one: `worktree/jimothy.ts` tells pi's `killed` child
+apart by *why* it was killed, so the result says the setup did not finish and
+that the dependencies are simply not installed, instead of sending the model
+after a dependency problem that does not exist.
 
 `create` focuses the new worktree when `autoFocus` is on (the default), so the
 model keeps working where it just landed instead of threading an absolute path

@@ -18,7 +18,9 @@
  *    reported as a refusal, never claimed as a move;
  *  - a provisioning failure still leaves the record (the worktree is real and
  *    usable, only its setup failed) and says so in the text;
- *  - a call handed an already-aborted signal does no work at all.
+ *  - a call handed an already-aborted signal does no work at all, and one
+ *    cancelled *during* its install cancels that install rather than leaving it
+ *    running until the session ends.
  */
 
 import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
@@ -74,7 +76,9 @@ async function makeRepo({ withLockfile = false } = {}) {
  *
  * `install` answers every `npm`/`pnpm` call the provisioner makes; everything
  * else — all of git — goes through a real runner, because worktree identity is
- * exactly what is under test. `moveFocusResult` and `hasSessionCtx` let a test
+ * exactly what is under test. A function rather than a fixed answer when a test
+ * needs the options the install was handed — the signal, above all — or needs to
+ * act while it is running. `moveFocusResult` and `hasSessionCtx` let a test
  * choose which branch of the focus logic it is exercising without a real pi
  * session to drive it.
  */
@@ -91,7 +95,9 @@ async function setupTool({
 	};
 	const modelRunner = {
 		exec: (command, args, options) => {
-			if (command === "npm" || command === "pnpm") return Promise.resolve(install);
+			if (command === "npm" || command === "pnpm") {
+				return Promise.resolve(typeof install === "function" ? install(command, args, options) : install);
+			}
 			return real.exec(command, args, options);
 		},
 	};
@@ -274,6 +280,57 @@ async function setupTool({
 	const registry = await readRegistry(dir);
 	ok("creates nothing at all", registry.worktrees.length === 0, JSON.stringify(registry));
 	ok("never touches focus", h.moveFocusCalls.length === 0);
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+// ============================================================= create: cancelled mid-install
+
+{
+	// The signal is threaded to the install, not merely checked before the call
+	// starts: a cancelled call used to leave its install running until the whole
+	// session ended. Aborted from *inside* the install, which is the only ordering
+	// that proves anything — a pre-flight refusal would pass on a signal nothing ever
+	// handed to a child.
+	const dir = await makeRepo({ withLockfile: true });
+	const controller = new AbortController();
+	let seen;
+	const h = await setupTool({
+		dir,
+		install: (_command, _args, options) => {
+			seen = options?.signal;
+			controller.abort();
+			// What pi resolves a cancelled exec as: the child is killed, so it reports a
+			// signal exit like any other failure.
+			return { stdout: "", stderr: "", code: 143, killed: true };
+		},
+	});
+
+	const result = await h.tool.execute("call-1", { action: "create", name: "spike" }, controller.signal);
+
+	ok("the install is handed a signal at all", seen !== undefined);
+	ok("and it is one this call's cancellation aborts", seen?.aborted === true);
+	const registry = await readRegistry(dir);
+	ok(
+		"the worktree is kept, exactly as for any other unfinished setup",
+		registry.worktrees.length === 1,
+		JSON.stringify(registry),
+	);
+	ok(
+		"the cancellation is reported as one, not as a mysterious install failure",
+		/was cancelled/.test(result.content[0].text) && !/install failed|did not finish within/.test(result.content[0].text),
+		result.content[0].text,
+	);
+	ok(
+		"and the line above it does not call a cancellation a failure either",
+		!/Provisioning failed/.test(result.content[0].text),
+		result.content[0].text,
+	);
+	ok(
+		"and the text still names what was created",
+		result.content[0].text.includes("Created worktree at"),
+		result.content[0].text,
+	);
 
 	await rm(dir, { recursive: true, force: true });
 }

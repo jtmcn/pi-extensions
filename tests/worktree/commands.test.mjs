@@ -1627,15 +1627,14 @@ async function recordFor(dir, name) {
 	await pexec("git", ["branch", "joel/local-work"], { cwd: dir });
 
 	await t.commands.dispatch(info, t.ctx, "checkout joel/local-work");
-	// `local-work-2`, not `local-work`: `suggestName`'s taken set includes every
-	// branch stripped of jimothy's prefix, so the very branch being checked out
-	// always collides with the seed derived from it — a false-positive collision,
-	// but `suggestName` has no way to know this create *is* that branch's home.
-	const record = await recordFor(dir, "local-work-2");
+	// `local-work`, unsuffixed: `checkout` mints no branch, so it tells `suggestName`
+	// not to count branch names — otherwise the very branch being checked out is in
+	// the taken set and the seed derived from it always collides with itself.
+	const record = await recordFor(dir, "local-work");
 	ok("checkout: local branch checked out", record !== undefined, t.messages().join(" | "));
 	ok("checkout: the branch is kept as the user named it, unprefixed", record?.branch === "joel/local-work", JSON.stringify(record));
 	ok("checkout: not jimothy's to delete", record?.branchCreated === false, JSON.stringify(record));
-	ok("checkout: jimothy's branchPrefix stripped before uniquifying", record?.name === "local-work-2", JSON.stringify(record));
+	ok("checkout: jimothy's branchPrefix stripped, and the branch does not collide with itself", record?.name === "local-work", JSON.stringify(record));
 	// Through `moveFocus`, which carries the lease: the session must hold what the
 	// agent is about to write into.
 	ok("checkout: focused", t.focusCalls.at(-1)?.path === record?.path, JSON.stringify(t.focusCalls.at(-1)));
@@ -1776,10 +1775,7 @@ async function recordFor(dir, name) {
 	const t = await setup({ dir, install: { stdout: "", stderr: "ENOTFOUND registry", code: 1, killed: false } });
 
 	await t.commands.dispatch(info, t.ctx, "checkout feature");
-	// Suffixed to `feature-2` for the same self-collision reason as the local-branch
-	// test above; only the create-fails-vs-provision-fails distinction is under
-	// test here.
-	const record = await recordFor(dir, "feature-2");
+	const record = await recordFor(dir, "feature");
 	ok("checkout: the worktree still exists after a failed install", record !== undefined, JSON.stringify(await readRegistry(dir)));
 	ok("checkout: the message names the created worktree", record !== undefined && t.messages().some((m) => m.includes(`created ${record.path}`)), JSON.stringify(t.said));
 	ok("checkout: the provisioning failure is reported as a warning, not an error", t.errors().length === 0 && t.said.some((s) => s.level === "warning" && /provisioning failed/.test(s.message)), JSON.stringify(t.said));

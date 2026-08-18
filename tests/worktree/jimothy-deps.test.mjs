@@ -76,13 +76,69 @@ function fakeRunner(answer = () => ({ stdout: "out", stderr: "", code: 0, killed
 	ok("reports a killed child under an aborted signal as not timedOut", result.timedOut !== true);
 }
 
-// --- the session's signal ------------------------------------------------
+// --- the session's signal, and the caller's -------------------------------
 {
 	const controller = new AbortController();
 	const runner = fakeRunner();
 	const deps = createDeps(runner, { signal: controller.signal });
 	await deps.run("git", ["status"], {});
 	ok("passes the session's signal to pi", runner.calls[0].options.signal === controller.signal);
+}
+{
+	// The model's own option, which the provisioner sets from a cancellable tool
+	// call. Without this a cancelled call leaves its install running until the
+	// whole session ends.
+	const call = new AbortController();
+	const runner = fakeRunner();
+	const deps = createDeps(runner);
+	await deps.run("npm", ["install"], { signal: call.signal });
+	ok("passes a per-call signal to pi", runner.calls[0].options.signal === call.signal);
+}
+{
+	// pi's exec takes one signal and there are two reasons to stop a child, so the
+	// two are combined rather than one winning: a session ending under an install
+	// and a cancelled call must both reach it.
+	const session = new AbortController();
+	const call = new AbortController();
+	const runner = fakeRunner();
+	const deps = createDeps(runner, { signal: session.signal });
+	await deps.run("npm", ["install"], { signal: call.signal });
+	const passed = runner.calls[0].options.signal;
+	ok("passes a signal when both exist", passed !== undefined);
+	ok("which is not yet aborted", passed?.aborted === false);
+	call.abort();
+	ok("and aborts with the call", passed?.aborted === true);
+}
+{
+	const session = new AbortController();
+	const call = new AbortController();
+	const runner = fakeRunner();
+	const deps = createDeps(runner, { signal: session.signal });
+	await deps.run("npm", ["install"], { signal: call.signal });
+	session.abort();
+	ok("and with the session", runner.calls[0].options.signal?.aborted === true);
+}
+
+// --- an abort is reported as one ------------------------------------------
+{
+	// The model reports a cancelled install differently from a failed one — the
+	// worktree is kept and its dependencies are simply not installed — and reads
+	// `aborted` off the result to tell them apart. Without it a cancelled install
+	// is reported as "failed (exit 143)", sending the user after a dependency
+	// problem that does not exist.
+	const call = new AbortController();
+	call.abort();
+	const runner = fakeRunner(() => ({ stdout: "", stderr: "", code: 143, killed: true }));
+	const deps = createDeps(runner);
+	const result = await deps.run("npm", ["install"], { timeoutMs: 5, signal: call.signal });
+	ok("reports a killed child under an aborted per-call signal as aborted", result.aborted === true);
+	ok("and not as a timeout, which is a different thing to tell a user", result.timedOut !== true);
+}
+{
+	const runner = fakeRunner(() => ({ stdout: "", stderr: "", code: 1, killed: true }));
+	const deps = createDeps(runner);
+	const result = await deps.run("npm", ["install"], { timeoutMs: 5 });
+	ok("does not claim an abort for a child nobody cancelled", result.aborted !== true);
 }
 
 // --- env, which pi's exec has no way to pass through ---------------------

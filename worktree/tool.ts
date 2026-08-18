@@ -112,12 +112,12 @@ export function createWorktreeTool(deps: ToolDeps) {
 				return { content: [{ type: "text", text: text || "(none)" }], details: { worktrees } };
 			}
 
-			// Checked before any work starts, not threaded into the registry call:
-			// the model can cancel a call it already regrets, but a create in flight
-			// keeps running to a real, reportable result — the `Deps` this model was
-			// opened with already carries the *session's* abort signal for that.
-			// Wiring this per-call one into `create` too is a change to `openModel`,
-			// not to this file.
+			// Checked before any work starts, and threaded into the install below but
+			// not into the registry call: `create` is a lock and a `git worktree add`,
+			// which run to a real, reportable result in about the time an abort takes
+			// to arrive, while an install can take minutes — so that is the one step a
+			// cancelled call stops. The `Deps` this model was opened with carries the
+			// *session's* signal as well, and both reach the child.
 			if (signal?.aborted) {
 				return { content: [{ type: "text", text: "cancelled" }], isError: true, details: {} };
 			}
@@ -131,7 +131,7 @@ export function createWorktreeTool(deps: ToolDeps) {
 				// No `report` sink: the tool's output is the model's own narration, and
 				// a provisioning line printed into the transcript mid-call is noise it
 				// cannot act on. The warnings below still reach it, in the result text.
-				const { record, provision: result } = await createAndProvision(model, () => {}, name, { base });
+				const { record, provision: result } = await createAndProvision(model, () => {}, name, { base }, signal);
 
 				// Completion caches only. The worktree exists either way, so a failure
 				// here must not turn a successful create into an error.
@@ -150,9 +150,21 @@ export function createWorktreeTool(deps: ToolDeps) {
 					? await moveFocus(ctx as ExtensionContext, { path: record.path, branch: record.branch }, { announce: false })
 					: false;
 
+				// A cancelled install is not a failed one, and the model must not be sent
+				// after a dependency problem that does not exist. The model already tells
+				// the two apart on the run's own result and says which in its message, so
+				// only the prefix is decided here — and it is decided on the signal, which
+				// stays aborted for the rest of its life. Hence "did not finish" rather
+				// than "was cancelled": it stays true in the narrow case where the install
+				// had already failed on its own before the abort arrived, where either of
+				// the definite wordings would be a guess. `signal` here is this call's own,
+				// not the merged one `result.aborted` answers for, so a session ending
+				// (rather than the call itself) under the install still picks "failed" — and
+				// can then read "Provisioning failed: … was cancelled", the session's own
+				// abort speaking through `result.failed.message` where this line cannot see it.
 				const provisionNotes =
 					"failed" in result
-						? [`Provisioning failed: ${result.failed.message}`]
+						? [`Provisioning ${signal?.aborted ? "did not finish" : "failed"}: ${result.failed.message}`]
 						: result.warnings.map((warning) => `Warning: ${warning}`);
 				const notes = [
 					`Created worktree at ${record.path}`,

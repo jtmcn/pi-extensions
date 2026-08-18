@@ -90,7 +90,7 @@ when broken:
   jimothy and pi silently demotes every launched session to "held by a
   stranger" — prompt included.
 
-Three rules about the lease a focus transition carries (`worktree/transition.ts`),
+Four rules about the lease a focus transition carries (`worktree/transition.ts`),
 all silent when broken:
 
 - **The destination is acquired before the origin is released, and a
@@ -110,6 +110,25 @@ all silent when broken:
   a drain landing later would free a worktree the session (or nobody) still
   holds, and a removal that cannot see the queue refuses itself, naming *this
   session* as the holder blocking it.
+- **The queue is drained one entry at a time, and each release is guarded
+  twice** — `drainDeferredReleases`, which both `agent_settled` and
+  `session_shutdown` go through. One at a time because a release takes the
+  registry's lock: taking the whole queue up front left every entry after the
+  first invisible for the rest of the drain, so `cancelRelease` found nothing
+  and a transition returning to one of those worktrees was left focused on one
+  the drain then freed. The two guards catch different failures and neither
+  covers the other: `session.leases`, checked immediately before each release,
+  is the *only* witness to a re-acquisition by this session — that decision is
+  `adopt`, which writes nothing to the registry, keeping the same run id, pid
+  and `since`; `expectedPid` catches what the session cannot see, a lease
+  retargeted onto another live pid, where the registry is the only witness and
+  the run id survives the move. Narrowed, not closed: a re-acquisition landing
+  between the check and jimothy's write is still released. No registry-side
+  comparison closes that, because the adoption leaves nothing to compare
+  against; closing it in-process would need the transition to await a release
+  already in flight rather than race it, which is not implemented. A release
+  that declines returns `false` and is not an error — the drain has nobody to
+  tell, and losing that race is the outcome asked for.
 
 Do **not** add `@earendil-works/*` to this collection's `package.json`. pi loads
 extensions through jiti with an alias table that maps those specifiers onto the

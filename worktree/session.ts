@@ -150,8 +150,35 @@ export interface WorktreeSession {
 	 * whether it is being taken back or given away.
 	 */
 	cancelRelease: (path: string) => HeldLease | undefined;
-	/** Drain the queue. Empty after a dispose, like everything else here. */
-	takeDeferredReleases: () => HeldLease[];
+	/**
+	 * The releases still queued, for a test to observe without draining it.
+	 *
+	 * Tests only — nothing in this extension calls it. `readonly` is a
+	 * compile-time label, not a runtime one: the array underneath is `deferred`
+	 * itself, and the tests that read this are `.mjs`, so nothing stops one from
+	 * mutating it. Do not wire production logic to it on the strength of the type.
+	 */
+	readonly deferredReleases: readonly HeldLease[];
+	/**
+	 * Take the next queued release, leaving the rest of the queue where it is.
+	 *
+	 * One at a time rather than all at once, because a release is not instant: it
+	 * takes the registry's lock. Emptying the queue up front made every entry after
+	 * the first invisible for the whole drain — `cancelRelease` would find nothing,
+	 * so a transition returning to one of those worktrees could not take it back and
+	 * the drain went on to free a worktree the session had just recorded as held.
+	 * Popped one at a time, the rest of the queue stays cancellable while a release
+	 * is in flight.
+	 *
+	 * Not empty after a dispose — `dispose()` never clears `deferred`, only
+	 * `deferRelease` goes inert, so a transition that drops a lease after that point
+	 * has nowhere left to queue it. An entry queued before the dispose is still
+	 * handed back here: it is what `session_shutdown`'s own drain runs over. The
+	 * existing test proves only the first half — that `deferRelease` refuses a new
+	 * entry once disposed — not this one, since nothing there calls
+	 * `nextDeferredRelease` after a dispose.
+	 */
+	nextDeferredRelease: () => HeldLease | undefined;
 	/** Repaint the footer segment. */
 	paint: (ctx: ExtensionContext) => void;
 	/** Retire the session: its monitor stops and everything in flight goes inert. */
@@ -293,7 +320,10 @@ export function createSession(options: SessionOptions): WorktreeSession {
 			const index = deferred.findIndex((lease) => lease.path === path);
 			return index === -1 ? undefined : deferred.splice(index, 1)[0];
 		},
-		takeDeferredReleases: () => deferred.splice(0, deferred.length),
+		get deferredReleases() {
+			return deferred;
+		},
+		nextDeferredRelease: () => deferred.shift(),
 		paint,
 		dispose: () => {
 			// Before the monitor, so anything awaiting a model call sees the

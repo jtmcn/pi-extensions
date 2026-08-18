@@ -81,12 +81,19 @@ const exists = async (path: string): Promise<boolean> => {
  *
  * `report` is a line sink, not a UI: an install is the one step here that can
  * take minutes, and a caller that only speaks when it finishes looks hung.
+ *
+ * `signal` cancels the *install*, which is the only step long enough to be worth
+ * cancelling — the model forwards it there and nowhere else. The two slash
+ * commands pass none: `/worktree new` and `/worktree checkout` have no per-call
+ * cancellation, and the session's own signal already reaches every child through
+ * `model.deps`. The tool does, because a tool call can be cancelled on its own.
  */
 export async function createAndProvision(
 	model: Model,
 	report: (message: string) => void,
 	name: string,
 	opts: CreateOptions,
+	signal?: AbortSignal,
 ): Promise<{ record: WorktreeRecord; provision: ProvisionResult | { failed: Error } }> {
 	const record = await model.registry.create(name, opts);
 	try {
@@ -95,6 +102,7 @@ export async function createAndProvision(
 			repoRoot: model.info.mainWorktree,
 			config: model.config,
 			report,
+			...(signal === undefined ? {} : { signal }),
 		});
 		return { record, provision: result };
 	} catch (error) {
@@ -498,7 +506,18 @@ export function createCommands(deps: CommandDeps): Commands {
 		// extension's own (now-dead for this door): a tracked or existing branch's
 		// identity belongs to the branch itself, but the *directory* still follows
 		// jimothy's convention for stripping it, same as `new`.
-		const name = explicitName ?? (await model.registry.suggestName(checkoutName(match.branch, model.config.branchPrefix)));
+		//
+		// `creatingBranch: false`, unlike `new`: the branch component of that taken set
+		// protects a caller about to *mint* `${branchPrefix}${name}`, and this door mints
+		// nothing — `create({ branch })` and `create({ track })` check out a branch that
+		// already exists. Counting it would mean the seed, derived from that same branch,
+		// always collides with itself: `checkout feature` landing in `feature-2` and a
+		// message inviting the user to look for a `feature` nobody made.
+		const name =
+			explicitName ??
+			(await model.registry.suggestName(checkoutName(match.branch, model.config.branchPrefix), {
+				creatingBranch: false,
+			}));
 
 		say(ctx, `creating ${name} …`, "info");
 		try {
