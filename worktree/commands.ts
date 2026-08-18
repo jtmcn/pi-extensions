@@ -57,10 +57,13 @@ const MODEL_UNAVAILABLE = "jimothy's worktree model is unavailable, so worktrees
  * install as one jimothy made — the alternative is doors that agree about
  * identity and differ about everything the user actually notices.
  *
- * Deliberately not wrapped in a try/catch. `create` rolls back its own failed
- * attempt, and a `provision` failure leaves a real worktree the user can still
- * use — a failed install is retryable and the checkout is their work — so the
- * caller reports it rather than destroying what it just made.
+ * `create`'s failure is left to propagate: nothing exists yet, so the caller
+ * has nothing to add beyond the message. `provision`'s failure is different —
+ * it leaves a real worktree the user can still use, a failed install is
+ * retryable and the checkout is their work — so it is caught here and handed
+ * back alongside the record rather than thrown, which is what lets the caller
+ * say *what was created* and *that provisioning failed* instead of losing the
+ * first fact to whichever `catch` happens to run.
  *
  * `report` is a line sink, not a UI: an install is the one step here that can
  * take minutes, and a caller that only speaks when it finishes looks hung.
@@ -70,15 +73,19 @@ export async function createAndProvision(
 	report: (message: string) => void,
 	name: string,
 	opts: CreateOptions,
-): Promise<{ record: WorktreeRecord; provision: ProvisionResult }> {
+): Promise<{ record: WorktreeRecord; provision: ProvisionResult | { failed: Error } }> {
 	const record = await model.registry.create(name, opts);
-	const result = await provision(model.deps, {
-		record,
-		repoRoot: model.info.mainWorktree,
-		config: model.config,
-		report,
-	});
-	return { record, provision: result };
+	try {
+		const result = await provision(model.deps, {
+			record,
+			repoRoot: model.info.mainWorktree,
+			config: model.config,
+			report,
+		});
+		return { record, provision: result };
+	} catch (error) {
+		return { record, provision: { failed: error as Error } };
+	}
 }
 
 const SUBCOMMANDS = [
@@ -365,11 +372,21 @@ export function createCommands(deps: CommandDeps): Commands {
 			// The new branch exists now: `checkout <tab>` should offer it.
 			await refreshBranches(info);
 
-			const notes = [`created ${record.path}`, `branch ${record.branch} (from ${base})`, ...result.warnings];
-			say(ctx, notes.join("; "), result.warnings.length ? "warning" : "info");
+			const created = [`created ${record.path}`, `branch ${record.branch} (from ${base})`];
+			// A provisioning failure still names what was created: the worktree is real
+			// and usable for editing, only its links/copies/install are missing, so the
+			// user is told where it is rather than left to rediscover it via "already
+			// exists" on a retry.
+			if ("failed" in result) {
+				say(ctx, [...created, `provisioning failed: ${result.failed.message}`].join("; "), "warning");
+			} else {
+				const notes = [...created, ...result.warnings];
+				say(ctx, notes.join("; "), result.warnings.length ? "warning" : "info");
+			}
 
 			// Through `moveFocus`, not `setFocus`: focus is where the agent writes, so
-			// it carries the worktree lease with it.
+			// it carries the worktree lease with it. The worktree exists on either
+			// path above, so focusing it is still right even when provisioning failed.
 			if (getConfig().autoFocus) await moveFocus(ctx, { path: record.path, branch: record.branch });
 		} catch (error) {
 			say(ctx, (error as Error).message, "error");

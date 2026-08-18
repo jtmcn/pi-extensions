@@ -855,8 +855,9 @@ async function recordFor(dir, name) {
 
 {
 	// A failed install is not a failed create: the checkout is real work, so it
-	// is reported and kept rather than destroyed. This is why `createAndProvision`
-	// has no try/catch of its own.
+	// is kept rather than destroyed, and told to the user rather than left for
+	// them to rediscover via "already exists" on a retry. This is why
+	// `createAndProvision` catches only `provision`'s failure, not `create`'s.
 	const { dir } = await makeRepo([], { lockfile: true });
 	const info = await getRepoInfo(execRunner(), dir);
 	const h = await setup({ dir, install: { stdout: "", stderr: "ENOTFOUND registry", code: 1, killed: false } });
@@ -864,8 +865,10 @@ async function recordFor(dir, name) {
 	await h.commands.dispatch(info, h.ctx, "new spike");
 
 	const record = await recordFor(dir, "spike");
-	ok("new: a failed install is reported", h.errors().some((m) => /npm install failed/.test(m)), JSON.stringify(h.said));
-	ok("new: the worktree survives it", record !== undefined && (await exists(record.path)), JSON.stringify(await readRegistry(dir)));
+	ok("new: the worktree still exists after a failed install", record !== undefined && (await exists(record.path)), JSON.stringify(await readRegistry(dir)));
+	ok("new: the record is still in the registry", (await readRegistry(dir)).worktrees.some((w) => w.name === "spike"), JSON.stringify(await readRegistry(dir)));
+	ok("new: the message names the created worktree", record !== undefined && h.messages().some((m) => m.includes(`created ${record.path}`)), JSON.stringify(h.said));
+	ok("new: the provisioning failure is reported as a warning, not an error", h.errors().length === 0 && h.said.some((s) => s.level === "warning" && /provisioning failed/.test(s.message)), JSON.stringify(h.said));
 
 	await rm(dir, { recursive: true, force: true });
 }
