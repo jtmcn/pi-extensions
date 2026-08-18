@@ -81,7 +81,11 @@ const releaseOrigin = async (
 		active.deferRelease(lease);
 		return;
 	}
-	await env.model.registry.releaseLease(lease.name, lease.runId).catch((error: Error) => {
+	// `expectedPid`, like the drain in `index.ts`: this releases the lease *we*
+	// hold, not whatever holds that name by the time the registry is written. A
+	// `false` says it was not ours any more, which is not a failure and has nobody
+	// to tell — focus has already left that worktree either way.
+	await env.model.registry.releaseLease(lease.name, lease.runId, { expectedPid: process.pid }).catch((error: Error) => {
 		// A release that fails is not a reason to undo a focus change the user
 		// asked for, so this reports and returns. The `current` check is the usual
 		// one: the session can have been replaced while the registry was locked, and
@@ -118,6 +122,58 @@ const releaseCancelled = async (
 	}
 	await env.model.registry.releaseLease(lease.name, lease.runId).catch(() => {});
 };
+
+/**
+ * Give back the leases a transition queued, one at a time.
+ *
+ * The other half of `deferRelease`, and the only thing besides `session_shutdown`
+ * that empties that queue. Both drains in `index.ts` come through here so there is
+ * one implementation of the two guards below rather than two that agree by
+ * coincidence.
+ *
+ * **Two guards, for two different failures. Neither one covers the other.**
+ *
+ *   1. `active.leases`, checked immediately before each release. A re-acquisition
+ *      by *this session* is invisible to the registry: the decision it takes is
+ *      `adopt`, which writes nothing at all — same run id, same pid, same `since`
+ *      — so the session's own lease list is the only witness that the worktree is
+ *      held again. Without this check a drain that had already taken the entry
+ *      would hand back a worktree the agent is writing in.
+ *   2. `expectedPid`, inside jimothy's own write. It catches what the check above
+ *      cannot see: a lease that has moved onto *another live pid*, which is what a
+ *      launcher handing over produces. There the registry is the only witness, and
+ *      the run id alone does not tell the two apart — a retarget keeps it.
+ *
+ * **Narrowed, not closed.** A re-acquisition that lands between the check and
+ * jimothy's write is still released. Nothing in one process closes that: an
+ * adoption leaves no trace in the registry for a compare-and-release to compare
+ * against, so the window is as small as the check can make it and no smaller.
+ * What it does close is the whole *rest* of the queue: entries are popped one at a
+ * time (see `nextDeferredRelease`), so a transition can still cancel them while an
+ * earlier release is in flight.
+ *
+ * A release that declines returns `false` rather than throwing, and nothing is
+ * done with it: this is a background drain with nobody to report to, and "the
+ * lease was not mine to give back" is the outcome asked for, not an error. A
+ * release that *fails* — a lock we could not take, a registry we could not read —
+ * goes to `onError`, whose caller decides whether there is still a live session to
+ * tell.
+ */
+export async function drainDeferredReleases(
+	model: Model,
+	active: WorktreeSession,
+	onError: (lease: HeldLease, error: Error) => void,
+): Promise<void> {
+	for (let lease = active.nextDeferredRelease(); lease !== undefined; lease = active.nextDeferredRelease()) {
+		const queued = lease;
+		// Taken back by a transition while an earlier release was in flight: the
+		// session holds this worktree again, and the agent may already be writing in it.
+		if (active.leases.some((held) => held.name === queued.name)) continue;
+		await model.registry
+			.releaseLease(queued.name, queued.runId, { expectedPid: process.pid })
+			.catch((error: Error) => onError(queued, error));
+	}
+}
 
 /**
  * Move focus, carrying the lease with it.

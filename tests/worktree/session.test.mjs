@@ -217,23 +217,53 @@ function setup({ noRepo = false, hasUI = true, exec } = {}) {
 	ok("dropLease: dropping it twice is not dropping beta", h.session.dropLease("/wt/alpha") === undefined);
 }
 
+/** The whole queue, popped one at a time as the drain in `index.ts` does. */
+function drainAll(session) {
+	const drained = [];
+	for (let lease = session.nextDeferredRelease(); lease !== undefined; lease = session.nextDeferredRelease()) {
+		drained.push(lease);
+	}
+	return drained;
+}
+
 {
 	// The queue `agent_settled` drains: a release that cannot happen yet, because a
 	// tool call already in flight is still writing into that worktree.
 	const h = setup();
-	ok("deferRelease: a new session has nothing queued", h.session.takeDeferredReleases().length === 0);
+	ok("deferRelease: a new session has nothing queued", h.session.deferredReleases.length === 0);
 
 	h.session.deferRelease({ name: "alpha", path: "/wt/alpha", runId: "run-1", provenance: "ours" });
 	h.session.deferRelease({ name: "beta", path: "/wt/beta", runId: "run-1", provenance: "delegated" });
-	const drained = h.session.takeDeferredReleases();
+	const drained = drainAll(h.session);
 	ok("deferRelease: everything queued comes back, in order", drained.map((l) => l.name).join(",") === "alpha,beta", JSON.stringify(drained));
-	ok("deferRelease: draining empties the queue, so nothing is released twice", h.session.takeDeferredReleases().length === 0);
+	ok("deferRelease: draining empties the queue, so nothing is released twice", h.session.deferredReleases.length === 0);
 
 	// Inert after dispose, like paint(): a replaced session will never drain this,
 	// so a lease parked on it would be one nothing ever releases.
 	h.session.dispose();
 	h.session.deferRelease({ name: "alpha", path: "/wt/alpha", runId: "run-1", provenance: "ours" });
-	ok("deferRelease: a disposed session queues nothing", h.session.takeDeferredReleases().length === 0);
+	ok("deferRelease: a disposed session queues nothing", h.session.deferredReleases.length === 0);
+}
+
+{
+	// One at a time, and that is the point: a release takes the registry's lock, and
+	// while it is in flight the *rest* of the queue must stay visible — to
+	// `cancelRelease`, so a transition returning to one of those worktrees can take it
+	// back, and to the drain's own check. Taking the whole queue up front made every
+	// entry after the first invisible for the whole drain.
+	const h = setup();
+	h.session.deferRelease({ name: "alpha", path: "/wt/alpha", runId: "run-1", provenance: "ours" });
+	h.session.deferRelease({ name: "beta", path: "/wt/beta", runId: "run-1", provenance: "ours" });
+
+	const first = h.session.nextDeferredRelease();
+	ok("nextDeferredRelease: hands back the oldest entry first", first?.name === "alpha", JSON.stringify(first));
+	ok(
+		"nextDeferredRelease: and leaves the rest of the queue where it is",
+		h.session.deferredReleases.map((l) => l.name).join(",") === "beta",
+		JSON.stringify(h.session.deferredReleases),
+	);
+	ok("nextDeferredRelease: so a later entry can still be cancelled", h.session.cancelRelease("/wt/beta")?.name === "beta");
+	ok("nextDeferredRelease: and an empty queue hands back nothing", h.session.nextDeferredRelease() === undefined);
 }
 
 {
@@ -249,7 +279,7 @@ function setup({ noRepo = false, hasUI = true, exec } = {}) {
 
 	h.session.addLease({ name: "alpha", path: "/wt/alpha", runId: "run-1", provenance: "ours" });
 
-	const drained = h.session.takeDeferredReleases();
+	const drained = drainAll(h.session);
 	ok(
 		"addLease: re-acquiring cancels the release queued for that worktree",
 		drained.map((l) => l.name).join(",") === "beta",
@@ -259,7 +289,7 @@ function setup({ noRepo = false, hasUI = true, exec } = {}) {
 }
 
 {
-	// The queue's other half. `takeDeferredReleases` can only drain, which left two
+	// The queue's other half. Draining can only drain, which left two
 	// callers unable to see a pending release at all: a transition returning to that
 	// worktree (it must cancel the release *before* it reads the registry, or a drain
 	// landing in between frees a lease the session then records), and `/worktree
@@ -273,7 +303,7 @@ function setup({ noRepo = false, hasUI = true, exec } = {}) {
 	const taken = h.session.cancelRelease("/wt/alpha");
 	ok("cancelRelease: the queued lease is handed to the caller", taken?.name === "alpha", JSON.stringify(taken));
 	ok("cancelRelease: and is no longer queued", h.session.cancelRelease("/wt/alpha") === undefined);
-	const drained = h.session.takeDeferredReleases();
+	const drained = drainAll(h.session);
 	ok(
 		"cancelRelease: a later drain releases only what is left",
 		drained.map((l) => l.name).join(",") === "beta",

@@ -150,8 +150,25 @@ export interface WorktreeSession {
 	 * whether it is being taken back or given away.
 	 */
 	cancelRelease: (path: string) => HeldLease | undefined;
-	/** Drain the queue. Empty after a dispose, like everything else here. */
-	takeDeferredReleases: () => HeldLease[];
+	/**
+	 * The releases still queued. For a caller that needs to *see* the queue
+	 * without draining it.
+	 */
+	readonly deferredReleases: readonly HeldLease[];
+	/**
+	 * Take the next queued release, leaving the rest of the queue where it is.
+	 *
+	 * One at a time rather than all at once, because a release is not instant: it
+	 * takes the registry's lock. Emptying the queue up front made every entry after
+	 * the first invisible for the whole drain — `cancelRelease` would find nothing,
+	 * so a transition returning to one of those worktrees could not take it back and
+	 * the drain went on to free a worktree the session had just recorded as held.
+	 * Popped one at a time, the rest of the queue stays cancellable while a release
+	 * is in flight.
+	 *
+	 * Empty after a dispose, like everything else here.
+	 */
+	nextDeferredRelease: () => HeldLease | undefined;
 	/** Repaint the footer segment. */
 	paint: (ctx: ExtensionContext) => void;
 	/** Retire the session: its monitor stops and everything in flight goes inert. */
@@ -293,7 +310,10 @@ export function createSession(options: SessionOptions): WorktreeSession {
 			const index = deferred.findIndex((lease) => lease.path === path);
 			return index === -1 ? undefined : deferred.splice(index, 1)[0];
 		},
-		takeDeferredReleases: () => deferred.splice(0, deferred.length),
+		get deferredReleases() {
+			return deferred;
+		},
+		nextDeferredRelease: () => deferred.shift(),
 		paint,
 		dispose: () => {
 			// Before the monitor, so anything awaiting a model call sees the

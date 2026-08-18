@@ -44,7 +44,7 @@ process.on("exit", () => stranger.kill());
 const { ok, done } = assertions();
 const extension = (await loadExt("worktree/index.ts")).default;
 const { openModel } = await loadExt("worktree/jimothy.ts");
-const { moveFocus } = await loadExt("worktree/transition.ts");
+const { drainDeferredReleases, moveFocus } = await loadExt("worktree/transition.ts");
 const { createSession } = await loadExt("worktree/session.ts");
 
 /**
@@ -160,9 +160,9 @@ async function replaceableRig(runId) {
 	// without ending the process, which is why a lease left behind here is held by a
 	// *live* pid for the rest of that process's life.
 	const shutdown = async () => {
-		for (const lease of session.takeDeferredReleases()) {
-			await model.registry.releaseLease(lease.name, lease.runId);
-		}
+		// The real drain, not a copy of it: its guards are part of what a shutdown does,
+		// and a hand-rolled loop here would be a second implementation to keep in step.
+		await drainDeferredReleases(model, session, () => {});
 		for (const lease of session.leases) {
 			if (lease.provenance === "ours") await model.registry.releaseLease(lease.name, lease.runId);
 		}
@@ -524,9 +524,7 @@ async function replaceableRig(runId) {
 		// drain frees a worktree the transition is about to record as held.
 		if (!drained) {
 			drained = true;
-			for (const lease of session.takeDeferredReleases()) {
-				await model.registry.releaseLease(lease.name, lease.runId);
-			}
+			await drainDeferredReleases(model, session, () => {});
 		}
 		return result;
 	};
@@ -629,7 +627,7 @@ async function replaceableRig(runId) {
 		(await ownerOf(model, "alpha")) === undefined,
 		JSON.stringify(await ownerOf(model, "alpha")),
 	);
-	ok("nor parked on the dead session's queue", session.takeDeferredReleases().length === 0);
+	ok("nor parked on the dead session's queue", session.deferredReleases.length === 0);
 	ok("and the worktree focus was on is released by the shutdown", (await ownerOf(model, "beta")) === undefined);
 
 	await rm(dir, { recursive: true, force: true });
@@ -678,8 +676,130 @@ async function replaceableRig(runId) {
 		(await ownerOf(model, "alpha")) === undefined,
 		JSON.stringify(await ownerOf(model, "alpha")),
 	);
-	ok("with nothing left queued", session.takeDeferredReleases().length === 0);
+	ok("with nothing left queued", session.deferredReleases.length === 0);
 
+	await rm(dir, { recursive: true, force: true });
+}
+
+// ===================================================== a drain that lost a race loses it
+
+{
+	// The drain that began *before* the cancellation could reach it — the reverse of
+	// the ordering above, and the one window the queue's own cancellation used to miss.
+	// The drain used to take the whole queue up front, which made every entry after the
+	// first invisible for the rest of the drain: `cancelRelease` found nothing, and a
+	// transition returning to one of those worktrees was left focused on a worktree the
+	// drain then freed. Entries are popped one at a time now, so a release still in
+	// flight no longer hides the rest of the queue.
+	//
+	// Forced rather than raced: the first release is gated open only after the
+	// transition has run, so the drain is genuinely mid-flight and the schedule is not
+	// left to the filesystem.
+	const { dir, model, alpha, beta, session, ctx, env } = await replaceableRig("run-a");
+	const gamma = await model.registry.create("gamma", { base: "main" });
+
+	await moveFocus(env, session, ctx, { path: beta.path, branch: beta.branch });
+	await moveFocus(env, session, ctx, { path: gamma.path, branch: gamma.branch });
+	ok(
+		"two releases are queued behind one another",
+		session.deferredReleases.map((lease) => lease.name).join(",") === "alpha,beta",
+		JSON.stringify(session.deferredReleases),
+	);
+
+	const realRelease = model.registry.releaseLease.bind(model.registry);
+	let openGate;
+	const gate = new Promise((resolve) => {
+		openGate = resolve;
+	});
+	let gated = false;
+	model.registry.releaseLease = async (...args) => {
+		if (!gated) {
+			gated = true;
+			await gate;
+		}
+		return realRelease(...args);
+	};
+	let moved;
+	try {
+		const draining = drainDeferredReleases(model, session, () => {});
+		moved = await moveFocus(env, session, ctx, { path: beta.path, branch: beta.branch });
+		openGate();
+		await draining;
+	} finally {
+		model.registry.releaseLease = realRelease;
+	}
+
+	ok("the drain was in flight when focus moved", gated === true);
+	ok("focus moved back", moved === true);
+	ok(
+		"a drain already under way cannot free the worktree focus returned to",
+		(await ownerOf(model, "beta"))?.pid === process.pid,
+		JSON.stringify(await ownerOf(model, "beta")),
+	);
+	ok(
+		"and the session's own list agrees with the registry",
+		session.leases.map((lease) => lease.name).join(",") === "beta",
+		JSON.stringify(session.leases),
+	);
+	ok("the worktree focus left first is released", (await ownerOf(model, "alpha")) === undefined);
+	ok("so is the one it left on the way back", (await ownerOf(model, "gamma")) === undefined);
+	ok("and nothing is left queued", session.deferredReleases.length === 0, JSON.stringify(session.deferredReleases));
+
+	session.dispose();
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// The drain's other guard, for the failure the session's list cannot see: a lease
+	// that has moved onto another *live pid*, which is what a launcher handing over
+	// produces. The run id survives a retarget — that is what makes it a handover
+	// rather than a new lease — so only the pid says this is no longer the lease the
+	// queue entry was written for, and only `expectedPid` can say so inside the write.
+	const { dir, model, session, ctx, env, beta } = await replaceableRig("run-a");
+
+	await moveFocus(env, session, ctx, { path: beta.path, branch: beta.branch });
+	ok(
+		"the origin is queued for release",
+		session.deferredReleases.map((lease) => lease.name).join(",") === "alpha",
+		JSON.stringify(session.deferredReleases),
+	);
+	const handed = await model.registry.retargetLease("alpha", "run-a", { fromPid: process.pid, pid: stranger.pid });
+	ok("the lease moves onto another live pid", handed === true);
+
+	await drainDeferredReleases(model, session, () => {});
+
+	ok(
+		"a drain does not release a lease that has moved onto another pid",
+		(await ownerOf(model, "alpha"))?.pid === stranger.pid,
+		JSON.stringify(await ownerOf(model, "alpha")),
+	);
+	ok("and the entry is still dropped, so nothing retries for ever", session.deferredReleases.length === 0);
+
+	session.dispose();
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// The drain's contract, pinned where nothing else states it: a worktree the session
+	// *holds* is never handed back, whatever the queue says. The ordinary paths keep
+	// this state from arising — `addLease` cancels a queued release for that worktree,
+	// `cancelRelease` takes it out — and the drain must not depend on their having done
+	// so, because a re-acquisition by this session writes nothing to the registry at
+	// all: `adopt` keeps the same run id, the same pid and the same `since`, so the
+	// session's own lease list is the only witness there is.
+	const { dir, model, alpha, session } = await replaceableRig("run-a");
+	session.deferRelease({ name: "alpha", path: alpha.path, runId: "run-a", provenance: "ours" });
+
+	await drainDeferredReleases(model, session, () => {});
+
+	ok(
+		"a queued release for a worktree the session holds is skipped",
+		(await ownerOf(model, "alpha"))?.pid === process.pid,
+		JSON.stringify(await ownerOf(model, "alpha")),
+	);
+	ok("and dropped from the queue rather than left to be retried", session.deferredReleases.length === 0);
+
+	session.dispose();
 	await rm(dir, { recursive: true, force: true });
 }
 

@@ -178,6 +178,34 @@ an early release cannot unlock a worktree somebody else has taken. The cost,
 named so it is not rediscovered as a bug: pi's own cwd is still A, so a user
 typing into the terminal is working in a worktree the session no longer holds.
 
+That queue is drained **one entry at a time**, and each release is guarded
+twice. One at a time because a release takes the registry's lock, which is long
+enough to matter: draining by taking the whole queue up front left every entry
+after the first invisible for the rest of the drain, so a transition returning
+to one of those worktrees found nothing to cancel and ended up focused on a
+worktree the drain then freed. The two guards answer two different questions,
+and neither can answer the other's:
+
+- **`session.leases`, checked immediately before each release.** A
+  re-acquisition by *this session* writes nothing to the registry at all — the
+  decision is `adopt`, and the lease keeps its run id, its pid and its `since`
+  — so the session's own lease list is the only witness that the worktree is
+  held again.
+- **`expectedPid`, inside jimothy's own write.** This catches what the list
+  cannot see: a lease that has moved onto another *live pid*, which is what a
+  launcher handing over produces. A retarget keeps the run id, so the pid is
+  the only thing that distinguishes the lease the queue entry was written for
+  from whatever holds that name now.
+
+**Narrowed, not closed.** A re-acquisition that lands between the check and
+jimothy's write is still released, and nothing inside one pi process closes
+that: the adoption leaves no trace in the registry for a compare-and-release to
+compare against, so a session can still, in principle, end a turn focused on a
+worktree it no longer holds. What is closed is the whole rest of the queue,
+which stays cancellable while an earlier release is in flight. A release that
+declines is not an error and nothing is reported: a background drain has nobody
+to tell, and losing that race is the outcome asked for.
+
 A focused worktree that has *disappeared* — removed by another session, or by
 `jimothy wt rm` in another terminal — is noticed by the next transition and
 dropped, with its lease. Without that the session goes on redirecting every tool
