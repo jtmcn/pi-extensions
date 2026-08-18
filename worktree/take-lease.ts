@@ -27,8 +27,15 @@ import { decideLease, type LauncherEnv, type LeaseDecision, leaseProvenance, sam
 import type { Model } from "./jimothy.ts";
 import type { WorktreeSession } from "./session.ts";
 
-/** What a lease taken by this extension calls itself, wherever one is rendered. */
-const LEASE_LABEL = "pi session";
+/**
+ * What a lease taken by this extension calls itself, wherever one is rendered.
+ *
+ * Exported because `commands.ts` re-acquires a lease of its own when a removal it
+ * released one for does not happen, and a lease taken back under a different
+ * label would be rendered as `run <id>` by `describeLease` — the same session,
+ * suddenly reading as a stranger in `/worktree list`.
+ */
+export const LEASE_LABEL = "pi session";
 
 /**
  * What this module needs from `index.ts`'s closure, injected rather than

@@ -286,7 +286,17 @@ created; the worktree is gone either way.
 
 Removing the focused worktree clears focus through the same transition `/worktree
 focus off` uses, so the session reacquires its own worktree instead of pointing
-at a directory that no longer exists.
+at a directory that no longer exists. A kept branch is not an exception: the
+worktree is gone, so focus is cleared and the listings are refreshed exactly as
+they are on the plain success, and the message reports what happened — the
+worktree removed, the branch kept — rather than a failed removal. Whether the
+worktree is still on disk is what tells the two apart.
+
+A removal that really does fail — a live lease, another jimothy mid-operation —
+leaves the worktree standing, and the lease released above is taken back. An
+ordinary acquire, so a stranger who took it in the window between the release and
+the failure keeps it; that is the one case where the session ends up holding
+nothing, and it says so instead of leaving it to be discovered.
 
 ## Tool
 

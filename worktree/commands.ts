@@ -11,6 +11,7 @@
  * rather than two copies to keep in step.
  */
 
+import { stat } from "node:fs/promises";
 import { basename } from "node:path";
 import type { ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
@@ -26,8 +27,9 @@ import type { FocusTarget } from "./focus.ts";
 import type { Model } from "./jimothy.ts";
 import { describeKnown, type KnownWorktree, toKnown } from "./known.ts";
 import { matchWorktree, parseNewArgs, tokenize } from "./select.ts";
-import type { WorktreeSession } from "./session.ts";
+import type { HeldLease, WorktreeSession } from "./session.ts";
 import { messageTexts, suggestName } from "./suggest.ts";
+import { LEASE_LABEL } from "./take-lease.ts";
 import type { Ui } from "./ui.ts";
 import {
 	type BranchList,
@@ -50,6 +52,16 @@ import { type CommandRunner, pruneWorktrees } from "./worktrees.ts";
  * to create a duplicate of something that is still there.
  */
 const MODEL_UNAVAILABLE = "jimothy's worktree model is unavailable, so worktrees cannot be listed";
+
+/** Is there still a directory there? */
+const exists = async (path: string): Promise<boolean> => {
+	try {
+		await stat(path);
+		return true;
+	} catch {
+		return false;
+	}
+};
 
 /**
  * Create a worktree and make it usable, which is two operations the user thinks
@@ -530,6 +542,36 @@ export function createCommands(deps: CommandDeps): Commands {
 		say(ctx, `focused ${describeKnown(target)}`, "info");
 	};
 
+	/**
+	 * Take back a lease released for a removal that then did not happen.
+	 *
+	 * An ordinary acquire, deliberately. The lease was ours a moment ago, so this is
+	 * not a steal — but a stranger may have taken it in the window between the
+	 * release and the failure, and then losing it is the correct outcome: this
+	 * session is not entitled to a worktree another live agent has just been granted,
+	 * and `breakLease` here would take one. Under the same runId, so a delegated lease
+	 * stays jimothy's to release.
+	 *
+	 * Reported rather than swallowed, because a session that has silently stopped
+	 * holding the worktree it is focused on is the failure this ordering must never
+	 * hide. No retry: whoever holds it now holds it, and asking again would only ask
+	 * the same question.
+	 */
+	const regainLease = async (ctx: ExtensionCommandContext, model: Model, lease: HeldLease) => {
+		try {
+			await model.registry.acquireLease(lease.name, lease.runId, process.pid, { label: LEASE_LABEL });
+			// Re-read rather than captured: the session can have been replaced while the
+			// removal ran, and the lease belongs on whichever one is live to release it.
+			getSession()?.addLease(lease);
+		} catch (error) {
+			say(
+				ctx,
+				`worktree "${lease.name}" was released for the removal and could not be taken back: ${(error as Error).message}`,
+				"warning",
+			);
+		}
+	};
+
 	const doRemove = async (info: RepoInfo, ctx: ExtensionCommandContext, args: string) => {
 		const target = await resolveWorktree(ctx, args.trim(), "Remove which worktree?");
 		if (!target) return;
@@ -566,12 +608,15 @@ export function createCommands(deps: CommandDeps): Commands {
 			);
 		}
 
+		// Held across the removal so a failure can hand it back: see the catch.
+		let released: HeldLease | undefined;
 		try {
 			// Our own lease would make `remove` refuse: it is live, under a live pid,
 			// which is exactly what that check is for. So it is handed *back* first —
 			// releasing is not `breakLease`, which would take a lease held by another
 			// agent too, and that refusal is the one thing here worth keeping.
 			const held = getSession()?.dropLease(target.path);
+			released = held;
 			if (held) await model.registry.releaseLease(held.name, held.runId);
 
 			await model.registry.remove(target.name, {
@@ -599,6 +644,27 @@ export function createCommands(deps: CommandDeps): Commands {
 			say(ctx, `removed ${target.name}`, "info");
 		} catch (error) {
 			say(ctx, (error as Error).message, "error");
+			// A throw does not mean the worktree survived. jimothy deletes it and drops
+			// its record *before* reporting a branch git declined to delete — an unmerged
+			// branch under `-d`, which is the refusal the confirmation above exists to
+			// respect — so that path is a removal that happened, with a caveat.
+			//
+			// The directory is the discriminator, not the message: parsing jimothy's
+			// wording would tie this branch to a sentence it is free to reword.
+			if (await exists(target.path)) {
+				// The removal really did not happen, so the lease released for it is owed
+				// back: without this the session holds nothing on a worktree it may still
+				// be focused on, which is the state this whole ordering must not produce.
+				if (released) await regainLease(ctx, model, released);
+				return;
+			}
+			// Gone, so everything the success path does has to happen anyway. Skipping it
+			// leaves a session focused on a deleted directory, and every later tool call
+			// is redirected into it — the error then names a path the user never typed, so
+			// it reads as a broken shell rather than as a worktree that was removed.
+			if (getFocus()?.path === target.path) await moveFocus(ctx, undefined);
+			await refresh();
+			await refreshBranches(info);
 		}
 	};
 

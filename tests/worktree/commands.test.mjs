@@ -107,6 +107,21 @@ async function ownerOf(dir, name) {
 }
 
 /**
+ * Push a reservation into the registry by hand.
+ *
+ * The suite's way to make `Registry.remove` fail *before* it reaches git, which
+ * is the only failure that leaves the worktree, the record and the branch all
+ * standing: `reserve` refuses a name another jimothy has reserved under a live
+ * pid, so the stranger process is what makes this one bite.
+ */
+async function reserve(dir, reservation) {
+	const file = join(dir, ".git", "jimothy", "registry.json");
+	const current = JSON.parse(await readFile(file, "utf8"));
+	current.reservations.push(reservation);
+	await writeFile(file, JSON.stringify(current));
+}
+
+/**
  * A repo whose worktrees jimothy *created*, which is what `remove` needs now
  * that it goes through `Registry.remove`: a worktree only git knows about has no
  * record to remove. `makeRepo`'s `git worktree add` worktrees stay unmanaged
@@ -232,6 +247,15 @@ async function setup({
 			const [lease] = held.splice(index, 1);
 			dropped.push(lease);
 			return lease;
+		},
+		// The other half of `dropLease`, needed because a removal that fails with the
+		// worktree still there hands the lease back. Replaces rather than appends, as
+		// the real session does: a list with the same worktree on it twice would be
+		// released twice.
+		addLease: (lease) => {
+			const index = held.findIndex((entry) => entry.path === lease.path);
+			if (index === -1) held.push(lease);
+			else held[index] = lease;
 		},
 	};
 
@@ -517,6 +541,119 @@ async function setup({
 	ok("and the branch", branches.stdout.includes(records.spike.branch), JSON.stringify(branches.stdout));
 	ok("the stranger keeps the lease", (await ownerOf(dir, "spike"))?.runId === "someone-else", JSON.stringify(await ownerOf(dir, "spike")));
 	ok("and this session, holding nothing, released nothing", h.dropped.length === 0, JSON.stringify(h.dropped));
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// A branch git declines to delete is *not* a failed removal: jimothy deletes the
+	// worktree, drops its record, and only then throws naming the branch it kept. So
+	// the half-success has to do everything the success path does — a session left
+	// focused on the deleted directory redirects every later tool call into it, and
+	// the resulting error names a path the user never typed.
+	const { dir, records } = await makeManagedRepo();
+	await writeFile(join(records.exp.path, "work.txt"), "unmerged\n");
+	await pexec("git", ["add", "."], { cwd: records.exp.path });
+	await pexec("git", ["commit", "-q", "-m", "work that exists nowhere else"], { cwd: records.exp.path });
+
+	const h = await setup({ dir, confirms: [true, true] });
+	h.setFocus({ path: records.exp.path, branch: records.exp.branch });
+	const info = await getRepoInfo(execRunner(), dir);
+	await h.commands.dispatch(info, h.ctx, "remove exp");
+
+	ok("a kept branch still leaves the worktree removed", !(await exists(records.exp.path)), JSON.stringify(h.said));
+	ok("and its record dropped", (await readRegistry(dir)).worktrees.length === 0, JSON.stringify(await readRegistry(dir)));
+	ok(
+		"focus does not stay on the directory that was deleted",
+		h.focusCalls.at(-1) === undefined && h.focusCalls.length === 1,
+		JSON.stringify(h.focusCalls),
+	);
+	ok("through moveFocus, not setFocus", h.setFocusCalls.length === 0, JSON.stringify(h.setFocusCalls));
+	ok(
+		"and the message says the worktree went and the branch stayed",
+		h.said.some((s) => s.message.includes('removed worktree "exp"') && s.message.includes(`branch "${records.exp.branch}" was kept`)),
+		JSON.stringify(h.said),
+	);
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// The other side of releasing our own lease before the removal: if the removal
+	// then fails with the worktree still there, this session is left holding nothing
+	// on a worktree it may still be focused on. It was ours a moment ago, so taking
+	// it back is not a steal.
+	const { dir, model, records } = await makeManagedRepo(["spike"]);
+	await model.registry.acquireLease("spike", "run-1", process.pid, { label: "pi session" });
+	// `create` rather than `remove`, because `acquireLease` deliberately refuses a
+	// name a live removal has reserved — the re-acquire that legitimately loses is
+	// the next test's business, and this one is about the one that succeeds.
+	await reserve(dir, {
+		name: "spike",
+		path: records.spike.path,
+		branch: records.spike.branch,
+		kind: "create",
+		owner: { runId: "another-jimothy", pid: stranger.pid, since: new Date().toISOString() },
+	});
+
+	const h = await setup({
+		dir,
+		confirms: [true, false],
+		leases: [{ name: "spike", path: records.spike.path, runId: "run-1", provenance: "ours" }],
+	});
+	const info = await getRepoInfo(execRunner(), dir);
+	await h.commands.dispatch(info, h.ctx, "remove spike");
+
+	ok(
+		"a reservation refuses the removal before git runs",
+		h.errors().some((m) => /already being created by another jimothy/.test(m)),
+		JSON.stringify(h.said),
+	);
+	ok("the worktree is still there", await exists(records.spike.path));
+	const owner = await ownerOf(dir, "spike");
+	ok("and the session holds its lease again", owner?.runId === "run-1" && owner?.pid === process.pid, JSON.stringify(owner));
+	ok("under the same label, so it still renders as this session", owner?.label === "pi session", JSON.stringify(owner));
+	ok("and its own bookkeeping says so too", h.held.some((lease) => lease.path === records.spike.path), JSON.stringify(h.held));
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// The race that re-acquiring leaves, made real: our lease is released before
+	// `remove`, and a stranger takes it in the window. Wrapped at the registry call
+	// for the same reason the ordering test above wraps it — that is the one moment a
+	// test can act *during* the removal. Losing here is correct; `breakLease` would
+	// steal a worktree another live agent has just been granted.
+	const { dir, model, records } = await makeManagedRepo(["spike"]);
+	await model.registry.acquireLease("spike", "run-1", process.pid, { label: "pi session" });
+	const h = await setup({
+		dir,
+		confirms: [true, false],
+		leases: [{ name: "spike", path: records.spike.path, runId: "run-1", provenance: "ours" }],
+	});
+	const realRemove = h.model.registry.remove.bind(h.model.registry);
+	h.model.registry.remove = async (name, opts) => {
+		await model.registry.acquireLease("spike", "someone-else", stranger.pid, { label: "pi session" });
+		return realRemove(name, opts);
+	};
+
+	const info = await getRepoInfo(execRunner(), dir);
+	await h.commands.dispatch(info, h.ctx, "remove spike");
+
+	ok(
+		"a lease taken in the window refuses the removal",
+		h.errors().some((m) => /in use by pi session someone-else/.test(m)),
+		JSON.stringify(h.said),
+	);
+	ok("the worktree is still there", await exists(records.spike.path));
+	const owner = await ownerOf(dir, "spike");
+	ok("and the stranger's lease is not stolen back", owner?.runId === "someone-else", JSON.stringify(owner));
+	ok(
+		"but the user is told this session lost it",
+		h.said.some((s) => s.level === "warning" && /spike/.test(s.message) && /taken back/.test(s.message)),
+		JSON.stringify(h.said),
+	);
+	ok("and the session does not claim to hold it", !h.held.some((lease) => lease.path === records.spike.path), JSON.stringify(h.held));
 
 	await rm(dir, { recursive: true, force: true });
 }
