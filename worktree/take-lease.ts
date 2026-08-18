@@ -179,15 +179,21 @@ const applyDecision = async (
 			return true;
 		}
 		case "adopt":
-			// Already ours: `lease.pid === input.pid` in decideLease. An "ours" lease no
-			// longer reaches this row — session_shutdown releases it before the
-			// replacement's session_start runs, so that case takes the acquire row
-			// instead. What lands here now is a delegated lease: retargeted onto this
-			// pid at an earlier session_start, left alone by every shutdown since
+			// Already ours: `lease.pid === input.pid` in decideLease. Two shapes reach
+			// here, not one. The first is a delegated lease: retargeted onto this pid
+			// at an earlier session_start, left alone by every shutdown since
 			// (jimothy's own `finally` owns it), and still naming the launcher's run
-			// id when the process reloads, forks, or is otherwise replaced. Whether it
-			// is ours to release is still the runId's business, not this row's — hold()
-			// classifies it as delegated below. Task 7 exercises this end to end.
+			// id when the process reloads, forks, or is otherwise replaced — a fresh
+			// session's own lease never lands here, because session_shutdown releases
+			// it before the replacement's session_start runs, so that case takes the
+			// acquire row instead. The second shape is this session's own runId: a
+			// focus transition back onto a worktree whose release was only *queued*,
+			// not yet drained, arrives here too — `moveFocus` cancels that queued entry
+			// before deciding, so the lease decideLease sees is still recorded under
+			// our own pid and run id. Whether it is ours to release is still the
+			// runId's business, not this row's — hold() tells the two shapes apart by
+			// exactly that. Task 7 exercises the delegated shape end to end;
+			// `transition.test.mjs` exercises the queued-release one.
 			hold(decision.runId);
 			return true;
 		case "warn": {

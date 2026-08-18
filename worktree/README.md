@@ -292,8 +292,10 @@ maps to git's `--force`, and it says nothing about whether another agent is
 working in that worktree. That is the *lease's* question, and a lease held by
 anyone else refuses the removal outright and names the holder — no confirmation
 about uncommitted work can break it. The one lease that is not an obstacle is
-this session's own, on a worktree it is focused on: that one is released first,
-which is not the same as breaking it. The second confirmation is the branch,
+this session's own, on a worktree it is focused on: that one is handed back
+first — released outright if it is held, or simply taken out of the queue if a
+focus change had only deferred its release to `agent_settled` — which is not the
+same as breaking it. The second confirmation is the branch,
 deleted with `-d`, so a branch holding commits that exist nowhere else is kept
 and said so, even though jimothy's own default would force-delete a branch it
 created; the worktree is gone either way.

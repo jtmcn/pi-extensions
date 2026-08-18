@@ -6,9 +6,13 @@
  * `commands.ts`), and the model-facing tool (`tool.ts`). None of them calls the
  * session's `setFocus` directly any more, which is the point — that one moves
  * the agent without moving the lease, and rules that differ per door are the
- * two-models bug in miniature. `setFocus` survives only as this file's own last
- * step and as the restore path in `index.ts`, where there is no transition to
- * make: nothing was focused before.
+ * two-models bug in miniature. `setFocus` survives on its own outside this file
+ * in three places, none of them a counter-example: this file's own last step;
+ * the restore path in `index.ts`, where there is no transition to make because
+ * nothing was focused before; and `moveFocusHere`'s no-model branch in
+ * `index.ts`, which *is* a transition — focus really does move — but one with
+ * no registry to lease anything from, so there is nothing here for it to call
+ * into.
  *
  * The rules, all three of which have a failure behind them:
  *

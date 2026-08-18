@@ -207,11 +207,13 @@ ok("plain: branch", plain.branch === "main", plain.branch);
 ok("plain: defaultBranch", (await git.defaultBranch(runner, repo)) === "main");
 ok("plain: non-repo returns undefined", (await git.getRepoInfo(runner, tmpdir())) === undefined);
 
-// `countDirty` and `isDirty` still have callers — the status footer, and the
-// confirmation `/worktree remove` puts in front of a dirty worktree — so they
-// keep their coverage. The worktree is made with raw git: this extension has no
-// create of its own any more, and one made through the registry needs a whole
-// model, which commands.test.mjs already builds.
+// `countDirty` still has callers — the status footer, and the confirmation
+// `/worktree remove` puts in front of a dirty worktree — so it keeps its
+// coverage here. `isDirty` has none left; it is exercised anyway, on the
+// principle that a function `lib/git.ts` still exports should still be proven
+// to work. The worktree is made with raw git: this extension has no create of
+// its own any more, and one made through the registry needs a whole model,
+// which commands.test.mjs already builds.
 const dirtyWt = join(root, "dirty-wt");
 await pexec("git", ["worktree", "add", "-q", "-b", "joel/dirty", dirtyWt], { cwd: repo });
 await writeFile(join(dirtyWt, "dirty.txt"), "x");

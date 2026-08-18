@@ -12,6 +12,7 @@
  *   /worktree focus <name>    redirect tool calls into a worktree
  *   /worktree focus off       stop redirecting
  *   /worktree remove <name>   remove a worktree
+ *   /worktree adopt <path>    bring an unmanaged worktree under jimothy
  *   /worktree prune           prune stale worktree metadata
  *   /worktree config          show effective configuration
  *
