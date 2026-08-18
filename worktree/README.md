@@ -186,21 +186,40 @@ reported rather than resolved to whichever worktree git listed first. In
 non-interactive mode (`pi -p`) only exact matches are accepted, since there is
 no confirmation prompt.
 
-Names are slugified, and quoting works, so `/worktree new "My Feature!"`
-creates `my-feature`. The second token is the base ref, so an unquoted
-multi-word name is an error rather than a mystery branch.
+`/worktree new` creates through jimothy's registry and then provisions, so the
+worktree lands under jimothy's `baseDir` on `${branchPrefix}<name>` —
+`jimothy/spike` by default — and gets jimothy's `link` and `copy` entries plus a
+package install if the checkout has a lockfile. That is deliberately jimothy's
+convention and not this extension's: one model means one convention, and the
+extension's own `path` and `branchPrefix` no longer reach `new`. The install is
+narrated line by line rather than reported once at the end, because it is the
+one step here that can take minutes.
 
-With no name, the prompt is prefilled with a suggestion: the newest thing you
-asked for, reduced to up to three content words (`fix-parser-bug`), trimmed
-to fit a 24-character cap, or an adjective–noun pair (`brave-otter`) when the
-conversation has nothing to go on. Press Enter to take it, or type over it.
-Short acknowledgements are skipped, so approving a plan and then running
-`/worktree new` still names the work rather than the approval. A suggestion that
-collides with an existing worktree or a branch checked out in one is offered as
-`-2`; a branch that exists but is checked out nowhere is deliberately reused.
-A name you type yourself is never adjusted, it fails.
-Non-interactively (`pi -p`) the suggestion is used without asking, where the
-command previously did nothing at all.
+A create the registry refuses — a name already taken, an illegal one — is
+reported and nothing is left behind: `create` rolls back its own attempt. A
+*provisioning* failure is reported too, but the worktree is kept: the checkout is
+real work and an install is retryable, so it is not destroyed for a registry that
+was unreachable or a lockfile that would not resolve.
+
+The base ref is the second token, then jimothy's `defaultBase`, then the
+repository's default branch. An unquoted multi-word name is therefore an error
+rather than a mystery branch — and a name is no longer slugified for you:
+`/worktree new "My Feature!"` is refused rather than quietly becoming
+`my-feature`, because silently renaming what someone typed is worse than saying
+no. (`checkout`'s explicit name still slugifies; that door is a later task.)
+
+With no name, the prompt is prefilled with a suggestion. The transcript half
+stays here — only pi has one: the newest thing you asked for, reduced to up to
+three content words (`fix-parser-bug`), or an adjective–noun pair
+(`brave-otter`) when the conversation has nothing to go on. Short
+acknowledgements are skipped, so approving a plan and then running `/worktree
+new` still names the work rather than the approval. Turning that *seed* into a
+name that is legal and free is `registry.suggestName`, because only the registry
+knows what is taken — a record, a worktree git reports, or any branch, with
+jimothy's prefix stripped so `jimothy/foo` occupies `foo`. A collision is offered
+as `-2`. Press Enter to take it, or type over it; a name you type yourself is
+never adjusted, it fails. Non-interactively (`pi -p`) the suggestion is used
+without asking, where the command previously did nothing at all.
 
 When focused, the footer shows `⑂ <name> (<branch>)`.
 
@@ -263,6 +282,10 @@ repo/.git (file)        linked worktree        -> main repo root/<config.path>
 proj/.bare + proj/main  bare layout            -> proj/<config.path>
 ```
 
+`config.path` no longer decides where `/worktree new` puts a worktree — that is
+jimothy's `baseDir`, per repository — but `checkout` and the model's tool still
+use it until they are ported.
+
 ## Configuration
 
 Later files win:
@@ -278,15 +301,18 @@ Later files win:
   // convention so both agents find the same worktrees in a shared checkout.
   "path": ".claude/worktrees",
 
-  // Prepended to branch names created by /worktree new.
+  // Prepended to branch names created by /worktree checkout and the model's
+  // tool. `/worktree new` uses jimothy's prefix instead.
   "branchPrefix": "joel/",
 
   // Copied from the current worktree into a new one. Useful for gitignored
-  // local config that a fresh checkout would be missing.
+  // local config that a fresh checkout would be missing. `/worktree new`
+  // provisions through jimothy, so it uses jimothy's `link`/`copy` instead.
   "copyFiles": [".env", ".env.local"],
 
   // Shell command run inside a newly created worktree. Executed via `bash -lc`,
-  // including when the model creates a worktree through the tool.
+  // including when the model creates a worktree through the tool. Not run by
+  // `/worktree new`, which provisions through jimothy.
   "postCreate": "npm install",
 
   // Focus a newly created worktree automatically — both `/worktree new` and the
@@ -297,6 +323,7 @@ Later files win:
   "remapAbsolutePaths": true,
 
   // Start point for new branches. Defaults to origin/HEAD, then main/master.
+  // `/worktree new` reads jimothy's `defaultBase`, not this one.
   "defaultBase": "main"
 }
 ```
@@ -419,7 +446,7 @@ worktree/config.ts       config loading and path templating
 worktree/branches.ts     branch listing, resolution and naming (pure + two git calls)
 worktree/focus.ts        tool-input rewriting (pure, heavily tested)
 worktree/select.ts       argument parsing and name matching (pure)
-worktree/suggest.ts      the generated name offered by `new` (pure)
+worktree/suggest.ts      the transcript-derived name seed `new` offers (pure)
 worktree/worktrees.ts    create / remove / prune
 worktree/pr.ts           PR display formatting and poll cadence (pure)
 worktree/gh.ts           the gh calls behind the PR status display

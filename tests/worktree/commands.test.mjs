@@ -21,7 +21,7 @@
  * scripted, including "the user said no".
  */
 
-import { mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { assertions, execRunner, loadExt, pexec } from "../harness.mjs";
@@ -41,13 +41,42 @@ const exists = async (path) => {
 	}
 };
 
-/** A repo on `main` plus linked worktrees for each requested branch. */
-async function makeRepo(branches = ["exp"]) {
+/**
+ * jimothy's registry for a repo, read straight off disk.
+ *
+ * `/worktree new` writes through `Registry.create` now, so the record — its
+ * name, its branch and where it landed — is the thing to assert on, not a
+ * directory the extension chose.
+ */
+async function readRegistry(dir) {
+	try {
+		return JSON.parse(await readFile(join(dir, ".git", "jimothy", "registry.json"), "utf8"));
+	} catch (error) {
+		if (error.code === "ENOENT") return { worktrees: [] };
+		throw error;
+	}
+}
+
+/**
+ * A repo on `main` plus linked worktrees for each requested branch.
+ *
+ * Every repo here gets a `jimothy.config.json` with a **relative** `baseDir`,
+ * committed so worktrees made from it carry it too. Without one, jimothy's
+ * default is `~/.jimothy/worktrees` and every `/worktree new` in this file would
+ * create a real worktree in the developer's home directory that nothing here
+ * ever cleans up.
+ */
+async function makeRepo(branches = ["exp"], { jimothy = {}, lockfile = false } = {}) {
 	const dir = await realpath(await mkdtemp(join(tmpdir(), "pi-commands-")));
 	await pexec("git", ["init", "-q", "-b", "main"], { cwd: dir });
 	await pexec("git", ["config", "user.email", "test@example.com"], { cwd: dir });
 	await pexec("git", ["config", "user.name", "Test"], { cwd: dir });
 	await writeFile(join(dir, "file.txt"), "hi\n");
+	await writeFile(join(dir, "jimothy.config.json"), JSON.stringify({ baseDir: ".jimothy", ...jimothy }));
+	if (lockfile) {
+		await writeFile(join(dir, "package.json"), JSON.stringify({ name: "fixture", version: "1.0.0" }));
+		await writeFile(join(dir, "package-lock.json"), JSON.stringify({ name: "fixture", lockfileVersion: 3 }));
+	}
 	await pexec("git", ["add", "."], { cwd: dir });
 	await pexec("git", ["commit", "-q", "-m", "init"], { cwd: dir });
 	const paths = {};
@@ -70,6 +99,7 @@ async function makeClone({ shared = [], remoteOnly = [] } = {}) {
 	await pexec("git", ["config", "user.email", "test@example.com"], { cwd: upstream });
 	await pexec("git", ["config", "user.name", "Test"], { cwd: upstream });
 	await writeFile(join(upstream, "file.txt"), "hi\n");
+	await writeFile(join(upstream, "jimothy.config.json"), JSON.stringify({ baseDir: ".jimothy" }));
 	await pexec("git", ["add", "."], { cwd: upstream });
 	await pexec("git", ["commit", "-q", "-m", "init"], { cwd: upstream });
 	for (const branch of shared) await pexec("git", ["branch", branch], { cwd: upstream });
@@ -102,10 +132,14 @@ async function setup({
 	entries = [],
 	config = {},
 	withModel = true,
+	install = { stdout: "", stderr: "", code: 0, killed: false },
 } = {}) {
 	const said = [];
 	const reported = [];
 	const focusCalls = [];
+	// Recorded separately from `focusCalls` so a door that still moves focus
+	// without the lease is visible: `setFocus` is the one that does not carry it.
+	const setFocusCalls = [];
 	const answers = [...confirms];
 	const prompts = { confirm: [], select: [], input: [], editor: [] };
 	let focus;
@@ -127,7 +161,23 @@ async function setup({
 		setStatus: () => {},
 	};
 
-	const model = dir && withModel ? await openModel(execRunner(), dir) : undefined;
+	// The model's runner is what `provision` installs through, and a real `npm
+	// install` in a temp repo is neither fast nor deterministic. Package managers
+	// are answered from `install`; everything else — all of git — is real, because
+	// worktree behaviour is the thing under test.
+	const installCalls = [];
+	const realModelRunner = execRunner();
+	const modelRunner = {
+		exec: (command, args, options) => {
+			if (command === "npm" || command === "pnpm") {
+				installCalls.push({ command, args, cwd: options?.cwd });
+				return Promise.resolve(install);
+			}
+			return realModelRunner.exec(command, args, options);
+		},
+	};
+
+	const model = dir && withModel ? await openModel(modelRunner, dir) : undefined;
 
 	const commands = createCommands({
 		runner,
@@ -139,6 +189,7 @@ async function setup({
 		setFocus: (_ctx, target) => {
 			focus = target;
 			focusCalls.push(target);
+			setFocusCalls.push(target);
 		},
 		// The transition itself is index.ts's wiring and is tested against the real
 		// registry in transition.test.mjs; what this file cares about is that every
@@ -177,12 +228,15 @@ async function setup({
 	return {
 		commands,
 		ctx,
+		dir,
 		model,
 		said,
 		reported,
 		prompts,
 		focusCalls,
+		setFocusCalls,
 		gitCalls,
+		installCalls,
 		setFocus: (target) => {
 			focus = target;
 		},
@@ -505,6 +559,7 @@ async function setup({
 	await pexec("git", ["config", "user.email", "test@example.com"], { cwd: seed });
 	await pexec("git", ["config", "user.name", "Test"], { cwd: seed });
 	await writeFile(join(seed, "file.txt"), "hi\n");
+	await writeFile(join(seed, "jimothy.config.json"), JSON.stringify({ baseDir: ".jimothy" }));
 	await pexec("git", ["add", "."], { cwd: seed });
 	await pexec("git", ["commit", "-q", "-m", "init"], { cwd: seed });
 
@@ -579,20 +634,23 @@ async function setup({
 /** A user message entry, as `sessionManager.getBranch()` returns it. */
 const userEntry = (content) => ({ type: "message", message: { role: "user", content } });
 
+/** The record the registry holds for `name`, or undefined if it made none. */
+async function recordFor(dir, name) {
+	return (await readRegistry(dir)).worktrees.find((record) => record.name === name);
+}
+
 {
 	const { dir } = await makeRepo([]);
 	const info = await getRepoInfo(execRunner(), dir);
 	// Accepting the suggestion: the default fake editor returns its prefill.
-	const h = await setup({ dir,
-		entries: [userEntry("fix the parser bug"), userEntry("yes, do it")],
-		config: { path: "wt", branchPrefix: "" },
-	});
+	const h = await setup({ dir, entries: [userEntry("fix the parser bug"), userEntry("yes, do it")] });
 
 	await h.commands.dispatch(info, h.ctx, "new");
 
 	ok("the prompt is prefilled with a suggestion", h.prompts.editor[0]?.prefill === "fix-parser-bug", JSON.stringify(h.prompts.editor));
 	ok("and no bare input prompt is used", h.prompts.input.length === 0);
-	ok("accepting it creates that worktree", await exists(join(dir, "wt", "fix-parser-bug")), JSON.stringify(h.said));
+	const record = await recordFor(dir, "fix-parser-bug");
+	ok("accepting it creates that worktree", record !== undefined && (await exists(record.path)), JSON.stringify(h.said));
 
 	await rm(dir, { recursive: true, force: true });
 }
@@ -601,16 +659,12 @@ const userEntry = (content) => ({ type: "message", message: { role: "user", cont
 	const { dir } = await makeRepo([]);
 	const info = await getRepoInfo(execRunner(), dir);
 	// Typing over the suggestion wins, and a stray newline is not part of the name.
-	const h = await setup({ dir,
-		entries: [userEntry("fix the parser bug")],
-		editor: async () => "my-own-name\n",
-		config: { path: "wt", branchPrefix: "" },
-	});
+	const h = await setup({ dir, entries: [userEntry("fix the parser bug")], editor: async () => "my-own-name\n" });
 
 	await h.commands.dispatch(info, h.ctx, "new");
 
-	ok("the typed name wins", await exists(join(dir, "wt", "my-own-name")), JSON.stringify(h.said));
-	ok("and the suggestion is not created", !(await exists(join(dir, "wt", "fix-parser-bug"))));
+	ok("the typed name wins", (await recordFor(dir, "my-own-name")) !== undefined, JSON.stringify(h.said));
+	ok("and the suggestion is not created", (await recordFor(dir, "fix-parser-bug")) === undefined);
 
 	await rm(dir, { recursive: true, force: true });
 }
@@ -619,11 +673,11 @@ const userEntry = (content) => ({ type: "message", message: { role: "user", cont
 	const { dir } = await makeRepo([]);
 	const info = await getRepoInfo(execRunner(), dir);
 	// Clearing the field cancels, as an empty submit always has.
-	const h = await setup({ dir, entries: [userEntry("fix the parser bug")], editor: async () => "  ", config: { path: "wt", branchPrefix: "" } });
+	const h = await setup({ dir, entries: [userEntry("fix the parser bug")], editor: async () => "  " });
 
 	await h.commands.dispatch(info, h.ctx, "new");
 
-	ok("an empty submit creates nothing", !(await exists(join(dir, "wt"))), JSON.stringify(h.said));
+	ok("an empty submit creates nothing", (await readRegistry(dir)).worktrees.length === 0, JSON.stringify(h.said));
 
 	await rm(dir, { recursive: true, force: true });
 }
@@ -632,11 +686,11 @@ const userEntry = (content) => ({ type: "message", message: { role: "user", cont
 	const { dir } = await makeRepo([]);
 	const info = await getRepoInfo(execRunner(), dir);
 	// Esc is the same as an empty submit.
-	const h = await setup({ dir, entries: [userEntry("fix the parser bug")], editor: async () => undefined, config: { path: "wt", branchPrefix: "" } });
+	const h = await setup({ dir, entries: [userEntry("fix the parser bug")], editor: async () => undefined });
 
 	await h.commands.dispatch(info, h.ctx, "new");
 
-	ok("a cancelled editor creates nothing", !(await exists(join(dir, "wt"))), JSON.stringify(h.said));
+	ok("a cancelled editor creates nothing", (await readRegistry(dir)).worktrees.length === 0, JSON.stringify(h.said));
 
 	await rm(dir, { recursive: true, force: true });
 }
@@ -645,16 +699,12 @@ const userEntry = (content) => ({ type: "message", message: { role: "user", cont
 	const { dir } = await makeRepo([]);
 	const info = await getRepoInfo(execRunner(), dir);
 	// Embedded newlines: only the first line is used.
-	const h = await setup({ dir,
-		entries: [userEntry("fix the parser bug")],
-		editor: async () => "foo\nbar",
-		config: { path: "wt", branchPrefix: "" },
-	});
+	const h = await setup({ dir, entries: [userEntry("fix the parser bug")], editor: async () => "foo\nbar" });
 
 	await h.commands.dispatch(info, h.ctx, "new");
 
-	ok("a multiline name uses the first line only", await exists(join(dir, "wt", "foo")), JSON.stringify(h.said));
-	ok("and does not slugify across the newline", !(await exists(join(dir, "wt", "foo-bar"))), JSON.stringify(h.said));
+	ok("a multiline name uses the first line only", (await recordFor(dir, "foo")) !== undefined, JSON.stringify(h.said));
+	ok("and does not join across the newline", (await recordFor(dir, "foo-bar")) === undefined, JSON.stringify(h.said));
 
 	await rm(dir, { recursive: true, force: true });
 }
@@ -663,15 +713,11 @@ const userEntry = (content) => ({ type: "message", message: { role: "user", cont
 	const { dir } = await makeRepo([]);
 	const info = await getRepoInfo(execRunner(), dir);
 	// A leading blank line is trimmed, not treated as a cancel.
-	const h = await setup({ dir,
-		entries: [userEntry("fix the parser bug")],
-		editor: async () => "\nfoo",
-		config: { path: "wt", branchPrefix: "" },
-	});
+	const h = await setup({ dir, entries: [userEntry("fix the parser bug")], editor: async () => "\nfoo" });
 
 	await h.commands.dispatch(info, h.ctx, "new");
 
-	ok("a leading newline is trimmed", await exists(join(dir, "wt", "foo")), JSON.stringify(h.said));
+	ok("a leading newline is trimmed", (await recordFor(dir, "foo")) !== undefined, JSON.stringify(h.said));
 
 	await rm(dir, { recursive: true, force: true });
 }
@@ -679,14 +725,16 @@ const userEntry = (content) => ({ type: "message", message: { role: "user", cont
 {
 	const { dir } = await makeRepo([]);
 	const info = await getRepoInfo(execRunner(), dir);
-	// The suggested name is already taken: offer the suffixed one.
+	// The suggested name is already taken: offer the suffixed one. Uniqueness is
+	// the registry's answer now, so what makes the name taken is a worktree *git*
+	// reports — the registry has no record of this one at all.
 	await pexec("git", ["worktree", "add", "-q", "-b", "fix-parser-bug", join(dir, "wt", "fix-parser-bug")], { cwd: dir });
-	const h = await setup({ dir, entries: [userEntry("fix the parser bug")], config: { path: "wt", branchPrefix: "" } });
+	const h = await setup({ dir, entries: [userEntry("fix the parser bug")] });
 
 	await h.commands.dispatch(info, h.ctx, "new");
 
 	ok("a taken suggestion is suffixed", h.prompts.editor[0]?.prefill === "fix-parser-bug-2", JSON.stringify(h.prompts.editor));
-	ok("and that is what gets created", await exists(join(dir, "wt", "fix-parser-bug-2")), JSON.stringify(h.said));
+	ok("and that is what gets created", (await recordFor(dir, "fix-parser-bug-2")) !== undefined, JSON.stringify(h.said));
 
 	await rm(dir, { recursive: true, force: true });
 }
@@ -695,11 +743,11 @@ const userEntry = (content) => ({ type: "message", message: { role: "user", cont
 	const { dir } = await makeRepo([]);
 	const info = await getRepoInfo(execRunner(), dir);
 	// Non-interactive: no prompt to fall back on, so use the suggestion.
-	const h = await setup({ dir, hasUI: false, entries: [userEntry("fix the parser bug")], config: { path: "wt", branchPrefix: "" } });
+	const h = await setup({ dir, hasUI: false, entries: [userEntry("fix the parser bug")] });
 
 	await h.commands.dispatch(info, h.ctx, "new");
 
-	ok("non-interactive creates the suggested worktree", await exists(join(dir, "wt", "fix-parser-bug")), JSON.stringify(h.said));
+	ok("non-interactive creates the suggested worktree", (await recordFor(dir, "fix-parser-bug")) !== undefined, JSON.stringify(h.said));
 	ok("and says which name it chose", h.messages().some((m) => m.includes("fix-parser-bug")), JSON.stringify(h.said));
 
 	await rm(dir, { recursive: true, force: true });
@@ -709,14 +757,192 @@ const userEntry = (content) => ({ type: "message", message: { role: "user", cont
 	const { dir } = await makeRepo([]);
 	const info = await getRepoInfo(execRunner(), dir);
 	// No transcript at all: still a name, and still a worktree.
-	const h = await setup({ dir, hasUI: false, entries: [], config: { path: "wt", branchPrefix: "" } });
+	const h = await setup({ dir, hasUI: false, entries: [] });
 
 	await h.commands.dispatch(info, h.ctx, "new");
 
-	// Extract the created name from messages like "created <name> on <branch>".
 	const createdMsg = h.messages().find((m) => m.startsWith("created "));
-	ok("an empty transcript still names something", createdMsg && /^created [a-z]+-[a-z]+ on /.test(createdMsg), JSON.stringify(h.said));
-	ok("and creates it", (await pexec("git", ["worktree", "list"], { cwd: dir })).stdout.split("\n").length > 2, JSON.stringify(h.said));
+	ok(
+		"an empty transcript still names something",
+		createdMsg !== undefined && /; branch jimothy\/[a-z]+-[a-z]+ \(from main\)/.test(createdMsg),
+		JSON.stringify(h.said),
+	);
+	ok("and creates it", (await readRegistry(dir)).worktrees.length === 1, JSON.stringify(h.said));
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+// ============================================ new: through the registry
+
+{
+	// The heart of it: `/worktree new` is a `Registry.create`, so the record, the
+	// branch and the directory are jimothy's — one model, one convention.
+	const { dir } = await makeRepo([]);
+	const info = await getRepoInfo(execRunner(), dir);
+	const h = await setup({ dir });
+
+	await h.commands.dispatch(info, h.ctx, "new spike");
+
+	const records = (await readRegistry(dir)).worktrees;
+	ok("new: the registry holds the record", records.length === 1 && records[0].name === "spike", JSON.stringify(records));
+	ok("new: the branch comes from jimothy's prefix, not the extension's", records[0]?.branch === "jimothy/spike", JSON.stringify(records));
+	ok("new: the branch is jimothy's to delete", records[0]?.branchCreated === true, JSON.stringify(records));
+	ok("new: it lands under jimothy's baseDir", records[0]?.path.startsWith(join(dir, ".jimothy") + "/"), String(records[0]?.path));
+	ok("new: and exists on disk", await exists(records[0].path));
+	ok("new: the create is reported with the path and the base", h.messages().some((m) => m === `created ${records[0].path}; branch jimothy/spike (from main)`), JSON.stringify(h.said));
+	ok("new: nothing was said at the warning level", !h.said.some((s) => s.level !== "info"), JSON.stringify(h.said));
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// autoFocus goes through `moveFocus`, which carries the lease; `setFocus`
+	// would move focus into a worktree this session does not hold.
+	const { dir } = await makeRepo([]);
+	const info = await getRepoInfo(execRunner(), dir);
+	const h = await setup({ dir, config: { autoFocus: true } });
+
+	await h.commands.dispatch(info, h.ctx, "new spike");
+	const record = await recordFor(dir, "spike");
+	ok("new: the new worktree is focused", h.focusCalls.at(-1)?.path === record.path, JSON.stringify(h.focusCalls));
+	ok("new: with its branch", h.focusCalls.at(-1)?.branch === "jimothy/spike", JSON.stringify(h.focusCalls));
+	ok("new: through moveFocus, not setFocus", h.setFocusCalls.length === 0, JSON.stringify(h.setFocusCalls));
+
+	const off = await setup({ dir, config: { autoFocus: false } });
+	await off.commands.dispatch(info, off.ctx, "new second");
+	ok("new: autoFocus off still creates", (await recordFor(dir, "second")) !== undefined, JSON.stringify(off.said));
+	ok("new: and focuses nothing", off.focusCalls.length === 0, JSON.stringify(off.focusCalls));
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// Provisioning is the visible half of the move: jimothy's `link` entries are
+	// materialised into a worktree `/worktree new` never touched before.
+	const { dir } = await makeRepo([], { jimothy: { link: [".env"], copy: ["absent.json"] } });
+	await writeFile(join(dir, ".env"), "SECRET=1\n");
+	const info = await getRepoInfo(execRunner(), dir);
+	const h = await setup({ dir });
+
+	await h.commands.dispatch(info, h.ctx, "new spike");
+
+	const record = await recordFor(dir, "spike");
+	ok("new: a linked file is symlinked into the worktree", (await lstat(join(record.path, ".env"))).isSymbolicLink(), record.path);
+	ok("new: a missing source is a warning, not a failure", h.said.some((s) => s.level === "warning" && s.message.includes('skipped "absent.json"')), JSON.stringify(h.said));
+	ok("new: and the worktree is kept", await exists(record.path));
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// An install is the one step that can take minutes, so it narrates line by
+	// line rather than reporting once at the end.
+	const { dir } = await makeRepo([], { lockfile: true });
+	const info = await getRepoInfo(execRunner(), dir);
+	const h = await setup({ dir });
+
+	await h.commands.dispatch(info, h.ctx, "new spike");
+
+	const record = await recordFor(dir, "spike");
+	ok("new: the package manager is run in the new worktree", h.installCalls.some((c) => c.command === "npm" && c.args.join(" ") === "install" && c.cwd === record.path), JSON.stringify(h.installCalls));
+	ok("new: the install is narrated before it finishes", h.messages().some((m) => /^installing dependencies with npm in /.test(m)), JSON.stringify(h.said));
+	ok("new: and again when it does", h.messages().some((m) => /^dependencies installed in /.test(m)), JSON.stringify(h.said));
+	const narrated = h.messages().findIndex((m) => m.startsWith("installing dependencies"));
+	ok("new: the narration precedes the summary", narrated >= 0 && narrated < h.messages().findIndex((m) => m.startsWith("created ")), JSON.stringify(h.said));
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// A failed install is not a failed create: the checkout is real work, so it
+	// is reported and kept rather than destroyed. This is why `createAndProvision`
+	// has no try/catch of its own.
+	const { dir } = await makeRepo([], { lockfile: true });
+	const info = await getRepoInfo(execRunner(), dir);
+	const h = await setup({ dir, install: { stdout: "", stderr: "ENOTFOUND registry", code: 1, killed: false } });
+
+	await h.commands.dispatch(info, h.ctx, "new spike");
+
+	const record = await recordFor(dir, "spike");
+	ok("new: a failed install is reported", h.errors().some((m) => /npm install failed/.test(m)), JSON.stringify(h.said));
+	ok("new: the worktree survives it", record !== undefined && (await exists(record.path)), JSON.stringify(await readRegistry(dir)));
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// The base: what the user named, else jimothy's `defaultBase`, else the
+	// repository's default branch. `Registry.create` resolves none of that itself.
+	const { dir } = await makeRepo([]);
+	await writeFile(join(dir, "second.txt"), "two\n");
+	await pexec("git", ["add", "."], { cwd: dir });
+	await pexec("git", ["commit", "-q", "-m", "second"], { cwd: dir });
+	const first = (await pexec("git", ["rev-parse", "HEAD~1"], { cwd: dir })).stdout.trim();
+	const head = (await pexec("git", ["rev-parse", "HEAD"], { cwd: dir })).stdout.trim();
+	const info = await getRepoInfo(execRunner(), dir);
+	const h = await setup({ dir });
+
+	await h.commands.dispatch(info, h.ctx, "new spike HEAD~1");
+	ok("new: a base the user names is used", (await recordFor(dir, "spike"))?.baseCommit === first, JSON.stringify(await readRegistry(dir)));
+	ok("new: and reported", h.messages().some((m) => m.includes("(from HEAD~1)")), JSON.stringify(h.said));
+
+	await h.commands.dispatch(info, h.ctx, "new plain");
+	ok("new: without one, the default branch is", (await recordFor(dir, "plain"))?.baseCommit === head, JSON.stringify(await readRegistry(dir)));
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// jimothy's `defaultBase` sits between the two: it beats the default branch
+	// and loses to an explicit argument.
+	const { dir } = await makeRepo([], { jimothy: { defaultBase: "side" } });
+	await pexec("git", ["checkout", "-q", "-b", "side"], { cwd: dir });
+	await writeFile(join(dir, "side.txt"), "side\n");
+	await pexec("git", ["add", "."], { cwd: dir });
+	await pexec("git", ["commit", "-q", "-m", "side"], { cwd: dir });
+	const sideCommit = (await pexec("git", ["rev-parse", "side"], { cwd: dir })).stdout.trim();
+	await pexec("git", ["checkout", "-q", "main"], { cwd: dir });
+	const info = await getRepoInfo(execRunner(), dir);
+	const h = await setup({ dir });
+
+	await h.commands.dispatch(info, h.ctx, "new spike");
+	ok("new: jimothy's defaultBase is used when no base is given", (await recordFor(dir, "spike"))?.baseCommit === sideCommit, JSON.stringify(await readRegistry(dir)));
+	ok("new: and named in the report", h.messages().some((m) => m.includes("(from side)")), JSON.stringify(h.said));
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// A create the registry refuses is reported, not thrown, and leaves the
+	// existing worktree alone.
+	const { dir } = await makeRepo([]);
+	const info = await getRepoInfo(execRunner(), dir);
+	const h = await setup({ dir });
+
+	await h.commands.dispatch(info, h.ctx, "new spike");
+	await h.commands.dispatch(info, h.ctx, "new spike");
+
+	ok("new: a duplicate name is refused", h.errors().some((m) => /already exists/.test(m)), JSON.stringify(h.said));
+	ok("new: and nothing is added", (await readRegistry(dir)).worktrees.length === 1, JSON.stringify(await readRegistry(dir)));
+
+	// A name the registry will not accept fails on its own terms rather than deep
+	// inside git — and is never silently rewritten into something legal.
+	await h.commands.dispatch(info, h.ctx, "new 'Not A Name'");
+	ok("new: an illegal name is refused, not slugified", h.errors().length === 2, JSON.stringify(h.said));
+	ok("new: and still nothing is added", (await readRegistry(dir)).worktrees.length === 1, JSON.stringify(await readRegistry(dir)));
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// Without a model there is no registry to create through, so it says so.
+	const { dir } = await makeRepo([]);
+	const info = await getRepoInfo(execRunner(), dir);
+	const h = await setup({ dir, withModel: false });
+
+	await h.commands.dispatch(info, h.ctx, "new spike");
+	ok("new: says why it cannot create rather than throwing", h.errors().some((m) => /unavailable/i.test(m)), JSON.stringify(h.said));
+	ok("new: and creates nothing", (await readRegistry(dir)).worktrees.length === 0, JSON.stringify(await readRegistry(dir)));
 
 	await rm(dir, { recursive: true, force: true });
 }
@@ -844,7 +1070,9 @@ const userEntry = (content) => ({ type: "message", message: { role: "user", cont
 	const items = t.commands.getArgumentCompletions("checkout ");
 	ok(
 		"completions: a branch /worktree new just created is offered",
-		items?.some((i) => i.value === "checkout joel/fresh-thing"),
+		// jimothy's prefix, not the extension's `joel/`: `new` creates through the
+		// registry, so there is one convention for a branch name.
+		items?.some((i) => i.value === "checkout jimothy/fresh-thing"),
 		JSON.stringify(items),
 	);
 	await rm(dir, { recursive: true, force: true });

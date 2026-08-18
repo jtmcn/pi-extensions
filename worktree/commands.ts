@@ -13,6 +13,13 @@
 
 import { basename } from "node:path";
 import type { ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+	type CreateOptions,
+	provision,
+	type ProvisionResult,
+	resolveDefaultBranch,
+	type WorktreeRecord,
+} from "jimothy/worktrees";
 import { countDirty, getRepoInfo, type RepoInfo, slugify } from "../lib/git.ts";
 import { type WorktreeConfig, worktreePath } from "./config.ts";
 import type { FocusTarget } from "./focus.ts";
@@ -42,6 +49,37 @@ import { type CommandRunner, type CreateResult, createWorktree, pruneWorktrees, 
  * to create a duplicate of something that is still there.
  */
 const MODEL_UNAVAILABLE = "jimothy's worktree model is unavailable, so worktrees cannot be listed";
+
+/**
+ * Create a worktree and make it usable, which is two operations the user thinks
+ * of as one. Shared by `/worktree new`, `/worktree checkout` and the model's
+ * tool, so a worktree made through any door has the same links, copies and
+ * install as one jimothy made — the alternative is doors that agree about
+ * identity and differ about everything the user actually notices.
+ *
+ * Deliberately not wrapped in a try/catch. `create` rolls back its own failed
+ * attempt, and a `provision` failure leaves a real worktree the user can still
+ * use — a failed install is retryable and the checkout is their work — so the
+ * caller reports it rather than destroying what it just made.
+ *
+ * `report` is a line sink, not a UI: an install is the one step here that can
+ * take minutes, and a caller that only speaks when it finishes looks hung.
+ */
+export async function createAndProvision(
+	model: Model,
+	report: (message: string) => void,
+	name: string,
+	opts: CreateOptions,
+): Promise<{ record: WorktreeRecord; provision: ProvisionResult }> {
+	const record = await model.registry.create(name, opts);
+	const result = await provision(model.deps, {
+		record,
+		repoRoot: model.info.mainWorktree,
+		config: model.config,
+		report,
+	});
+	return { record, provision: result };
+}
 
 const SUBCOMMANDS = [
 	{ value: "list", label: "list", description: "Show worktrees for this repo" },
@@ -195,16 +233,15 @@ export function createCommands(deps: CommandDeps): Commands {
 	};
 
 	/**
-	 * A name to offer for a new worktree, unique against what already exists.
+	 * A *seed* for a new worktree's name, read out of the conversation.
 	 *
-	 * Uniqueness is applied only here, to generated names: a name the user typed
-	 * must keep failing loudly in `createWorktree` rather than quietly becoming
-	 * something else.
+	 * Only half the job, and deliberately: turning a seed into a name that is
+	 * legal and free is `registry.suggestName`, because only the registry knows
+	 * what is taken — by a record, by a worktree git reports, or by a branch. This
+	 * half stays here because only pi has a transcript.
 	 */
-	const suggest = async (ctx: ExtensionContext): Promise<string> => {
-		const taken = takenNames(await refresh());
-		return uniqueName(suggestName(messageTexts(ctx.sessionManager.getBranch())), (name) => taken.has(name));
-	};
+	const seedFromTranscript = (ctx: ExtensionContext): string =>
+		suggestName(messageTexts(ctx.sessionManager.getBranch()));
 
 	const resolveWorktree = async (
 		ctx: ExtensionCommandContext,
@@ -282,13 +319,18 @@ export function createCommands(deps: CommandDeps): Commands {
 			say(ctx, `unexpected extra arguments: ${parsed.extra.join(" ")} (quote names containing spaces)`, "error");
 			return;
 		}
-		const rawBase = parsed.base;
+		const model = getModel();
+		if (!model) {
+			say(ctx, MODEL_UNAVAILABLE, "error");
+			return;
+		}
+
 		let name = parsed.name;
 		if (!name) {
 			// A suggestion rather than an empty box: pi's `input` placeholder is never
 			// rendered, so the old hint was invisible. `editor` does prefill, which
 			// makes the name editable instead of merely proposed.
-			const suggestion = await suggest(ctx);
+			const suggestion = await model.registry.suggestName(seedFromTranscript(ctx));
 			if (!ctx.hasUI) {
 				// No prompt to fall back on. Using the suggestion beats the silent
 				// no-op this path used to be.
@@ -300,27 +342,35 @@ export function createCommands(deps: CommandDeps): Commands {
 				if (!name.trim()) return;
 			}
 		}
-		const slug = slugify(name);
-		const branch = `${getConfig().branchPrefix}${slug}`;
-		const target = worktreePath(getConfig(), info.projectRoot, slug);
 
-		say(ctx, `creating ${target} …`, "info");
+		// `create` takes a base and resolves no default of its own, so the three
+		// answers are ordered here: what the user typed, what the repository's
+		// jimothy config says, then the repository's default branch.
+		const base =
+			parsed.base ?? model.config.defaultBase ?? (await resolveDefaultBranch(model.deps, model.info.mainWorktree));
+
+		say(ctx, `creating ${name} …`, "info");
 		try {
-			const result = await createWorktree(runner, {
-				name: slug,
-				branch,
-				base: rawBase,
-				config: getConfig(),
-				projectRoot: info.projectRoot,
-				sourceWorktree: info.worktreeRoot,
-			});
+			// Narrated line by line through `say`, not `ui.report`: `report` takes a
+			// title plus a block of lines and renders once, which is the opposite of
+			// narration — an install that speaks only when it finishes is the hang the
+			// line sink exists to avoid.
+			const { record, provision: result } = await createAndProvision(
+				model,
+				(line) => say(ctx, line, "info"),
+				name,
+				{ base },
+			);
 			await refresh();
 			// The new branch exists now: `checkout <tab>` should offer it.
 			await refreshBranches(info);
 
-			reportCreated(ctx, result, result.base ? [`from ${result.base}`] : []);
+			const notes = [`created ${record.path}`, `branch ${record.branch} (from ${base})`, ...result.warnings];
+			say(ctx, notes.join("; "), result.warnings.length ? "warning" : "info");
 
-			if (getConfig().autoFocus) setFocus(ctx, { path: result.path, branch: result.branch });
+			// Through `moveFocus`, not `setFocus`: focus is where the agent writes, so
+			// it carries the worktree lease with it.
+			if (getConfig().autoFocus) await moveFocus(ctx, { path: record.path, branch: record.branch });
 		} catch (error) {
 			say(ctx, (error as Error).message, "error");
 		}
