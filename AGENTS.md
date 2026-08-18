@@ -90,6 +90,27 @@ when broken:
   jimothy and pi silently demotes every launched session to "held by a
   stranger" — prompt included.
 
+Three rules about the lease a focus transition carries (`worktree/transition.ts`),
+all silent when broken:
+
+- **The destination is acquired before the origin is released, and a
+  transition that cannot hold it is refused rather than moved.** Releasing A
+  first and only then trying for B would put the agent's writes in a worktree
+  it might not get, or leave the session holding neither; refusing leaves it
+  exactly where it was, which is always a worktree it holds.
+- **The origin's release is deferred to `agent_settled`, not made at the
+  moment focus moves, and a queue that outlives the transition is drained by
+  session shutdown too.** Focus is applied at `tool_call` time, so a call
+  already in flight is still writing into the origin when `/worktree focus`
+  returns; releasing then would end a write out from under it.
+- **A queued release is cancelled when the same worktree is re-acquired or
+  removed**, rather than left to drain on its own schedule. Two focus changes
+  in one turn that end up back home, or a `/worktree remove` of a worktree
+  whose release is still pending, both have to find that entry and cancel it:
+  a drain landing later would free a worktree the session (or nobody) still
+  holds, and a removal that cannot see the queue refuses itself, naming *this
+  session* as the holder blocking it.
+
 Do **not** add `@earendil-works/*` to this collection's `package.json`. pi loads
 extensions through jiti with an alias table that maps those specifiers onto the
 *running* pi, and a local copy would be shadowed by that alias in some paths and

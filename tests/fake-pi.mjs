@@ -52,10 +52,16 @@ const pexec = promisify(execFile);
  *                      every session) or a zero-arg function called per
  *                      `session_start`, so the caller can change it between
  *                      sessions. Follow the same shape as `systemPrompt`.
+ * @param options.idle  What `ctx.isIdle()` returns. Mutable on the harness
+ *                      (`h.idle = false`) rather than fixed at construction,
+ *                      because what it answers is whether an agent run is in
+ *                      flight *right now* — which is precisely what a test
+ *                      changes between one command and the next.
  */
 export function createFakePi({
 	cwd = process.cwd(),
 	hasUI = true,
+	idle = true,
 	mode: modeInput = "interactive",
 	exec,
 	entries = () => [],
@@ -92,6 +98,9 @@ export function createFakePi({
 	const prompts = { confirm: [], select: [], input: [] };
 	/** Contexts that called `ctx.shutdown()`. Recorded, never performed. */
 	const shutdowns = [];
+	// A box rather than the parameter itself: every context reads it live, so a
+	// test can flip it after the session has started.
+	const idleState = { value: idle };
 	// Queues rather than single values: a take-over asks, breaks the lease and
 	// can ask again, and a test that silently reuses one answer for both would
 	// pass while the code asked once.
@@ -160,6 +169,7 @@ export function createFakePi({
 			own,
 			paints: own.statuses,
 			isProjectTrusted: () => projectTrusted,
+			isIdle: () => idleState.value,
 			// One id for every context this pi hands out: pi mints a session id per
 			// *session file*, and `/reload` reopens the same one, so a harness that
 			// minted a fresh id per `session_start` would make a reloaded session look
@@ -222,6 +232,13 @@ export function createFakePi({
 
 	return {
 		pi,
+		/** Whether `ctx.isIdle()` answers true. Settable mid-test. */
+		get idle() {
+			return idleState.value;
+		},
+		set idle(value) {
+			idleState.value = value;
+		},
 		/** Contexts handed out so far, oldest first. */
 		contexts,
 		/** The context of the current session. */

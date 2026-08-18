@@ -12,7 +12,7 @@
 import { assertions, loadExt } from "../harness.mjs";
 
 const { ok, done } = assertions();
-const { messageTexts, contentWords, nameFromMessages, randomName, suggestName, uniqueName } =
+const { messageTexts, contentWords, nameFromMessages, randomName, suggestName } =
 	await loadExt("worktree/suggest.ts");
 
 /** A user message entry in the shape `sessionManager.getBranch()` returns. */
@@ -98,24 +98,6 @@ const assistant = (text) => ({
 	ok("suggestName prefers the conversation", suggestName(["fix the parser bug"], () => 0) === "fix-parser-bug", suggestName(["fix the parser bug"], () => 0));
 	ok("suggestName falls back to a pair", suggestName(["yes"], () => 0) === first, suggestName(["yes"], () => 0));
 	ok("suggestName on an empty transcript falls back", suggestName([], () => 0) === first);
-}
-
-// ============================================ uniqueName
-
-{
-	ok("a free name is returned as-is", uniqueName("parser-fix", () => false) === "parser-fix");
-	ok("a taken name is suffixed", uniqueName("parser-fix", (n) => n === "parser-fix") === "parser-fix-2");
-	ok(
-		"and keeps counting",
-		uniqueName("parser-fix", (n) => n === "parser-fix" || n === "parser-fix-2") === "parser-fix-3",
-	);
-	const exhausted = uniqueName("parser-fix", () => true, () => 0);
-	ok("everything taken falls back to a random pair", exhausted === randomName(() => 0), exhausted);
-	// A 24-character taken base must still get a suffix, not degrade to random.
-	const maxBase = "abcdefghij-abcdefghij-abc"; // exactly 24 chars
-	const suffixed = uniqueName(maxBase, (n) => n === maxBase);
-	ok("a max-length taken base is suffixed", suffixed.endsWith("-2"), suffixed);
-	ok("and still respects the cap", suffixed.length <= 24, suffixed);
 }
 
 done();

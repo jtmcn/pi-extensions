@@ -34,6 +34,12 @@ import type { Ui } from "./ui.ts";
 export interface HeldLease {
 	/** The registry name, which is what every registry call takes. */
 	name: string;
+	/**
+	 * Realpath of the worktree, because a focus transition is keyed by path: what
+	 * it knows about the worktree it is leaving is where the agent was writing,
+	 * and the name is the registry's business rather than focus's.
+	 */
+	path: string;
 	/** The runId we hold it under — the launcher's, when delegated. */
 	runId: string;
 	/**
@@ -115,8 +121,37 @@ export interface WorktreeSession {
 	setFocus: (ctx: ExtensionContext, target: FocusTarget | undefined, announce?: boolean) => void;
 	/** Adopt focus restored from the transcript, without announcing or persisting it. */
 	restoreFocus: (target: FocusTarget | undefined) => void;
-	/** Record a lease this session took, replacing any it already held on that worktree. */
+	/**
+	 * Record a lease this session took, replacing any it already held on that
+	 * worktree and cancelling any release queued for it.
+	 */
 	addLease: (lease: HeldLease) => void;
+	/** Forget a lease this session held, returning it so the caller can release it. */
+	dropLease: (path: string) => HeldLease | undefined;
+	/**
+	 * Release this lease when the agent next settles, not now: focus is applied
+	 * at `tool_call` time, so a call already in flight is still writing into that
+	 * worktree, and releasing it would invite a second agent into a directory
+	 * being written.
+	 */
+	deferRelease: (lease: HeldLease) => void;
+	/**
+	 * Take a queued release back out of the queue, if there is one for that path.
+	 *
+	 * The queue's other half: without it a pending release can only be drained, and
+	 * two callers need to *see* one. A transition returning to a worktree whose
+	 * release is still queued has to cancel it before it reads the registry — a
+	 * drain landing in between frees the lease the transition then records. And
+	 * `/worktree remove` has to hand our own lease back before jimothy will remove
+	 * the worktree, which `dropLease` alone cannot do for a lease that is merely
+	 * pending: the removal was refused, naming this very session as the holder.
+	 *
+	 * Returned rather than released, like `dropLease`: whoever cancels it decides
+	 * whether it is being taken back or given away.
+	 */
+	cancelRelease: (path: string) => HeldLease | undefined;
+	/** Drain the queue. Empty after a dispose, like everything else here. */
+	takeDeferredReleases: () => HeldLease[];
 	/** Repaint the footer segment. */
 	paint: (ctx: ExtensionContext) => void;
 	/** Retire the session: its monitor stops and everything in flight goes inert. */
@@ -131,6 +166,8 @@ export function createSession(options: SessionOptions): WorktreeSession {
 
 	let focus: FocusTarget | undefined;
 	const leases: HeldLease[] = [];
+	/** Leases dropped by a transition, waiting for the agent to settle. */
+	const deferred: HeldLease[] = [];
 	let disposed = false;
 
 	/**
@@ -221,7 +258,42 @@ export function createSession(options: SessionOptions): WorktreeSession {
 			const existing = leases.findIndex((held) => held.name === lease.name);
 			if (existing === -1) leases.push(lease);
 			else leases[existing] = lease;
+			// Taking a worktree back cancels the release it was queued for, and this is
+			// the symmetrical partner of the replace-by-name rule above: one place owns
+			// "this session holds it again". Two transitions inside one non-idle turn —
+			// focus beta, then focus off — leave alpha queued from the first and
+			// re-acquired by the second, and a drain that still named it would release a
+			// worktree the agent is writing in, which is exactly the unleased-agent
+			// failure the transition exists to prevent. The runId guard does not help:
+			// both leases are this session's, under the same run id.
+			for (let index = deferred.length - 1; index >= 0; index--) {
+				if (deferred[index].name === lease.name) deferred.splice(index, 1);
+			}
 		},
+		// Returned rather than released here: this object owns state, not the
+		// registry, and whoever dropped the lease is the one who knows whether it can
+		// be given back now or has to wait for the agent to settle.
+		dropLease: (path) => {
+			const index = leases.findIndex((held) => held.path === path);
+			return index === -1 ? undefined : leases.splice(index, 1)[0];
+		},
+		// Inert once disposed, like paint(): a replaced session will never drain this
+		// queue, and a lease parked on it would be one nothing releases. A caller that
+		// got this far with a disposed session has already lost its race — every one of
+		// them re-checks first — so dropping it here is the last line of that defence,
+		// not the only one.
+		deferRelease: (lease) => {
+			if (disposed) return;
+			deferred.push(lease);
+		},
+		// By path, like `dropLease`, because both callers know where the agent was
+		// writing rather than what the registry calls it — and the two are
+		// interchangeable here, since `addLease` keeps at most one entry per worktree.
+		cancelRelease: (path) => {
+			const index = deferred.findIndex((lease) => lease.path === path);
+			return index === -1 ? undefined : deferred.splice(index, 1)[0];
+		},
+		takeDeferredReleases: () => deferred.splice(0, deferred.length),
 		paint,
 		dispose: () => {
 			// Before the monitor, so anything awaiting a model call sees the
