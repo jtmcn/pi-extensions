@@ -263,15 +263,15 @@ it set to `"joel/"`, `origin/joel/fix-parser` becomes `fix-parser` and
 `origin/alice/hotfix` becomes `alice-hotfix`. A name you pass yourself is never
 adjusted and fails instead if it is illegal or already taken.
 
-For an ordinary existing local branch, a derived name colliding with `-2` is not
-an edge case but the normal outcome: `checkout feature`'s directory-name seed is
-derived from `feature` itself, and `registry.suggestName`'s taken-set already
-contains every branch in the repo (stripped of jimothy's prefix) — including the
-very branch being checked out — so it always looks taken and the directory lands
-in `feature-2`, not `feature`, even though nothing else has that name. This is a
-known wart in jimothy's `suggestName`, not a choice made here; a later change is
-expected to fix it on the jimothy side, and the suffix this documents will
-change when it does. `autoFocus` applies exactly as it does for `new`.
+A derived name is not suffixed by the branch it is derived from. `checkout
+feature` lands in `feature`, because this door tells `registry.suggestName` it is
+`creatingBranch: false`: the branch half of that taken set exists to protect a
+caller about to mint `${branchPrefix}<name>`, which `new` does and `checkout`
+never does, so counting it here would make every seed collide with the very
+branch being checked out — `feature-2`, and a message pointing at a `feature`
+nobody created. Records, worktrees git reports and an explicit name are
+unaffected: those are what `create` actually enforces. `autoFocus` applies
+exactly as it does for `new`.
 
 The model's `worktree` tool deliberately does not expose this. With auto-focus
 on, checking out an existing branch could put the model to work directly on a

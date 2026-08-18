@@ -498,7 +498,18 @@ export function createCommands(deps: CommandDeps): Commands {
 		// extension's own (now-dead for this door): a tracked or existing branch's
 		// identity belongs to the branch itself, but the *directory* still follows
 		// jimothy's convention for stripping it, same as `new`.
-		const name = explicitName ?? (await model.registry.suggestName(checkoutName(match.branch, model.config.branchPrefix)));
+		//
+		// `creatingBranch: false`, unlike `new`: the branch component of that taken set
+		// protects a caller about to *mint* `${branchPrefix}${name}`, and this door mints
+		// nothing — `create({ branch })` and `create({ track })` check out a branch that
+		// already exists. Counting it would mean the seed, derived from that same branch,
+		// always collides with itself: `checkout feature` landing in `feature-2` and a
+		// message inviting the user to look for a `feature` nobody made.
+		const name =
+			explicitName ??
+			(await model.registry.suggestName(checkoutName(match.branch, model.config.branchPrefix), {
+				creatingBranch: false,
+			}));
 
 		say(ctx, `creating ${name} …`, "info");
 		try {
