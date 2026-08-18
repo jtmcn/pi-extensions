@@ -142,9 +142,38 @@ for that one event-loop turn nothing here holds the name. A session that loses
 that race is told, exactly as it would be for any other stranger's lease — not
 left to continue silently against a worktree it no longer holds.
 
+**Focus moves the lease.** Focus is precisely "where this agent now writes", so
+`/worktree focus B` is a transition rather than an assignment: B is acquired
+*first*, and only then does focus move and A go back. If B cannot be held —
+a live stranger, and the user declines to take over, or no UI to ask with —
+focus does not move at all, and nothing is quit: the session stays exactly where
+it was, which is the difference between this and the same question at session
+start. `/worktree focus off` is the same transition in reverse, so a session's
+own worktree is reacquired before the focused one is released, and focus is kept
+when it cannot be.
+
+A is not released at the moment focus moves. Focus is applied at `tool_call`
+time, so a call already in flight is still writing into A; the release is
+deferred to `agent_settled` (or done at once when the agent is idle), and the
+queue is drained by the session ending too, since `/reload` ends a session
+without ending the process. A's lease goes back whatever its provenance —
+unlike shutdown, a transition means the agent has *left* that worktree, which is
+exactly when jimothy wants it back, and `releaseLease` is guarded by run id so
+an early release cannot unlock a worktree somebody else has taken. The cost,
+named so it is not rediscovered as a bug: pi's own cwd is still A, so a user
+typing into the terminal is working in a worktree the session no longer holds.
+
+A focused worktree that has *disappeared* — removed by another session, or by
+`jimothy wt rm` in another terminal — is noticed by the next transition and
+dropped, with its lease. Without that the session goes on redirecting every tool
+call into a directory that no longer exists, and the error names a path the user
+never typed.
+
 None of this is fatal. A registry that cannot be read, or a lock another process
 is holding, is reported as a warning; the session still starts, still focuses,
-and still monitors a PR.
+and still monitors a PR. A transition is the exception that proves it: one that
+cannot read the lease is refused rather than made unleased, because staying put
+costs nothing.
 
 The listing also shows less than the old `git worktree list`-based renderer
 did: jimothy's git entries carry no detached-HEAD short sha and no `(locked)` /
@@ -377,7 +406,11 @@ which is persistent state a crash would strand.
 lib/git.ts               shared git helpers (used by other extensions too)
 lib/herdr.ts             reporting the displayed branch to herdr (pure + one CLI)
 worktree/index.ts        wiring only: event handlers and registration
-worktree/session.ts      per-session state, focus, and the session's monitor
+worktree/session.ts      per-session state, focus, held leases, and the monitor
+worktree/jimothy.ts      jimothy's worktree model: registry, deps, repo info
+worktree/lease.ts        the lease decision table, and the launcher's identity (pure)
+worktree/take-lease.ts   the lease handshake: acquiring, retargeting, prompting
+worktree/transition.ts   moving focus, and the lease with it
 worktree/pr-monitor.ts   the PR status state machine
 worktree/commands.ts     /worktree and its completions
 worktree/tool.ts         the model-facing tool

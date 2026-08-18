@@ -68,6 +68,16 @@ export interface CommandDeps {
 	getConfigSources: () => string[];
 	getFocus: () => FocusTarget | undefined;
 	setFocus: (ctx: ExtensionContext, target: FocusTarget | undefined, announce?: boolean) => void;
+	/**
+	 * Move focus, carrying the worktree lease with it: acquire the destination,
+	 * move, release the origin when the agent settles. `false` means the
+	 * destination could not be held and focus is unchanged — the refusal has
+	 * already been reported, so a caller reports its own success and nothing else.
+	 *
+	 * Bound by `index.ts` to the live session, like the getters above, because
+	 * these commands are registered once per process.
+	 */
+	moveFocus: (ctx: ExtensionContext, next: FocusTarget | undefined, opts?: { announce?: boolean }) => Promise<boolean>;
 }
 
 export interface Commands {
@@ -93,7 +103,7 @@ export interface Commands {
 }
 
 export function createCommands(deps: CommandDeps): Commands {
-	const { runner, ui, getModel, getConfig, getConfigSources, getFocus, setFocus } = deps;
+	const { runner, ui, getModel, getConfig, getConfigSources, getFocus, setFocus, moveFocus } = deps;
 	const say = ui.say;
 	const report = ui.report;
 
@@ -417,19 +427,24 @@ export function createCommands(deps: CommandDeps): Commands {
 
 	const doFocus = async (info: RepoInfo, ctx: ExtensionCommandContext, args: string) => {
 		const query = args.trim();
+		// Every branch here goes through `moveFocus` rather than `setFocus`: focus is
+		// where the agent writes, so it carries the worktree lease with it, and a
+		// door that set it directly would be a door that writes into a worktree this
+		// session does not hold. A `false` has already said why, so nothing is
+		// reported on top of it.
 		if (query === "off" || query === "none" || query === "clear") {
-			setFocus(ctx, undefined);
+			if (!(await moveFocus(ctx, undefined))) return;
 			say(ctx, "focus cleared", "info");
 			return;
 		}
 		const target = await resolveWorktree(ctx, query, "Focus which worktree?");
 		if (!target) return;
 		if (target.path === info.worktreeRoot) {
-			setFocus(ctx, undefined);
+			if (!(await moveFocus(ctx, undefined))) return;
 			say(ctx, "focus cleared (that is the session worktree)", "info");
 			return;
 		}
-		setFocus(ctx, { path: target.path, branch: target.branch });
+		if (!(await moveFocus(ctx, { path: target.path, branch: target.branch }))) return;
 		say(ctx, `focused ${describeKnown(target)}`, "info");
 	};
 

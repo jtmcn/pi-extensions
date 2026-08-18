@@ -34,6 +34,12 @@ import type { Ui } from "./ui.ts";
 export interface HeldLease {
 	/** The registry name, which is what every registry call takes. */
 	name: string;
+	/**
+	 * Realpath of the worktree, because a focus transition is keyed by path: what
+	 * it knows about the worktree it is leaving is where the agent was writing,
+	 * and the name is the registry's business rather than focus's.
+	 */
+	path: string;
 	/** The runId we hold it under — the launcher's, when delegated. */
 	runId: string;
 	/**
@@ -117,6 +123,17 @@ export interface WorktreeSession {
 	restoreFocus: (target: FocusTarget | undefined) => void;
 	/** Record a lease this session took, replacing any it already held on that worktree. */
 	addLease: (lease: HeldLease) => void;
+	/** Forget a lease this session held, returning it so the caller can release it. */
+	dropLease: (path: string) => HeldLease | undefined;
+	/**
+	 * Release this lease when the agent next settles, not now: focus is applied
+	 * at `tool_call` time, so a call already in flight is still writing into that
+	 * worktree, and releasing it would invite a second agent into a directory
+	 * being written.
+	 */
+	deferRelease: (lease: HeldLease) => void;
+	/** Drain the queue. Empty after a dispose, like everything else here. */
+	takeDeferredReleases: () => HeldLease[];
 	/** Repaint the footer segment. */
 	paint: (ctx: ExtensionContext) => void;
 	/** Retire the session: its monitor stops and everything in flight goes inert. */
@@ -131,6 +148,8 @@ export function createSession(options: SessionOptions): WorktreeSession {
 
 	let focus: FocusTarget | undefined;
 	const leases: HeldLease[] = [];
+	/** Leases dropped by a transition, waiting for the agent to settle. */
+	const deferred: HeldLease[] = [];
 	let disposed = false;
 
 	/**
@@ -222,6 +241,23 @@ export function createSession(options: SessionOptions): WorktreeSession {
 			if (existing === -1) leases.push(lease);
 			else leases[existing] = lease;
 		},
+		// Returned rather than released here: this object owns state, not the
+		// registry, and whoever dropped the lease is the one who knows whether it can
+		// be given back now or has to wait for the agent to settle.
+		dropLease: (path) => {
+			const index = leases.findIndex((held) => held.path === path);
+			return index === -1 ? undefined : leases.splice(index, 1)[0];
+		},
+		// Inert once disposed, like paint(): a replaced session will never drain this
+		// queue, and a lease parked on it would be one nothing releases. A caller that
+		// got this far with a disposed session has already lost its race — every one of
+		// them re-checks first — so dropping it here is the last line of that defence,
+		// not the only one.
+		deferRelease: (lease) => {
+			if (disposed) return;
+			deferred.push(lease);
+		},
+		takeDeferredReleases: () => deferred.splice(0, deferred.length),
 		paint,
 		dispose: () => {
 			// Before the monitor, so anything awaiting a model call sees the

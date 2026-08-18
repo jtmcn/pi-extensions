@@ -32,6 +32,7 @@
  *   ui.ts          notifications, reports, and the status segment
  *   lease.ts       the lease decision table, and the launcher's identity
  *   take-lease.ts  the lease handshake: acquiring, retargeting, prompting
+ *   transition.ts  moving focus, and the lease with it
  *   jimothy.ts     jimothy's worktree model: registry, deps, repo info
  *   focus.ts       rewriting a tool call's paths into the focused worktree
  *   panel.ts       the dashboard's location panel
@@ -41,7 +42,7 @@
  * *current* session, which is why they receive getters rather than values.
  */
 
-import { stat } from "node:fs/promises";
+import { realpath, stat } from "node:fs/promises";
 import { basename } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { aheadBehind, countDirty, getRepoInfo, type RepoInfo } from "../lib/git.ts";
@@ -62,6 +63,7 @@ import {
 import { createSession, FOCUS_ENTRY_TYPE, type WorktreeSession } from "./session.ts";
 import { type LeaseEnv, takeLeaseForSession } from "./take-lease.ts";
 import { createWorktreeTool } from "./tool.ts";
+import { moveFocus } from "./transition.ts";
 import { createUi } from "./ui.ts";
 
 const STATUS_KEY = "worktree";
@@ -131,6 +133,19 @@ export default function (pi: ExtensionAPI) {
 		reporter = nextReporter;
 		return next;
 	};
+
+	/**
+	 * What `take-lease.ts` needs from this closure.
+	 *
+	 * Built per call rather than once, because `launcher` is captured at
+	 * `session_start` and `session` changes under it: a value built at
+	 * registration time would answer for whichever session happened to be first.
+	 */
+	const leaseEnv = (): LeaseEnv => ({
+		launcher,
+		say,
+		current: (candidate) => session === candidate,
+	});
 
 	/**
 	 * A reporter for this session, or undefined.
@@ -267,12 +282,7 @@ export default function (pi: ExtensionAPI) {
 		// on the way out is work nobody asked for on a context that is going away —
 		// the shutdown spike showed anything queued after that call may not run at
 		// all, so a session that carries on is racing its own exit.
-		const leaseEnv: LeaseEnv = {
-			launcher,
-			say,
-			current: (candidate) => session === candidate,
-		};
-		if (!(await takeLeaseForSession(leaseEnv, active, ctx))) return;
+		if (!(await takeLeaseForSession(leaseEnv(), active, ctx))) return;
 
 		active.paint(ctx);
 		active.prMonitor.refresh();
@@ -351,6 +361,17 @@ export default function (pi: ExtensionAPI) {
 		// A session that has no model cannot release anything, so the question is asked
 		// once rather than per lease.
 		if (model) {
+			// The deferred queue first, and regardless of provenance: a transition has
+			// already decided these worktrees are no longer this session's to hold, and
+			// `agent_settled` is the only other thing that drains them. `/reload` and
+			// `/fork` end a session without ending the process, so one left queued here
+			// would stay held by a *live* pid for the rest of that process's life —
+			// recoverable only with `jimothy wt release --force`.
+			for (const lease of session?.takeDeferredReleases() ?? []) {
+				await model.registry.releaseLease(lease.name, lease.runId).catch((error: Error) => {
+					say(ctx, `could not release the worktree lease: ${error.message}`, "warning");
+				});
+			}
 			for (const lease of session?.leases ?? []) {
 				if (lease.provenance !== "ours") continue;
 				// Reported, never fatal: pi is on its way out, and a lock we could not take
@@ -382,6 +403,30 @@ export default function (pi: ExtensionAPI) {
 			t.unref();
 		});
 		await Promise.race([(retiring?.clear() ?? Promise.resolve()).catch(() => {}), clearDeadline]);
+	});
+
+	/**
+	 * Give back the worktrees this session has focused away from.
+	 *
+	 * A transition drops the origin's lease the moment focus moves but defers the
+	 * release to here, because focus is applied at `tool_call` time: a call already
+	 * in flight is still writing into that worktree, and releasing it there would
+	 * invite a second agent into a directory being written.
+	 */
+	pi.on("agent_settled", async (_event, ctx) => {
+		const active = session;
+		const model = active?.model;
+		if (!active || !model) return;
+		for (const lease of active.takeDeferredReleases()) {
+			await model.registry.releaseLease(lease.name, lease.runId).catch((error: Error) => {
+				// Reported only while this is still the live session: a replaced one's
+				// `ctx` is stale, and touching it throws out of the handler. The release
+				// itself is attempted either way — it is runId-guarded, so a late one
+				// cannot unlock a worktree someone else has taken.
+				if (session !== active) return;
+				say(ctx, `could not release worktree "${lease.name}": ${error.message}`, "warning");
+			});
+		}
 	});
 
 	// Reports stay up until the user does something else.
@@ -433,6 +478,37 @@ export default function (pi: ExtensionAPI) {
 		session?.setFocus(ctx, target, announce);
 	};
 
+	/**
+	 * Move focus, and the worktree lease with it.
+	 *
+	 * Bound to the live session for the same reason `setFocus` is; the rules it
+	 * applies are `transition.ts`'s, and this supplies only the environment they
+	 * need from this closure.
+	 */
+	const moveFocusHere = async (
+		ctx: ExtensionContext,
+		next: Parameters<WorktreeSession["setFocus"]>[1],
+		opts?: { announce?: boolean },
+	): Promise<boolean> => {
+		const active = session;
+		if (!active) return false;
+		// No model is no registry, and focus has never needed one: it is a rewrite of
+		// pi's own tool calls. A session that could not open jimothy still focuses,
+		// it just cannot lease what it focuses.
+		if (!active.model) {
+			active.setFocus(ctx, next, opts?.announce);
+			return true;
+		}
+		// Realpath'd because records store resolved paths and `home` is compared
+		// against them: an unresolved one would look like a third worktree, so
+		// clearing focus would "move" to a path nothing manages. A path that cannot
+		// be resolved is used as it stands rather than failing the move.
+		const root = active.repo?.worktreeRoot ?? ctx.cwd;
+		const home = await realpath(root).catch(() => root);
+		if (session !== active) return false;
+		return await moveFocus({ lease: leaseEnv(), model: active.model, home }, active, ctx, next, opts);
+	};
+
 	const commands = createCommands({
 		runner: pi,
 		ui,
@@ -441,6 +517,7 @@ export default function (pi: ExtensionAPI) {
 		getConfigSources: () => session?.configSources ?? [],
 		getFocus: () => session?.focus,
 		setFocus,
+		moveFocus: moveFocusHere,
 	});
 
 	pi.registerCommand("worktree", {

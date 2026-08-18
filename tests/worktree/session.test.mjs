@@ -182,14 +182,14 @@ function setup({ noRepo = false, hasUI = true, exec } = {}) {
 	const h = setup();
 	ok("leases: a new session holds none", h.session.leases.length === 0);
 
-	h.session.addLease({ name: "alpha", runId: "run-1", provenance: "ours" });
-	h.session.addLease({ name: "beta", runId: "run-1", provenance: "delegated" });
+	h.session.addLease({ name: "alpha", path: "/wt/alpha", runId: "run-1", provenance: "ours" });
+	h.session.addLease({ name: "beta", path: "/wt/beta", runId: "run-1", provenance: "delegated" });
 	ok("leases: each worktree is recorded", h.session.leases.map((l) => l.name).join(",") === "alpha,beta", JSON.stringify(h.session.leases));
 
 	// A retarget can re-decide against the current owner and hold the same
 	// worktree a second time; releasing it twice at shutdown would drop a lease
 	// somebody else had taken in between.
-	h.session.addLease({ name: "alpha", runId: "run-2", provenance: "delegated" });
+	h.session.addLease({ name: "alpha", path: "/wt/alpha", runId: "run-2", provenance: "delegated" });
 	ok("leases: the same worktree is replaced, not appended", h.session.leases.length === 2, JSON.stringify(h.session.leases));
 	ok(
 		"leases: and the replacement is what is held",
@@ -200,6 +200,40 @@ function setup({ noRepo = false, hasUI = true, exec } = {}) {
 	// Not persisted: a lease is a fact about a live process, and a restored one
 	// would be a lie.
 	ok("leases: nothing is written to the transcript", h.entries.length === 0, JSON.stringify(h.entries));
+}
+
+// ===================================================== leases handed back
+
+{
+	// A focus transition drops the origin's lease by path — what it knows is where
+	// the agent was writing — and gets it back so it can decide when to release it.
+	const h = setup();
+	h.session.addLease({ name: "alpha", path: "/wt/alpha", runId: "run-1", provenance: "ours" });
+	h.session.addLease({ name: "beta", path: "/wt/beta", runId: "run-1", provenance: "delegated" });
+
+	ok("dropLease: a worktree nobody holds drops nothing", h.session.dropLease("/wt/gamma") === undefined);
+	ok("dropLease: the lease is returned", h.session.dropLease("/wt/alpha")?.name === "alpha");
+	ok("dropLease: and no longer held", h.session.leases.map((l) => l.name).join(",") === "beta", JSON.stringify(h.session.leases));
+	ok("dropLease: dropping it twice is not dropping beta", h.session.dropLease("/wt/alpha") === undefined);
+}
+
+{
+	// The queue `agent_settled` drains: a release that cannot happen yet, because a
+	// tool call already in flight is still writing into that worktree.
+	const h = setup();
+	ok("deferRelease: a new session has nothing queued", h.session.takeDeferredReleases().length === 0);
+
+	h.session.deferRelease({ name: "alpha", path: "/wt/alpha", runId: "run-1", provenance: "ours" });
+	h.session.deferRelease({ name: "beta", path: "/wt/beta", runId: "run-1", provenance: "delegated" });
+	const drained = h.session.takeDeferredReleases();
+	ok("deferRelease: everything queued comes back, in order", drained.map((l) => l.name).join(",") === "alpha,beta", JSON.stringify(drained));
+	ok("deferRelease: draining empties the queue, so nothing is released twice", h.session.takeDeferredReleases().length === 0);
+
+	// Inert after dispose, like paint(): a replaced session will never drain this,
+	// so a lease parked on it would be one nothing ever releases.
+	h.session.dispose();
+	h.session.deferRelease({ name: "alpha", path: "/wt/alpha", runId: "run-1", provenance: "ours" });
+	ok("deferRelease: a disposed session queues nothing", h.session.takeDeferredReleases().length === 0);
 }
 
 done();

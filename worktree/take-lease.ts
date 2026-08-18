@@ -52,6 +52,39 @@ const held = (decision: { lease: WorktreeLease; ageMs: number }) =>
 	describeLease({ state: "held", lease: decision.lease, ageMs: decision.ageMs });
 
 /**
+ * The worktree a decision is being made about, and who is asking.
+ *
+ * One object rather than three parameters because the three travel together
+ * through every re-decision: a bounded retry has to reconsider *this* worktree,
+ * and a version of that recursion which went back to "whatever the session's
+ * target is" would, on a focus transition, re-decide the wrong directory.
+ */
+interface Target {
+	/**
+	 * Realpath of the worktree. Records store resolved paths, and an unresolved
+	 * one silently matches nothing — a session in a symlinked worktree would
+	 * decide it is unmanaged and take no lease at all.
+	 */
+	path: string;
+	/** The launcher's run id, when this is a worktree jimothy may have leased for us. */
+	launcherRunId: string | undefined;
+	/**
+	 * What a live stranger holding this worktree means for the caller.
+	 *
+	 * `session-start` has nowhere else to go: declining to displace the holder
+	 * ends the session, and a headless run carries on unleased because killing a
+	 * scripted run is worse than the warning.
+	 *
+	 * `transition` has somewhere — exactly where it already is. Either answer
+	 * simply refuses the move, which is the spec's rule for focus (§"Focus moves
+	 * the lease": "the transition is refused (or prompts, with UI) and focus does
+	 * not move"). Quitting pi because the user declined to take over the worktree
+	 * they were merely trying to look at would be absurd.
+	 */
+	entry: "session-start" | "transition";
+}
+
+/**
  * Carry out a decision, and record what we ended up holding.
  *
  * Returns whether the session should carry on starting: false when the user
@@ -70,13 +103,22 @@ const applyDecision = async (
 	active: WorktreeSession,
 	ctx: ExtensionContext,
 	model: Model,
+	target: Target,
 	record: WorktreeRecord | undefined,
 	decision: LeaseDecision,
 	retries: { retarget: boolean; takeover: boolean },
 ): Promise<boolean> => {
+	// Unmanaged is not a failure, on either entry point: focusing a worktree
+	// jimothy does not manage has always worked, and refusing it here would make
+	// `/worktree adopt` a precondition for a command that never needed one.
 	if (!record || decision.kind === "unmanaged") return true;
 	const hold = (runId: string) =>
-		active.addLease({ name: record.name, runId, provenance: leaseProvenance(runId, env.launcher?.runId) });
+		active.addLease({
+			name: record.name,
+			path: record.path,
+			runId,
+			provenance: leaseProvenance(runId, env.launcher?.runId),
+		});
 
 	switch (decision.kind) {
 		case "acquire": {
@@ -108,7 +150,7 @@ const applyDecision = async (
 			// failure is left unleased and reported by name. Exercised only by a
 			// real race between two processes, not by a test — see the report.
 			if (moved) hold(decision.runId);
-			else if (retries.retarget) return await takeLease(env, active, ctx, { ...retries, retarget: false });
+			else if (retries.retarget) return await decideFor(env, active, ctx, model, target, { ...retries, retarget: false });
 			else env.say(ctx, `worktree "${record.name}" lease changed hands again; leaving it unleased`, "warning");
 			return true;
 		}
@@ -124,12 +166,19 @@ const applyDecision = async (
 			// classifies it as delegated below. Task 7 exercises this end to end.
 			hold(decision.runId);
 			return true;
-		case "warn":
+		case "warn": {
 			// A headless run is bounded and usually read-only; a prompt is
 			// impossible and killing a scripted run is worse than the warning. This
 			// is also the row every pi-inside-a-pi lands on.
-			env.say(ctx, `worktree "${record.name}" is ${held(decision)}; continuing without a lease`, "warning");
-			return true;
+			//
+			// A transition has the option a session start does not: it can decline to
+			// move. Nothing is lost by staying, and moving would put the agent's writes
+			// in a worktree another live process is holding.
+			const atStart = target.entry === "session-start";
+			const consequence = atStart ? "continuing without a lease" : "focus not moved";
+			env.say(ctx, `worktree "${record.name}" is ${held(decision)}; ${consequence}`, "warning");
+			return atStart;
+		}
 		case "prompt": {
 			const choice = await ctx.ui.select(`Worktree "${record.name}" is ${held(decision)}`, [
 				"Quit",
@@ -147,7 +196,10 @@ const applyDecision = async (
 			// so nothing after this call is guaranteed to run.
 			if (choice !== "Take over") {
 				env.say(ctx, `worktree "${record.name}" is held by another session`, "warning");
-				ctx.shutdown();
+				// See `Target.entry`: a session that cannot have the worktree it is about
+				// to write to has nowhere to go; a transition that cannot have the one it
+				// was moving to stays where it is.
+				if (target.entry === "session-start") ctx.shutdown();
 				return false;
 			}
 			// Consent was given to displace the run the prompt *named*, and nobody
@@ -169,7 +221,7 @@ const applyDecision = async (
 				// naming the new holder, acquires if it is now free, or warns. Bounded
 				// exactly as the retarget row is: once, so a worktree changing hands
 				// under every prompt cannot loop the session.
-				if (retries.takeover) return await takeLease(env, active, ctx, { ...retries, takeover: false });
+				if (retries.takeover) return await decideFor(env, active, ctx, model, target, { ...retries, takeover: false });
 				env.say(ctx, `worktree "${record.name}" changed hands again; leaving it unleased`, "warning");
 				return true;
 			}
@@ -181,9 +233,41 @@ const applyDecision = async (
 			if (displaced) {
 				env.say(ctx, `took over "${record.name}" from run ${displaced.runId} (pid ${displaced.pid})`, "warning");
 			}
-			return await applyDecision(env, active, ctx, model, record, { kind: "acquire" }, retries);
+			return await applyDecision(env, active, ctx, model, target, record, { kind: "acquire" }, retries);
 		}
 	}
+};
+
+/**
+ * Decide what to do about one worktree, and do it.
+ *
+ * The shared half of both entry points, and the only place a lease situation is
+ * read out of the registry: `session_start` adds the launcher's retarget before
+ * it, and a transition adds nothing at all.
+ *
+ * The snapshot, not `list()`: this runs in every pi session that opens a
+ * repository, and the reconciling read would take the registry's lock and
+ * rewrite `registry.json` for all of them.
+ */
+const decideFor = async (
+	env: LeaseEnv,
+	active: WorktreeSession,
+	ctx: ExtensionContext,
+	model: Model,
+	target: Target,
+	retries: { retarget: boolean; takeover: boolean },
+): Promise<boolean> => {
+	const record = (await model.registry.snapshot()).managed.find((entry) => entry.path === target.path);
+	if (!env.current(active)) return false;
+	const decision = decideLease({
+		record,
+		state: record ? checkLease(record, model.deps.isPidAlive, model.deps.now()) : { state: "free" },
+		launcherRunId: target.launcherRunId,
+		pid: process.pid,
+		ppid: process.ppid,
+		hasUI: ctx.hasUI,
+	});
+	return await applyDecision(env, active, ctx, model, target, record, decision, retries);
 };
 
 /**
@@ -228,11 +312,11 @@ const retargetLaunched = async (env: LeaseEnv, active: WorktreeSession, model: M
 	//
 	// The same short-circuit means that after a session replacement the delegated
 	// lease is *not* re-recorded on the new session's `leases`: the decision is
-	// `adopt`, and this returns before `addLease`. Harmless today — a delegated
-	// lease is never released by this extension, so a list that omits it costs
-	// nothing — but phase 4's focus transition is told to hand back what the
-	// session holds, starting from that list, and it will have to look at the
-	// registry rather than trust it.
+	// `adopt`, and this returns before `addLease`. Harmless, and the focus
+	// transition does not change that: it releases the worktree focus *leaves*,
+	// and a worktree this session never focused onto is one it never wrote in. One
+	// it does focus onto is leased through `takeLeaseOn` on the way in, so it is on
+	// the list by the time focus leaves it again.
 	if (decision.kind !== "retarget") return;
 	const moved = await model.registry.retargetLease(record.name, decision.runId, {
 		fromPid: decision.fromPid,
@@ -254,6 +338,7 @@ const retargetLaunched = async (env: LeaseEnv, active: WorktreeSession, model: M
 	if (!moved) return;
 	active.addLease({
 		name: record.name,
+		path: record.path,
 		runId: decision.runId,
 		provenance: leaseProvenance(decision.runId, env.launcher?.runId),
 	});
@@ -267,10 +352,6 @@ const retargetLaunched = async (env: LeaseEnv, active: WorktreeSession, model: M
  * is writing to. It is realpath'd because records store resolved paths, and an
  * unresolved one silently matches nothing: a session in a symlinked worktree
  * would decide it is unmanaged and take no lease at all.
- *
- * The snapshot, not `list()`: this runs in every pi session that opens a
- * repository, and the reconciling read would take the registry's lock and
- * rewrite `registry.json` for all of them.
  *
  * Everything here is reported and nothing is fatal: pi is already running.
  * Returns whether the session should carry on starting — false when the user
@@ -286,7 +367,7 @@ const takeLease = async (
 	const model = active.model;
 	if (!model) return true;
 	try {
-		const target = await realpath(active.focus?.path ?? ctx.cwd);
+		const path = await realpath(active.focus?.path ?? ctx.cwd);
 		// A replacement here is not reachable from a test: `realpath` is not the
 		// select seam the rest of this handshake is exercised through, and nothing
 		// before it can prompt. Kept for the same reason the checks below are —
@@ -317,21 +398,18 @@ const takeLease = async (
 			// `retargetLaunched` never prompts, so nothing inside it can be the point a
 			// session is replaced at in a test; this check exists for the same reason
 			// its own internal ones do — not reachable, still required.
-			if (launched && launched !== target) await retargetLaunched(env, active, model, launched);
+			if (launched && launched !== path) await retargetLaunched(env, active, model, launched);
 			if (!env.current(active)) return false;
 		}
 
-		const record = (await model.registry.snapshot()).managed.find((entry) => entry.path === target);
-		if (!env.current(active)) return false;
-		const decision = decideLease({
-			record,
-			state: record ? checkLease(record, model.deps.isPidAlive, model.deps.now()) : { state: "free" },
-			launcherRunId: env.launcher?.runId,
-			pid: process.pid,
-			ppid: process.ppid,
-			hasUI: ctx.hasUI,
-		});
-		return await applyDecision(env, active, ctx, model, record, decision, retries);
+		return await decideFor(
+			env,
+			active,
+			ctx,
+			model,
+			{ path, launcherRunId: env.launcher?.runId, entry: "session-start" },
+			retries,
+		);
 	} catch (error) {
 		// Lock contention and a corrupt registry both arrive here as a UserError,
 		// and a session never dies of either.
@@ -354,4 +432,51 @@ export async function takeLeaseForSession(
 	ctx: ExtensionContext,
 ): Promise<boolean> {
 	return await takeLease(env, active, ctx);
+}
+
+/**
+ * Take the lease on one worktree, for a caller that already knows which.
+ *
+ * The session-start entry point differs only in what it does *before* this:
+ * reading the launcher's environment and retargeting its worktree. A transition
+ * has no launcher rows — nothing about moving focus makes this process the
+ * launcher's agent — so it decides from the registry alone.
+ *
+ * Returns whether the worktree is ours to write in: acquired, taken over,
+ * already held by us, or unmanaged and needing no lease at all. False is a
+ * refusal — a live stranger the user would not displace, a registry that could
+ * not be read, or a session replaced while this was waiting — and the caller
+ * must not move focus there.
+ */
+export async function takeLeaseOn(
+	env: LeaseEnv,
+	active: WorktreeSession,
+	ctx: ExtensionContext,
+	model: Model,
+	path: string,
+): Promise<boolean> {
+	try {
+		const target = await realpath(path);
+		if (!env.current(active)) return false;
+		return await decideFor(
+			env,
+			active,
+			ctx,
+			model,
+			// No launcher run id: being launched by jimothy says something about the
+			// worktree it launched us into, and nothing whatever about one the agent
+			// decides to move to later.
+			{ path: target, launcherRunId: undefined, entry: "transition" },
+			{ retarget: true, takeover: true },
+		);
+	} catch (error) {
+		// Lock contention, a corrupt registry, a directory that cannot be resolved.
+		// Unlike `session_start`, which carries on unleased because pi is already
+		// running, a transition that cannot even read the lease does not happen:
+		// there is nothing to gain by moving the agent's writes into a worktree whose
+		// owner we failed to look up.
+		if (!env.current(active)) return false;
+		env.say(ctx, `worktree lease unavailable: ${(error as Error).message}`, "warning");
+		return false;
+	}
 }

@@ -140,6 +140,14 @@ async function setup({
 			focus = target;
 			focusCalls.push(target);
 		},
+		// The transition itself is index.ts's wiring and is tested against the real
+		// registry in transition.test.mjs; what this file cares about is that every
+		// door goes through it, so it records like setFocus and always succeeds.
+		moveFocus: async (_ctx, target) => {
+			focus = target;
+			focusCalls.push(target);
+			return true;
+		},
 	});
 
 	const ctx = {
@@ -916,6 +924,7 @@ const userEntry = (content) => ({ type: "message", message: { role: "user", cont
 		getConfigSources: () => [],
 		getFocus: () => undefined,
 		setFocus: () => {},
+		moveFocus: async () => true,
 	});
 
 	await commands.refreshCached();
