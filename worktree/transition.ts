@@ -92,6 +92,34 @@ const releaseOrigin = async (
 };
 
 /**
+ * Give back a release this transition cancelled and then could not use.
+ *
+ * While the session is still current this is the ordinary give-back: back
+ * through `releaseOrigin`, which defers it again while a tool call may still be
+ * writing there. A session replaced or shut down during the acquisition is the
+ * case this exists for, and it cannot be handed back at all — after disposal
+ * `deferRelease` is inert, and `session_shutdown`'s drain has already run (over
+ * a queue this entry was cancelled out of), so the entry would be a lease
+ * nothing ever releases: the registry holding the worktree under this live pid
+ * and a run id no session answers for, recorded on no session's lease list. So
+ * it is released outright instead, and swallowed rather than reported, exactly
+ * as an acquire abandoned mid-flight is (`take-lease.ts`, the acquire row): the
+ * context is stale from the moment `current` went false.
+ */
+const releaseCancelled = async (
+	env: TransitionEnv,
+	active: WorktreeSession,
+	ctx: ExtensionContext,
+	lease: HeldLease,
+): Promise<void> => {
+	if (env.lease.current(active)) {
+		await releaseOrigin(env, active, ctx, lease);
+		return;
+	}
+	await env.model.registry.releaseLease(lease.name, lease.runId).catch(() => {});
+};
+
+/**
  * Move focus, carrying the lease with it.
  *
  * Returns whether focus moved. `false` means the destination could not be
@@ -163,16 +191,19 @@ export async function moveFocus(
 	// Destination first, always. If it cannot be held, focus does not move: the
 	// alternative is an agent writing into a worktree it was refused.
 	if (!(await takeLeaseOn(env.lease, active, ctx, env.model, to))) {
-		// Focus did not move, so a release cancelled above is still owed — back through
-		// the same door, which defers it again while a tool call may still be writing
-		// there. (A session replaced during the refusal loses it to its own disposal,
-		// which is the window `releaseOrigin` has always had for the origin.)
-		if (queued) await releaseOrigin(env, active, ctx, queued);
+		// Focus did not move, so a release cancelled above is still owed — through the
+		// same door while this session is still current, released outright when it is
+		// not, because the queue is inert by then. See `releaseCancelled`.
+		if (queued) await releaseCancelled(env, active, ctx, queued);
 		return false;
 	}
 	// A session replaced while the destination was being acquired has no focus
-	// worth setting and no lease list worth editing.
-	if (!env.lease.current(active)) return false;
+	// worth setting and no lease list worth editing — but a release cancelled on the
+	// way in is still owed, and the queue that would have carried it is inert.
+	if (!env.lease.current(active)) {
+		if (queued) await releaseCancelled(env, active, ctx, queued);
+		return false;
+	}
 
 	active.setFocus(ctx, next, opts.announce);
 

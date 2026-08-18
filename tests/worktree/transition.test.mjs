@@ -99,6 +99,81 @@ function lastFocus(h) {
 	return entries.at(-1)?.data?.path;
 }
 
+/**
+ * A real session over a real registry, whose *replacement* a test can trigger
+ * at a chosen moment.
+ *
+ * One level below the pi harness, for the reason the drain block below is: what
+ * is under test is an interleaving inside `takeLeaseOn`, and the fake pi has no
+ * async seam in that window to hang the replacement on (the only scriptable one
+ * is `ctx.ui.select`, which these rows never reach). Everything that matters is
+ * real — the session, its deferred queue, jimothy's registry and the repo — and
+ * only the schedule is controlled.
+ *
+ * Never idle: a tool call is in flight throughout, which is what defers a
+ * release rather than performing it, and so creates the queue entry these blocks
+ * are about.
+ */
+async function replaceableRig(runId) {
+	const { dir, model, alpha, beta } = await makeTwoManaged();
+	const pi = {
+		exec: async () => ({ stdout: "", stderr: "", code: 1, killed: false }),
+		appendEntry: () => {},
+		sendMessage: () => {},
+	};
+	const ui = { say: () => {}, report: () => {}, clearReport: () => {}, clearAll: () => {}, setStatus: () => {} };
+	const ctx = {
+		cwd: alpha.path,
+		hasUI: false,
+		mode: "interactive",
+		isIdle: () => false,
+		sessionManager: { getSessionId: () => runId },
+	};
+	const session = createSession({
+		pi,
+		ui,
+		ctx,
+		repo: { projectRoot: dir, worktreeRoot: alpha.path, branch: "jimothy/alpha", bare: false },
+		model,
+		abort: new AbortController(),
+	});
+	const state = { replaced: false };
+	const env = {
+		lease: {
+			launcher: undefined,
+			say: () => {},
+			// The question `index.ts` answers: is this still the extension's session?
+			current: () => !state.replaced,
+		},
+		model,
+		home: alpha.path,
+	};
+	// The session stops being the extension's, and goes inert with it. The
+	// synchronous half of a replacement, so a test can put it at an exact point in a
+	// transition rather than racing it against one.
+	const retire = () => {
+		state.replaced = true;
+		session.dispose();
+	};
+	// Everything `session_shutdown` does, in its order: drain the queue, release what
+	// the session still holds, then retire it. `/reload` and `/fork` take this path
+	// without ending the process, which is why a lease left behind here is held by a
+	// *live* pid for the rest of that process's life.
+	const shutdown = async () => {
+		for (const lease of session.takeDeferredReleases()) {
+			await model.registry.releaseLease(lease.name, lease.runId);
+		}
+		for (const lease of session.leases) {
+			if (lease.provenance === "ours") await model.registry.releaseLease(lease.name, lease.runId);
+		}
+		retire();
+	};
+	// Where `session_start` leaves a session standing in a worktree jimothy manages.
+	await model.registry.acquireLease("alpha", runId, process.pid, { label: "pi session" });
+	session.addLease({ name: "alpha", path: alpha.path, runId, provenance: "ours" });
+	return { dir, model, alpha, beta, session, ctx, env, retire, shutdown };
+}
+
 // ===================================================== acquire, then release on settle
 
 {
@@ -510,6 +585,101 @@ function lastFocus(h) {
 	);
 
 	await h.fire("session_shutdown");
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// ...and the same loan when the session is *replaced or shut down* while the
+	// destination is being acquired, which is the sibling of the abandoned acquire in
+	// `take-lease.test.mjs`. The entry is out of the queue, `session_shutdown`'s drain
+	// has already run over a queue that no longer names it, and after disposal
+	// `deferRelease` is inert — so handing it back parks it nowhere, and the registry
+	// goes on holding the worktree under this live pid, for a session that no longer
+	// exists, on no session's lease list.
+	//
+	// The replacement is forced where it really happens: inside `takeLeaseOn`'s read,
+	// by wrapping `snapshot()`, so the transition is genuinely mid-flight when the
+	// session dies rather than being told about it afterwards.
+	const { dir, model, alpha, beta, session, ctx, env, shutdown } = await replaceableRig("doomed-session");
+
+	await moveFocus(env, session, ctx, { path: beta.path, branch: beta.branch });
+	ok("the origin is queued for release, not released", (await ownerOf(model, "alpha"))?.pid === process.pid);
+
+	const read = model.registry.snapshot.bind(model.registry);
+	let shutDown = false;
+	model.registry.snapshot = async (...args) => {
+		const result = await read(...args);
+		if (!shutDown) {
+			shutDown = true;
+			await shutdown();
+		}
+		return result;
+	};
+	let moved;
+	try {
+		moved = await moveFocus(env, session, ctx, undefined);
+	} finally {
+		model.registry.snapshot = read;
+	}
+
+	ok("the session was replaced inside the transition", shutDown);
+	ok("which reports no move", moved === false);
+	ok(
+		"and the release it cancelled is not lost to a queue nothing will drain",
+		(await ownerOf(model, "alpha")) === undefined,
+		JSON.stringify(await ownerOf(model, "alpha")),
+	);
+	ok("nor parked on the dead session's queue", session.takeDeferredReleases().length === 0);
+	ok("and the worktree focus was on is released by the shutdown", (await ownerOf(model, "beta")) === undefined);
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// The other side of the same coin: the destination *was* acquired, and the session
+	// died between that answer and the transition's own staleness check. The lease is
+	// recorded on a disposed session's list — which nothing reads — so the cancelled
+	// entry has to be released here too, not deferred.
+	//
+	// The replacement lands one seam later than the block above: `isPidAlive` is
+	// consulted while the decision is being classified, i.e. after `takeLeaseOn`'s
+	// last `current` check, so the acquisition succeeds and `moveFocus` is the first
+	// thing to notice the session is gone.
+	const { dir, model, alpha, beta, session, ctx, env, retire } = await replaceableRig("outlived-session");
+
+	await moveFocus(env, session, ctx, { path: beta.path, branch: beta.branch });
+	ok("the origin is queued for release again", (await ownerOf(model, "alpha"))?.pid === process.pid);
+
+	const alive = model.deps.isPidAlive;
+	let armed = false;
+	let retired = false;
+	// Synchronous, because `checkLease` is: a replacement started here and awaited
+	// later could resolve after `moveFocus` has already read `current`, which would
+	// make this block race rather than test.
+	model.deps.isPidAlive = (pid) => {
+		if (armed && !retired) {
+			retired = true;
+			retire();
+		}
+		return alive(pid);
+	};
+	armed = true;
+	let moved;
+	try {
+		moved = await moveFocus(env, session, ctx, undefined);
+	} finally {
+		model.deps.isPidAlive = alive;
+	}
+
+	ok("the session was replaced after the destination was acquired", retired);
+	ok("so focus does not move", moved === false);
+	ok(
+		"and the cancelled release still happens",
+		(await ownerOf(model, "alpha")) === undefined,
+		JSON.stringify(await ownerOf(model, "alpha")),
+	);
+	ok("with nothing left queued", session.takeDeferredReleases().length === 0);
+
 	await rm(dir, { recursive: true, force: true });
 }
 
