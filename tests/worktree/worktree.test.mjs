@@ -3,15 +3,19 @@
  *
  *   cd tests && npm install && node worktree/worktree.test.mjs
  *
- * Covers layout detection (plain / bare), porcelain parsing, path slugging,
- * focus-mode rewriting, argument parsing / worktree matching, create/remove/
- * prune, and config precedence.
+ * Covers layout detection (plain / bare), porcelain parsing, slugging,
+ * focus-mode rewriting, argument parsing / worktree matching, prune, and config
+ * precedence.
+ *
+ * Creating and removing worktrees is *not* here any more: it is jimothy's, and
+ * the doors that reach it are covered in commands.test.mjs and tool.test.mjs
+ * against the real registry.
  *
  * Everything runs against throwaway repos in $TMPDIR. A small extra section
  * runs only when $PI_TEST_BARE_REPO points at a bare-layout checkout.
  */
 
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { assertions, execRunner, loadExt, pexec } from "../harness.mjs";
@@ -35,34 +39,12 @@ const exists = async (p) => {
 		return false;
 	}
 };
-const rejects = async (name, fn, pattern) => {
-	try {
-		await fn();
-		ok(name, false, "expected a rejection");
-	} catch (err) {
-		ok(name, pattern.test(err.message), err.message);
-	}
-};
-
 // =========================================================== pure functions
 
 ok("slug: spaces and punctuation", git.slugify("My Feature!") === "my-feature", git.slugify("My Feature!"));
 ok("slug: slashes flattened", git.slugify("joel/fix thing") === "joel-fix-thing", git.slugify("joel/fix thing"));
 ok("slug: degenerate input", git.slugify("///") === "worktree", git.slugify("///"));
 ok("slug: length capped", git.slugify("a".repeat(200)).length === 60);
-
-const base = { ...config.DEFAULT_CONFIG };
-ok(
-	"path: default template",
-	config.worktreePath(base, "/proj", "feat") === "/proj/.claude/worktrees/feat",
-	config.worktreePath(base, "/proj", "feat"),
-);
-ok(
-	"path: {name} placeholder",
-	config.worktreePath({ ...base, path: "../wt-{name}" }, "/proj/x", "feat") === "/proj/wt-feat",
-	config.worktreePath({ ...base, path: "../wt-{name}" }, "/proj/x", "feat"),
-);
-ok("path: absolute config", config.worktreePath({ ...base, path: "/tmp/wts" }, "/proj", "feat") === "/tmp/wts/feat");
 
 // ============================================================= focus mode
 
@@ -225,184 +207,20 @@ ok("plain: branch", plain.branch === "main", plain.branch);
 ok("plain: defaultBranch", (await git.defaultBranch(runner, repo)) === "main");
 ok("plain: non-repo returns undefined", (await git.getRepoInfo(runner, tmpdir())) === undefined);
 
-const cfg = {
-	...config.DEFAULT_CONFIG,
-	branchPrefix: "joel/",
-	copyFiles: [".env"],
-	postCreate: "echo built > .built",
-};
-
-const created = await worktrees.createWorktree(runner, {
-	name: "My Feature!",
-	branch: "joel/my-feature",
-	config: cfg,
-	projectRoot: repo,
-	sourceWorktree: repo,
-});
-ok("create: slugged path", created.path === join(repo, ".claude/worktrees/my-feature"), created.path);
-ok("create: branch created", created.createdBranch === true);
-ok("create: base is default branch", created.base === "main", String(created.base));
-ok("create: gitignored file copied", created.copied.includes(".env"), JSON.stringify(created.copied));
-ok("create: copied contents match", (await readFile(join(created.path, ".env"), "utf8")) === "SECRET=1\n");
-ok("create: no warnings on the happy path", created.warnings.length === 0, JSON.stringify(created.warnings));
-ok("create: postCreate ran in worktree", created.postCreate.code === 0);
-ok("create: postCreate side effect", (await readFile(join(created.path, ".built"), "utf8")).trim() === "built");
-ok("create: tracked files checked out", (await readFile(join(created.path, "README.md"), "utf8")) === "hi\n");
+// `countDirty` and `isDirty` still have callers — the status footer, and the
+// confirmation `/worktree remove` puts in front of a dirty worktree — so they
+// keep their coverage. The worktree is made with raw git: this extension has no
+// create of its own any more, and one made through the registry needs a whole
+// model, which commands.test.mjs already builds.
+const dirtyWt = join(root, "dirty-wt");
+await pexec("git", ["worktree", "add", "-q", "-b", "joel/dirty", dirtyWt], { cwd: repo });
+await writeFile(join(dirtyWt, "dirty.txt"), "x");
+ok("dirty: counts untracked files", (await git.countDirty(runner, dirtyWt)) === 1, String(await git.countDirty(runner, dirtyWt)));
+ok("dirty: isDirty true", (await git.isDirty(runner, dirtyWt)) === true);
 ok(
-	"create: shows up in worktree list",
-	(await git.listWorktrees(runner, repo)).some((w) => w.path === created.path && w.branch === "joel/my-feature"),
+	"list: a worktree shows up with its branch",
+	(await git.listWorktrees(runner, repo)).some((w) => w.path === dirtyWt && w.branch === "joel/dirty"),
 );
-
-await rejects(
-	"create: duplicate path rejected",
-	() =>
-		worktrees.createWorktree(runner, {
-			name: "my-feature",
-			branch: "joel/other",
-			config: cfg,
-			projectRoot: repo,
-			sourceWorktree: repo,
-		}),
-	/already exists/,
-);
-await rejects(
-	"create: branch already checked out rejected",
-	() =>
-		worktrees.createWorktree(runner, {
-			name: "second",
-			branch: "joel/my-feature",
-			config: cfg,
-			projectRoot: repo,
-			sourceWorktree: repo,
-		}),
-	/already checked out/,
-);
-await rejects(
-	"create: unknown base rejected",
-	() =>
-		worktrees.createWorktree(runner, {
-			name: "third",
-			branch: "joel/third",
-			base: "does-not-exist",
-			config: cfg,
-			projectRoot: repo,
-			sourceWorktree: repo,
-		}),
-	/does not exist/,
-);
-
-await pexec("git", ["branch", "existing"], { cwd: repo });
-const reused = await worktrees.createWorktree(runner, {
-	name: "existing",
-	branch: "existing",
-	config: { ...cfg, postCreate: undefined },
-	projectRoot: repo,
-	sourceWorktree: repo,
-});
-ok("create: existing branch reused, not recreated", reused.createdBranch === false && reused.base === undefined);
-
-await writeFile(join(created.path, "dirty.txt"), "x");
-ok("dirty: counts untracked files", (await git.countDirty(runner, created.path)) === 2);
-ok("dirty: isDirty true", (await git.isDirty(runner, created.path)) === true);
-
-const entry = (await git.listWorktrees(runner, repo)).find((w) => w.path === created.path);
-await rejects(
-	"remove: dirty worktree needs force",
-	() => worktrees.removeWorktree(runner, { worktree: entry, projectRoot: repo, force: false }),
-	/contains modified|untracked/,
-);
-// A dirty worktree says nothing about whether its branch is merged: forcing the
-// worktree removal must not force the branch deletion.
-await pexec("git", ["commit", "-qm", "unmerged", "--allow-empty"], { cwd: created.path });
-await rejects(
-	"remove: unmerged branch is kept, not force-deleted",
-	() => worktrees.removeWorktree(runner, { worktree: entry, projectRoot: repo, force: true, deleteBranch: true }),
-	/not fully merged|was kept/,
-);
-ok("remove: worktree still gone after branch failure", !(await git.listWorktrees(runner, repo)).some((w) => w.path === created.path));
-ok("remove: unmerged branch survives", await git.branchExists(runner, "joel/my-feature", repo));
-await pexec("git", ["branch", "-D", "joel/my-feature"], { cwd: repo });
-
-const merged = await worktrees.createWorktree(runner, {
-	name: "mergeable",
-	branch: "joel/mergeable",
-	config: { ...cfg, postCreate: undefined },
-	projectRoot: repo,
-	sourceWorktree: repo,
-});
-const mergedEntry = (await git.listWorktrees(runner, repo)).find((w) => w.path === merged.path);
-await worktrees.removeWorktree(runner, {
-	worktree: mergedEntry,
-	projectRoot: repo,
-	force: false,
-	deleteBranch: true,
-});
-ok("remove: gone from list", !(await git.listWorktrees(runner, repo)).some((w) => w.path === merged.path));
-ok("remove: merged branch deleted", !(await git.branchExists(runner, "joel/mergeable", repo)));
-
-// A read-only subtree is what pants leaves behind: tool digests under
-// `pants.d/tmp/immutable_inputs*/` are materialized mode 555, and unlinking a
-// file needs the write bit on its *parent*, so git's recursive delete stops
-// with EACCES after having already deregistered the worktree.
-const readOnly = await worktrees.createWorktree(runner, {
-	name: "readonly",
-	branch: "joel/readonly",
-	config: { ...cfg, postCreate: undefined },
-	projectRoot: repo,
-	sourceWorktree: repo,
-});
-const digest = join(readOnly.path, "pants.d", "tmp", "immutable_inputs", "digest");
-await mkdir(join(digest, "bin"), { recursive: true });
-await writeFile(join(digest, "bin", "protoc"), "binary");
-await chmod(join(digest, "bin", "protoc"), 0o555);
-await chmod(join(digest, "bin"), 0o555);
-await chmod(digest, 0o555);
-
-const readOnlyEntry = (await git.listWorktrees(runner, repo)).find((w) => w.path === readOnly.path);
-let readOnlyError;
-try {
-	await worktrees.removeWorktree(runner, {
-		worktree: readOnlyEntry,
-		projectRoot: repo,
-		force: true,
-		deleteBranch: true,
-	});
-} catch (err) {
-	readOnlyError = err;
-}
-ok("remove: read-only subtree does not fail", !readOnlyError, readOnlyError?.message);
-ok("remove: read-only directory actually deleted", !(await exists(readOnly.path)));
-ok(
-	"remove: read-only worktree deregistered",
-	!(await git.listWorktrees(runner, repo)).some((w) => w.path === readOnly.path),
-);
-ok("remove: branch deleted after recovery", !(await git.branchExists(runner, "joel/readonly", repo)));
-// Restore write bits when the fix regressed, so the $TMPDIR cleanup below can
-// still delete the tree instead of failing with the very error under test.
-if (await exists(readOnly.path)) await pexec("chmod", ["-R", "u+w", readOnly.path]);
-
-// A refusal must never be mistaken for a partial delete: git rejects a dirty
-// worktree *before* touching anything, so recovery must not delete the files.
-const refused = await worktrees.createWorktree(runner, {
-	name: "refused",
-	branch: "joel/refused",
-	config: { ...cfg, postCreate: undefined },
-	projectRoot: repo,
-	sourceWorktree: repo,
-});
-await writeFile(join(refused.path, "precious.txt"), "do not delete");
-const refusedEntry = (await git.listWorktrees(runner, repo)).find((w) => w.path === refused.path);
-await rejects(
-	"remove: dirty refusal still rejects",
-	() => worktrees.removeWorktree(runner, { worktree: refusedEntry, projectRoot: repo, force: false }),
-	/contains modified|untracked/,
-);
-ok("remove: refusal leaves the worktree intact", await exists(join(refused.path, "precious.txt")));
-ok(
-	"remove: refusal leaves the worktree registered",
-	(await git.listWorktrees(runner, repo)).some((w) => w.path === refused.path),
-);
-await worktrees.removeWorktree(runner, { worktree: refusedEntry, projectRoot: repo, force: true });
 
 // ============================================= integration: bare layout
 
@@ -419,53 +237,69 @@ const bareRoot = await git.getRepoInfo(runner, proj);
 ok("bare: resolves from project root too", bareRoot.projectRoot === proj, bareRoot.projectRoot);
 ok("bare: project root has no worktreeRoot", bareRoot.worktreeRoot === undefined);
 
-const spike = await worktrees.createWorktree(runner, {
-	name: "spike",
-	branch: "spike",
-	config: config.DEFAULT_CONFIG,
-	projectRoot: proj,
-	sourceWorktree: join(proj, "main"),
-});
-ok("bare: new worktree lands beside .bare", spike.path === join(proj, ".claude/worktrees/spike"), spike.path);
-ok("bare: files checked out", (await readFile(join(spike.path, "README.md"), "utf8")) === "hi\n");
-
-await rm(spike.path, { recursive: true, force: true });
+// Prune is the subject; the worktree it prunes is made with raw git.
+const spike = join(proj, "spike");
+await pexec("git", ["worktree", "add", "-q", "-b", "spike", spike], { cwd: proj });
+await rm(spike, { recursive: true, force: true });
 ok("prune: prunable detected", (await git.listWorktrees(runner, proj)).some((w) => w.prunable));
 await worktrees.pruneWorktrees(runner, proj);
-ok("prune: metadata removed", !(await git.listWorktrees(runner, proj)).some((w) => w.path === spike.path));
+ok("prune: metadata removed", !(await git.listWorktrees(runner, proj)).some((w) => w.path === spike));
 
 // ==================================================== config precedence
 
 await mkdir(join(proj, ".pi"), { recursive: true });
 const writeProjectConfig = (value) => writeFile(join(proj, ".pi/worktree.json"), value);
 
-await writeProjectConfig(
-	JSON.stringify({ path: "wt/{name}", branchPrefix: "x/", copyFiles: [".env"], autoFocus: false, bogus: 1 }),
-);
+await writeProjectConfig(JSON.stringify({ autoFocus: false, remapAbsolutePaths: false, bogus: 1 }));
 const trusted = await config.loadConfig({ projectRoot: proj, projectTrusted: true });
 ok(
 	"config: project file applied",
-	trusted.config.path === "wt/{name}" && trusted.config.branchPrefix === "x/" && trusted.config.autoFocus === false,
+	trusted.config.autoFocus === false && trusted.config.remapAbsolutePaths === false,
 	JSON.stringify(trusted.config),
 );
 ok("config: unknown keys ignored silently", trusted.warnings.length === 0, JSON.stringify(trusted.warnings));
 ok("config: source recorded", trusted.sources.some((s) => s.endsWith("/.pi/worktree.json")));
 
 const untrusted = await config.loadConfig({ projectRoot: proj, projectTrusted: false });
-ok("config: untrusted project file ignored", untrusted.config.path === ".claude/worktrees", untrusted.config.path);
+ok("config: untrusted project file ignored", untrusted.config.autoFocus === true, JSON.stringify(untrusted.config));
 
 await writeProjectConfig("{ not json");
 const broken = await config.loadConfig({ projectRoot: proj, projectTrusted: true });
 ok(
 	"config: malformed JSON warns and falls back",
-	broken.warnings.length === 1 && broken.config.path === ".claude/worktrees",
+	broken.warnings.length === 1 && broken.config.autoFocus === true,
 	JSON.stringify(broken.warnings),
 );
 
-await writeProjectConfig(JSON.stringify({ path: 5, copyFiles: "nope" }));
+await writeProjectConfig(JSON.stringify({ autoFocus: 5, remapAbsolutePaths: "nope" }));
 const badTypes = await config.loadConfig({ projectRoot: proj, projectTrusted: true });
 ok("config: type errors warn per field", badTypes.warnings.length === 2, JSON.stringify(badTypes.warnings));
-ok("config: bad values do not clobber defaults", badTypes.config.path === ".claude/worktrees");
+ok("config: bad values do not clobber defaults", badTypes.config.autoFocus === true);
+
+// A key that moved is warned about, not silently ignored with the unknown ones:
+// a setting still in the file is one the user believes is in effect. The warning
+// must also not read as a straight rename, because it is not one — jimothy's
+// `copy` does not take directories, and it has no `postCreate` at all.
+await writeProjectConfig(
+	JSON.stringify({ path: "wt/{name}", branchPrefix: "x/", defaultBase: "main", copyFiles: [".env"], postCreate: "npm i" }),
+);
+const moved = await config.loadConfig({ projectRoot: proj, projectTrusted: true });
+ok("config: a removed key is not read", moved.config.branchPrefix === undefined, JSON.stringify(moved.config));
+ok("config: every removed key warns", moved.warnings.length === 5, JSON.stringify(moved.warnings));
+const movedText = moved.warnings.join("\n");
+ok("config: the warning names jimothy's config", /jimothy\.config\.json/.test(movedText), movedText);
+ok("config: copyFiles is named", /copyFiles/.test(movedText), movedText);
+ok("config: copy is not claimed to take directories", /copies files, not directories/.test(movedText), movedText);
+ok(
+	"config: postCreate is not claimed as an upgrade",
+	/postCreate has no equivalent/.test(movedText),
+	movedText,
+);
+ok(
+	"config: a moved key does not survive as config",
+	JSON.stringify(Object.keys(moved.config).sort()) === '["autoFocus","remapAbsolutePaths"]',
+	JSON.stringify(Object.keys(moved.config)),
+);
 
 // ======================== optional: real bare-layout repo on this machine
 
@@ -494,92 +328,5 @@ if (OPTIONAL_BARE_REPO && (await exists(join(OPTIONAL_BARE_REPO, ".bare")))) {
 }
 
 await rm(root, { recursive: true, force: true });
-
-// ================================= create: tracking an existing remote branch
-
-{
-	const pair = await realpath(await mkdtemp(join(tmpdir(), "pi-worktree-track-")));
-	const upstream = join(pair, "upstream");
-	await pexec("git", ["init", "-q", "-b", "main", upstream]);
-	await pexec("git", ["config", "user.email", "test@example.com"], { cwd: upstream });
-	await pexec("git", ["config", "user.name", "Test"], { cwd: upstream });
-	await writeFile(join(upstream, "a.txt"), "hi\n");
-	await pexec("git", ["add", "-A"], { cwd: upstream });
-	await pexec("git", ["commit", "-qm", "init"], { cwd: upstream });
-	await pexec("git", ["branch", "alice/hotfix"], { cwd: upstream });
-	await pexec("git", ["branch", "shadowed"], { cwd: upstream });
-
-	const down = join(pair, "down");
-	await pexec("git", ["clone", "-q", upstream, down]);
-	await pexec("git", ["config", "user.email", "test@example.com"], { cwd: down });
-	await pexec("git", ["config", "user.name", "Test"], { cwd: down });
-	const trackCfg = { ...config.DEFAULT_CONFIG, branchPrefix: "joel/", copyFiles: [] };
-
-	const tracked = await worktrees.createWorktree(runner, {
-		name: "alice-hotfix",
-		branch: "alice/hotfix",
-		track: "origin/alice/hotfix",
-		config: trackCfg,
-		projectRoot: down,
-		sourceWorktree: down,
-	});
-	ok("track: local branch created", tracked.createdBranch === true && tracked.branch === "alice/hotfix");
-	ok("track: reported on the result", tracked.track === "origin/alice/hotfix", String(tracked.track));
-	ok("track: no base was resolved", tracked.base === undefined, String(tracked.base));
-	const upstreamRef = (await pexec("git", ["config", "branch.alice/hotfix.merge"], { cwd: down })).stdout.trim();
-	ok("track: upstream configured", upstreamRef === "refs/heads/alice/hotfix", upstreamRef);
-	ok("track: checked out at the worktree", (await pexec("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: tracked.path })).stdout.trim() === "alice/hotfix");
-
-	// A local branch that already exists must be used as it stands: it may hold
-	// commits the remote does not, and `track` must not cause a reset.
-	await pexec("git", ["branch", "shadowed", "origin/shadowed"], { cwd: down });
-	const wtForCommit = join(pair, "tmp-wt");
-	await pexec("git", ["worktree", "add", "-q", wtForCommit, "shadowed"], { cwd: down });
-	await pexec("git", ["commit", "-qm", "unpushed", "--allow-empty"], { cwd: wtForCommit });
-	const head = (await pexec("git", ["rev-parse", "shadowed"], { cwd: down })).stdout.trim();
-	await pexec("git", ["worktree", "remove", wtForCommit], { cwd: down });
-
-	const shadowed = await worktrees.createWorktree(runner, {
-		name: "shadowed",
-		branch: "shadowed",
-		track: "origin/shadowed",
-		config: trackCfg,
-		projectRoot: down,
-		sourceWorktree: down,
-	});
-	ok("track: existing local branch is reused, not recreated", shadowed.createdBranch === false);
-	ok("track: no tracking reported when the local branch won", shadowed.track === undefined, String(shadowed.track));
-	ok("track: unpushed commit survives", (await pexec("git", ["rev-parse", "shadowed"], { cwd: down })).stdout.trim() === head);
-
-	await rejects(
-		"track: base and track together are rejected",
-		() =>
-			worktrees.createWorktree(runner, {
-				name: "both",
-				branch: "both",
-				base: "main",
-				track: "origin/main",
-				config: trackCfg,
-				projectRoot: down,
-				sourceWorktree: down,
-			}),
-		/mutually exclusive/,
-	);
-	await rejects(
-		"track: unknown remote ref rejected",
-		() =>
-			worktrees.createWorktree(runner, {
-				name: "ghost",
-				branch: "ghost",
-				track: "origin/ghost",
-				config: trackCfg,
-				projectRoot: down,
-				sourceWorktree: down,
-			}),
-		/does not exist/,
-	);
-
-	await rm(pair, { recursive: true, force: true });
-}
 
 done();

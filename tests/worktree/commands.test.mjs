@@ -192,9 +192,6 @@ async function setup({
 	const said = [];
 	const reported = [];
 	const focusCalls = [];
-	// Recorded separately from `focusCalls` so a door that still moves focus
-	// without the lease is visible: `setFocus` is the one that does not carry it.
-	const setFocusCalls = [];
 	const answers = [...confirms];
 	const prompts = { confirm: [], select: [], input: [], editor: [] };
 	let focus;
@@ -270,14 +267,11 @@ async function setup({
 		getConfig: () => ({ ...DEFAULT_CONFIG, ...config }),
 		getConfigSources: () => [],
 		getFocus: () => focus,
-		setFocus: (_ctx, target) => {
-			focus = target;
-			focusCalls.push(target);
-			setFocusCalls.push(target);
-		},
 		// The transition itself is index.ts's wiring and is tested against the real
 		// registry in transition.test.mjs; what this file cares about is that every
-		// door goes through it, so it records like setFocus and always succeeds.
+		// door goes through it, so it records every move and always succeeds. There
+		// is no leaseless `setFocus` on `CommandDeps` to record against any more —
+		// the type is what stops a door regressing to one now.
 		moveFocus: async (_ctx, target) => {
 			focus = target;
 			focusCalls.push(target);
@@ -318,7 +312,6 @@ async function setup({
 		reported,
 		prompts,
 		focusCalls,
-		setFocusCalls,
 		held,
 		dropped,
 		gitCalls,
@@ -470,7 +463,6 @@ async function setup({
 	await h.commands.dispatch(info, h.ctx, "remove exp");
 
 	ok("removing the focused worktree clears focus", h.focusCalls.at(-1) === undefined && h.focusCalls.length === 1, JSON.stringify(h.focusCalls));
-	ok("through moveFocus, not setFocus", h.setFocusCalls.length === 0, JSON.stringify(h.setFocusCalls));
 
 	await rm(dir, { recursive: true, force: true });
 }
@@ -568,7 +560,6 @@ async function setup({
 		h.focusCalls.at(-1) === undefined && h.focusCalls.length === 1,
 		JSON.stringify(h.focusCalls),
 	);
-	ok("through moveFocus, not setFocus", h.setFocusCalls.length === 0, JSON.stringify(h.setFocusCalls));
 	ok(
 		"and the message says the worktree went and the branch stayed",
 		h.said.some((s) => s.message.includes('removed worktree "exp"') && s.message.includes(`branch "${records.exp.branch}" was kept`)),
@@ -1273,8 +1264,8 @@ async function recordFor(dir, name) {
 }
 
 {
-	// autoFocus goes through `moveFocus`, which carries the lease; `setFocus`
-	// would move focus into a worktree this session does not hold.
+	// autoFocus goes through `moveFocus`, which carries the lease: the session must
+	// hold the worktree it moves the agent into.
 	const { dir } = await makeRepo([]);
 	const info = await getRepoInfo(execRunner(), dir);
 	const h = await setup({ dir, config: { autoFocus: true } });
@@ -1283,7 +1274,6 @@ async function recordFor(dir, name) {
 	const record = await recordFor(dir, "spike");
 	ok("new: the new worktree is focused", h.focusCalls.at(-1)?.path === record.path, JSON.stringify(h.focusCalls));
 	ok("new: with its branch", h.focusCalls.at(-1)?.branch === "jimothy/spike", JSON.stringify(h.focusCalls));
-	ok("new: through moveFocus, not setFocus", h.setFocusCalls.length === 0, JSON.stringify(h.setFocusCalls));
 
 	const off = await setup({ dir, config: { autoFocus: false } });
 	await off.commands.dispatch(info, off.ctx, "new second");
@@ -1448,10 +1438,9 @@ async function recordFor(dir, name) {
 	ok("checkout: the branch is kept as the user named it, unprefixed", record?.branch === "joel/local-work", JSON.stringify(record));
 	ok("checkout: not jimothy's to delete", record?.branchCreated === false, JSON.stringify(record));
 	ok("checkout: jimothy's branchPrefix stripped before uniquifying", record?.name === "local-work-2", JSON.stringify(record));
+	// Through `moveFocus`, which carries the lease: the session must hold what the
+	// agent is about to write into.
 	ok("checkout: focused", t.focusCalls.at(-1)?.path === record?.path, JSON.stringify(t.focusCalls.at(-1)));
-	// Through `moveFocus`, which carries the lease; `setFocus` would leave the
-	// agent writing into a worktree this session never acquired.
-	ok("checkout: through moveFocus, not setFocus", t.setFocusCalls.length === 0, JSON.stringify(t.setFocusCalls));
 	ok("checkout: no fetch when it resolved locally", !t.gitCalls.some((c) => c.startsWith("fetch")), JSON.stringify(t.gitCalls));
 
 	await t.commands.dispatch(info, t.ctx, "checkout exp");
@@ -1693,7 +1682,6 @@ async function recordFor(dir, name) {
 		getConfig: () => DEFAULT_CONFIG,
 		getConfigSources: () => [],
 		getFocus: () => undefined,
-		setFocus: () => {},
 		moveFocus: async () => true,
 	});
 

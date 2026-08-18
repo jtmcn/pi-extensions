@@ -153,6 +153,11 @@ export default function (pi: ExtensionAPI) {
 	 * Gated on `hasUI` deliberately: a `pi -p` run borrows the user's own shell
 	 * pane for a few seconds, and the PR monitor does not poll without a footer,
 	 * so a reported branch would never refresh anyway.
+	 *
+	 * `branchPrefix` is jimothy's, which is why the caller has to open the model
+	 * before building one: with the extension's own key gone there is no second
+	 * prefix to fall back on, and a reporter given `""` would put `jimothy/foo` on
+	 * a sidebar 18 columns wide.
 	 */
 	const makeReporter = (ctx: ExtensionContext, branchPrefix: string): HerdrReporter | undefined => {
 		if (!ctx.hasUI) return undefined;
@@ -205,7 +210,6 @@ export default function (pi: ExtensionAPI) {
 			projectRoot: repo.projectRoot,
 			projectTrusted: ctx.isProjectTrusted(),
 		});
-		const nextReporter = makeReporter(ctx, loaded.config.branchPrefix);
 
 		// Owned by the session, not the call: it is handed to createSession below
 		// so dispose() can abort it, cancelling any child the model started without
@@ -219,6 +223,11 @@ export default function (pi: ExtensionAPI) {
 			// reach the registry can still focus, still monitor a PR, and still paint.
 			say(ctx, `jimothy model unavailable: ${(error as Error).message}`, "warning");
 		}
+
+		// After `openModel`, because the prefix it strips is jimothy's. No prefix when
+		// the model could not be opened: a slightly longer branch on a sidebar is not
+		// a reason to fail a session.
+		const nextReporter = makeReporter(ctx, model?.config.branchPrefix ?? "");
 
 		const active = replaceSession(
 			createSession({
@@ -469,21 +478,14 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	/**
-	 * Focus changes go through the live session.
-	 *
-	 * Registered handlers outlive any one session, so this cannot capture a
-	 * `setFocus`; a call arriving with no session is dropped rather than throwing.
-	 */
-	const setFocus = (ctx: ExtensionContext, target: Parameters<WorktreeSession["setFocus"]>[1], announce = true) => {
-		session?.setFocus(ctx, target, announce);
-	};
-
-	/**
 	 * Move focus, and the worktree lease with it.
 	 *
-	 * Bound to the live session for the same reason `setFocus` is; the rules it
-	 * applies are `transition.ts`'s, and this supplies only the environment they
-	 * need from this closure.
+	 * Bound to the live session rather than capturing one, for the reason the
+	 * getters below are: registered handlers outlive any one session, so a call
+	 * arriving with none is refused rather than throwing. The rules it applies are
+	 * `transition.ts`'s, and this supplies only the environment they need from this
+	 * closure. It is the only way focus moves from outside a session — the
+	 * session's own `setFocus` does not carry the lease.
 	 */
 	const moveFocusHere = async (
 		ctx: ExtensionContext,
@@ -517,7 +519,6 @@ export default function (pi: ExtensionAPI) {
 		getConfig: () => session?.config ?? DEFAULT_CONFIG,
 		getConfigSources: () => session?.configSources ?? [],
 		getFocus: () => session?.focus,
-		setFocus,
 		moveFocus: moveFocusHere,
 	});
 

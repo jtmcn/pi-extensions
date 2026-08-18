@@ -20,10 +20,10 @@ const extension = (await loadExt("worktree/index.ts")).default;
 
 const gitOk = { code: 0, stdout: "", stderr: "", killed: false };
 
-/** A repo with one commit on `feature/one`. */
-async function makeRepo() {
+/** A repo with one commit, on `feature/one` unless told otherwise. */
+async function makeRepo(branch = "feature/one") {
 	const dir = await realpath(await mkdtemp(join(tmpdir(), "pi-herdr-")));
-	await pexec("git", ["init", "-q", "-b", "feature/one"], { cwd: dir });
+	await pexec("git", ["init", "-q", "-b", branch], { cwd: dir });
 	await pexec("git", ["config", "user.email", "test@example.com"], { cwd: dir });
 	await pexec("git", ["config", "user.name", "Test"], { cwd: dir });
 	await writeFile(join(dir, "file.txt"), "hi\n");
@@ -98,6 +98,28 @@ const saved = { ws: process.env.HERDR_WORKSPACE_ID, pane: process.env.HERDR_PANE
 		h.herdrCalls.slice(before).some((args) => args.includes("--clear-title")),
 		JSON.stringify(h.herdrCalls.slice(before)),
 	);
+}
+
+// ========================================= the prefix stripped is jimothy's
+
+// The sidebar is 18–36 columns wide and `jimothy/` is on every branch jimothy
+// makes, so it is stripped for display. It has to come from jimothy's config:
+// this extension no longer has a `branchPrefix` of its own, and a reporter given
+// `""` would put the whole `jimothy/spike` on screen.
+{
+	process.env.HERDR_WORKSPACE_ID = "wT";
+	process.env.HERDR_PANE_ID = "wT:p1";
+	const prefixed = await makeRepo("jimothy/spike");
+	const h = harness(prefixed);
+	await h.fire("session_start");
+	const stripped = await until(() => h.herdrCalls.some((args) => args.includes("pi_branch=spike")));
+	ok("wiring: jimothy's branchPrefix is stripped for the sidebar", stripped, JSON.stringify(h.herdrCalls));
+	ok(
+		"wiring: the prefixed branch is never reported",
+		h.herdrCalls.every((args) => !args.includes("pi_branch=jimothy/spike")),
+		JSON.stringify(h.herdrCalls),
+	);
+	await rm(prefixed, { recursive: true, force: true });
 }
 
 // ================================================= not under herdr, and no UI

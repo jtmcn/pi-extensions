@@ -205,8 +205,8 @@ no confirmation prompt.
 worktree lands under jimothy's `baseDir` on `${branchPrefix}<name>` —
 `jimothy/spike` by default — and gets jimothy's `link` and `copy` entries plus a
 package install if the checkout has a lockfile. That is deliberately jimothy's
-convention and not this extension's: one model means one convention, and the
-extension's own `path` and `branchPrefix` no longer reach `new`. The install is
+convention and not this extension's: one model means one convention, which is
+why this extension no longer has a `path` or a `branchPrefix` of its own. The install is
 narrated line by line rather than reported once at the end, because it is the
 one step here that can take minutes.
 
@@ -258,9 +258,8 @@ immediately, so the worktree can start a few commits behind. A fetch that fails
 is a warning, not an error.
 
 The directory name drops the remote and jimothy's `branchPrefix` — set in
-`jimothy.config.json`, not this extension's own `branchPrefix` key documented
-below, which no longer reaches `checkout` — so with jimothy's `branchPrefix`
-set to `"joel/"`, `origin/joel/fix-parser` becomes `fix-parser` and
+`jimothy.config.json`, which is the only `branchPrefix` there is now — so with
+it set to `"joel/"`, `origin/joel/fix-parser` becomes `fix-parser` and
 `origin/alice/hotfix` becomes `alice-hotfix`. A name you pass yourself is never
 adjusted and fails instead if it is illegal or already taken.
 
@@ -339,27 +338,27 @@ between worktrees, and starting work on a branch that already exists, stay
 user decisions.
 
 `postCreate` is **not** run by the tool any more: provisioning is jimothy's,
-and jimothy has no `postCreate` equivalent (a later phase may add one). Nothing
-in this extension calls its own `createWorktree` any more — `new`, `checkout`
-and the tool all provision through jimothy now — so `postCreate` and
-`config.path` are orphaned until a later phase deletes them; `/worktree config`
-still displays them for now.
+and jimothy has no `postCreate` equivalent (a later phase may add one). This
+extension no longer has a create or remove of its own at all — `new`,
+`checkout`, `remove` and the tool all go through jimothy's registry — and the
+config keys that used to drive the old implementation are gone with it. A
+leftover one in your `worktree.json` is warned about at startup and names where
+the setting lives now.
 
 ## Layouts
 
 The project root is derived from `git rev-parse --git-common-dir`, so all three
-layouts work and new worktrees always land in the right place:
+layouts are recognised — which is what makes this extension work from a linked
+worktree or a bare checkout at all:
 
 ```
-repo/.git/              ordinary repo          -> repo/<config.path>
-repo/.git (file)        linked worktree        -> main repo root/<config.path>
-proj/.bare + proj/main  bare layout            -> proj/<config.path>
+repo/.git/              ordinary repo
+repo/.git (file)        linked worktree      -> resolved to the main repo root
+proj/.bare + proj/main  bare layout          -> resolved to proj/
 ```
 
-`config.path` no longer decides where any worktree lands — that is jimothy's
+Where a *new* worktree lands is not this extension's decision: it is jimothy's
 `baseDir`, per repository, for `new`, `checkout` and the model's tool alike.
-The key and the diagram above are what a later phase deletes; nothing in this
-extension still reads `config.path` to place a worktree.
 
 ## Configuration
 
@@ -371,39 +370,30 @@ Later files win:
 
 ```jsonc
 {
-  // Where worktrees go. Relative to the project root. "{name}" is substituted;
-  // without it the name is appended. The default matches the Claude Code
-  // convention so both agents find the same worktrees in a shared checkout.
-  "path": ".claude/worktrees",
-
-  // No longer prepended to any branch name jimothy creates — `/worktree new`,
-  // `checkout` and the model's tool all use jimothy's own `branchPrefix`
-  // instead. What is left: stripped from the branch shown in the status bar,
-  // and echoed by `/worktree config`.
-  "branchPrefix": "joel/",
-
-  // Copied from the current worktree into a new one. Useful for gitignored
-  // local config that a fresh checkout would be missing. `/worktree new`
-  // provisions through jimothy, so it uses jimothy's `link`/`copy` instead.
-  "copyFiles": [".env", ".env.local"],
-
-  // Shell command run inside a newly created worktree. Executed via `bash -lc`.
-  // Not run by `/worktree new` or the model's tool, both of which provision
-  // through jimothy, which has no equivalent step (a later phase may add one).
-  "postCreate": "npm install",
-
   // Focus a newly created worktree automatically — both `/worktree new` and the
   // model's `worktree` tool.
   "autoFocus": true,
 
   // Remap absolute paths under the session worktree while focused.
-  "remapAbsolutePaths": true,
-
-  // Start point for new branches. Defaults to origin/HEAD, then main/master.
-  // `/worktree new` reads jimothy's `defaultBase`, not this one.
-  "defaultBase": "main"
+  "remapAbsolutePaths": true
 }
 ```
+
+That is the whole file. Everything about *making* a worktree is jimothy's, in
+`jimothy.config.json` at the repository root:
+
+| was here | now |
+| --- | --- |
+| `path` | jimothy's `baseDir` |
+| `branchPrefix` | jimothy's `branchPrefix` (default `jimothy/`) |
+| `defaultBase` | jimothy's `defaultBase` |
+| `copyFiles` | jimothy's `copy` — **files only**, so a directory entry has to be listed file by file |
+| `postCreate` | **nothing.** jimothy has no equivalent, so a worktree made through this extension does not run it |
+
+Each of those keys still in a `worktree.json` produces a startup warning naming
+its replacement. The last two rows are why the warning does not claim an
+upgrade: `copyFiles` took directories and `copy` does not, and a `postCreate`
+step simply stops happening.
 
 ## PR in the status bar
 
@@ -451,8 +441,10 @@ herdr pane report-metadata $HERDR_PANE_ID --source pi --title "π - <branch>" --
 ```
 
 The value is the branch pi displays — the focused worktree's, else the
-session's — with `branchPrefix` stripped, since it is on every branch you make
-and the sidebar is 18–36 columns wide. A detached HEAD clears both rather than
+session's — with jimothy's `branchPrefix` stripped, since it is on every branch
+jimothy makes and the sidebar is 18–36 columns wide. A session whose jimothy
+model could not be opened strips nothing: a slightly longer branch on a sidebar
+is not a reason to fail a session. A detached HEAD clears both rather than
 showing a SHA. Unchanged branches cost nothing: the reporter dedupes, so the
 60s PR poll does not fork a process to repeat itself.
 
@@ -519,12 +511,12 @@ worktree/pr-monitor.ts   the PR status state machine
 worktree/commands.ts     /worktree and its completions
 worktree/tool.ts         the model-facing tool
 worktree/ui.ts           notifications, reports, status segment
-worktree/config.ts       config loading and path templating
+worktree/config.ts       config loading, and the warnings for keys that moved to jimothy
 worktree/branches.ts     branch listing, resolution and naming (pure + two git calls)
 worktree/focus.ts        tool-input rewriting (pure, heavily tested)
 worktree/select.ts       argument parsing and name matching (pure)
 worktree/suggest.ts      the transcript-derived name seed `new` offers (pure)
-worktree/worktrees.ts    prune, plus a create/remove no door calls any more (see Layouts, Tool)
+worktree/worktrees.ts    `git worktree prune` — all that is left of the old implementation
 worktree/pr.ts           PR display formatting and poll cadence (pure)
 worktree/gh.ts           the gh calls behind the PR status display
 ```

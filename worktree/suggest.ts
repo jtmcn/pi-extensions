@@ -120,43 +120,14 @@ export function randomName(random: () => number = Math.random): string {
 	return `${pick(ADJECTIVES)}-${pick(NOUNS)}`;
 }
 
-/** The conversation's name, else a random pair. */
+/**
+ * The conversation's name, else a random pair.
+ *
+ * A *seed*, not a final name: uniqueness against the worktrees that already
+ * exist is `Registry.suggestName`'s, which is the only place that can see them.
+ * This module used to suffix `-2` itself, which meant two uniqueness rules in
+ * one codebase — exactly what the jimothy integration exists to end.
+ */
 export function suggestName(texts: readonly string[], random: () => number = Math.random): string {
 	return nameFromMessages(texts) ?? randomName(random);
-}
-
-/**
- * The first of `base`, `base-2`, `base-3`, … that `taken` rejects nothing for.
- *
- * Only generated names come through here. A name the user typed must fail
- * loudly instead: silently creating `my-feature-2` because they forgot about
- * `my-feature` is worse than the error `createWorktree` already raises.
- */
-export function uniqueName(
-	base: string,
-	taken: (name: string) => boolean,
-	random: () => number = Math.random,
-): string {
-	if (!taken(base)) return base;
-	for (let suffix = 2; suffix <= 9; suffix++) {
-		// Reserve room for the suffix so it survives the cap. We cap the base to
-		// fit within (MAX_LENGTH - "-N"), ensuring the final suffixed name fits.
-		const suffixStr = String(suffix);
-		const reserved = suffixStr.length + 1; // "-N"
-		const maxBaseLength = MAX_LENGTH - reserved;
-		if (base.length > maxBaseLength) {
-			// cap() uses MAX_LENGTH, but we need maxBaseLength. Slice again after
-			// cap() to ensure the result fits, preserving the dash-boundary rule.
-			const capped = cap(base.slice(0, maxBaseLength + 1));
-			const reCapped = capped.length > maxBaseLength
-				? capped.slice(0, capped.lastIndexOf("-", maxBaseLength) || maxBaseLength).replace(/-+$/, "")
-				: capped;
-			const candidate = `${reCapped}-${suffix}`;
-			if (!taken(candidate)) return candidate;
-		} else {
-			const candidate = `${base}-${suffix}`;
-			if (!taken(candidate)) return candidate;
-		}
-	}
-	return randomName(random);
 }

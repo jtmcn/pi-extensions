@@ -1,15 +1,14 @@
 /**
  * Moving focus, and the worktree lease with it.
  *
- * Today one door goes through here: `/worktree focus`. The rest do not yet —
- * `new` and `checkout` with `autoFocus`, `remove` clearing the focus it just
- * deleted (all three in `commands.ts`), and the model-facing tool (`tool.ts`)
- * still call `setFocus` directly, so they still move the agent without moving
- * the lease. Porting them is the rest of this phase, and they are named here
- * rather than left to be discovered because the rules cannot be allowed to
- * differ per door: that is the two-models bug in miniature, and it is what this
- * whole integration exists to end. When the last of them is ported this becomes
- * what it is meant to be — the one path that moves focus.
+ * Every door goes through here: `/worktree focus`, `new` and `checkout` with
+ * `autoFocus`, `remove` clearing the focus it just deleted (all in
+ * `commands.ts`), and the model-facing tool (`tool.ts`). None of them calls the
+ * session's `setFocus` directly any more, which is the point — that one moves
+ * the agent without moving the lease, and rules that differ per door are the
+ * two-models bug in miniature. `setFocus` survives only as this file's own last
+ * step and as the restore path in `index.ts`, where there is no transition to
+ * make: nothing was focused before.
  *
  * The rules, all three of which have a failure behind them:
  *

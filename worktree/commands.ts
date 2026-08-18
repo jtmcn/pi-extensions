@@ -7,8 +7,9 @@
  * back on, so a missing argument is an error rather than a question.
  *
  * State lives in the caller: this module reads config and focus through getters
- * and changes focus through `setFocus`, so there is one owner of session state
- * rather than two copies to keep in step.
+ * and changes focus through `moveFocus`, which carries the worktree lease with
+ * it, so there is one owner of session state rather than two copies to keep in
+ * step — and one path that can move where the agent writes.
  */
 
 import { stat } from "node:fs/promises";
@@ -21,8 +22,8 @@ import {
 	resolveDefaultBranch,
 	type WorktreeRecord,
 } from "jimothy/worktrees";
-import { countDirty, getRepoInfo, type RepoInfo } from "../lib/git.ts";
-import { type WorktreeConfig, worktreePath } from "./config.ts";
+import { countDirty, getRepoInfo, type GitRunner, type RepoInfo } from "../lib/git.ts";
+import type { WorktreeConfig } from "./config.ts";
 import type { FocusTarget } from "./focus.ts";
 import type { Model } from "./jimothy.ts";
 import { describeKnown, type KnownWorktree, toKnown } from "./known.ts";
@@ -41,7 +42,7 @@ import {
 	listBranches,
 	resolveBranch,
 } from "./branches.ts";
-import { type CommandRunner, pruneWorktrees } from "./worktrees.ts";
+import { pruneWorktrees } from "./worktrees.ts";
 
 /**
  * Said when the session has no model.
@@ -114,7 +115,7 @@ const SUBCOMMANDS = [
 
 export interface CommandDeps {
 	/** Reaches git. `pi` in production. */
-	runner: CommandRunner;
+	runner: GitRunner;
 	ui: Ui;
 	/**
 	 * The current session's jimothy model, or undefined when it could not be
@@ -135,16 +136,6 @@ export interface CommandDeps {
 	/** Config files that were applied, for `/worktree config`. */
 	getConfigSources: () => string[];
 	getFocus: () => FocusTarget | undefined;
-	/**
-	 * Set focus without touching the lease.
-	 *
-	 * No door here calls it any more — `remove` was the last one, and it now clears
-	 * focus through `moveFocus` like every other path. Kept on the interface until
-	 * Task 8 removes the extension's second implementation, because the fixture
-	 * still asserts that nothing calls it: a door that regressed to a leaseless
-	 * focus change would be writing into a worktree this session does not hold.
-	 */
-	setFocus: (ctx: ExtensionContext, target: FocusTarget | undefined, announce?: boolean) => void;
 	/**
 	 * Move focus, carrying the worktree lease with it: acquire the destination,
 	 * move, release the origin when the agent settles. `false` means the
@@ -744,10 +735,9 @@ export function createCommands(deps: CommandDeps): Commands {
 			`project root:   ${info.projectRoot}`,
 			`session wt:     ${info.worktreeRoot ?? "(none)"}`,
 			`focused:        ${getFocus()?.path ?? "(none)"}`,
-			`new worktrees:  ${worktreePath(getConfig(), info.projectRoot, "<name>")}`,
-			`branch prefix:  ${getConfig().branchPrefix || "(none)"}`,
-			`copy files:     ${getConfig().copyFiles.join(", ") || "(none)"}`,
-			`post create:    ${getConfig().postCreate ?? "(none)"}`,
+			// Nothing about where a worktree lands or what its branch is called: that is
+			// jimothy's config now, and printing a second answer here is how the two
+			// tools came to disagree in the first place.
 			`auto focus:     ${getConfig().autoFocus}`,
 			`remap abs:      ${getConfig().remapAbsolutePaths}`,
 			`config files:   ${getConfigSources().join(", ") || "(defaults only)"}`,
