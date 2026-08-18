@@ -513,6 +513,7 @@ export default function (pi: ExtensionAPI) {
 		runner: pi,
 		ui,
 		getModel: () => session?.model,
+		getSession: () => session,
 		getConfig: () => session?.config ?? DEFAULT_CONFIG,
 		getConfigSources: () => session?.configSources ?? [],
 		getFocus: () => session?.focus,

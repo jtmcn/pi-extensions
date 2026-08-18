@@ -26,6 +26,7 @@ import type { FocusTarget } from "./focus.ts";
 import type { Model } from "./jimothy.ts";
 import { describeKnown, type KnownWorktree, toKnown } from "./known.ts";
 import { matchWorktree, parseNewArgs, tokenize } from "./select.ts";
+import type { WorktreeSession } from "./session.ts";
 import { messageTexts, suggestName } from "./suggest.ts";
 import type { Ui } from "./ui.ts";
 import {
@@ -38,7 +39,7 @@ import {
 	listBranches,
 	resolveBranch,
 } from "./branches.ts";
-import { type CommandRunner, pruneWorktrees, removeWorktree } from "./worktrees.ts";
+import { type CommandRunner, pruneWorktrees } from "./worktrees.ts";
 
 /**
  * Said when the session has no model.
@@ -108,10 +109,28 @@ export interface CommandDeps {
 	 * process and must act on the *current* session.
 	 */
 	getModel: () => Model | undefined;
+	/**
+	 * The current session, or undefined outside one. A getter for the same reason
+	 * `getModel` is.
+	 *
+	 * Only `remove` needs it, and only for the leases: a worktree this session
+	 * holds has to be handed back before it can be removed, and the session is what
+	 * knows which those are.
+	 */
+	getSession: () => WorktreeSession | undefined;
 	getConfig: () => WorktreeConfig;
 	/** Config files that were applied, for `/worktree config`. */
 	getConfigSources: () => string[];
 	getFocus: () => FocusTarget | undefined;
+	/**
+	 * Set focus without touching the lease.
+	 *
+	 * No door here calls it any more — `remove` was the last one, and it now clears
+	 * focus through `moveFocus` like every other path. Kept on the interface until
+	 * Task 8 removes the extension's second implementation, because the fixture
+	 * still asserts that nothing calls it: a door that regressed to a leaseless
+	 * focus change would be writing into a worktree this session does not hold.
+	 */
 	setFocus: (ctx: ExtensionContext, target: FocusTarget | undefined, announce?: boolean) => void;
 	/**
 	 * Move focus, carrying the worktree lease with it: acquire the destination,
@@ -148,7 +167,7 @@ export interface Commands {
 }
 
 export function createCommands(deps: CommandDeps): Commands {
-	const { runner, ui, getModel, getConfig, getConfigSources, getFocus, setFocus, moveFocus } = deps;
+	const { runner, ui, getModel, getSession, getConfig, getConfigSources, getFocus, moveFocus } = deps;
 	const say = ui.say;
 	const report = ui.report;
 
@@ -514,6 +533,14 @@ export function createCommands(deps: CommandDeps): Commands {
 	const doRemove = async (info: RepoInfo, ctx: ExtensionCommandContext, args: string) => {
 		const target = await resolveWorktree(ctx, args.trim(), "Remove which worktree?");
 		if (!target) return;
+		const model = getModel();
+		if (!model) {
+			// `resolveWorktree` has already refused a session without one, so this is
+			// reachable only if the session was replaced while the picker was open —
+			// which is a reason to say so, not to remove anything.
+			say(ctx, MODEL_UNAVAILABLE, "error");
+			return;
+		}
 		if (target.path === info.worktreeRoot) {
 			say(ctx, "refusing to remove the session's own worktree", "error");
 			return;
@@ -540,19 +567,36 @@ export function createCommands(deps: CommandDeps): Commands {
 		}
 
 		try {
-			await removeWorktree(runner, {
-				worktree: target,
-				projectRoot: info.projectRoot,
+			// Our own lease would make `remove` refuse: it is live, under a live pid,
+			// which is exactly what that check is for. So it is handed *back* first —
+			// releasing is not `breakLease`, which would take a lease held by another
+			// agent too, and that refusal is the one thing here worth keeping.
+			const held = getSession()?.dropLease(target.path);
+			if (held) await model.registry.releaseLease(held.name, held.runId);
+
+			await model.registry.remove(target.name, {
 				force: dirty > 0,
+				// Never, whatever the user confirmed above: uncommitted files say nothing
+				// about whether another agent is working in this worktree.
+				breakLease: false,
+				// Only what the user actually answered; jimothy defaults it from the record
+				// (`branchCreated`) when nobody asked.
 				deleteBranch,
+				// `false` rather than omitted, because jimothy's own default force-deletes a
+				// branch it created that has no upstream — which is every `/worktree new`
+				// branch — and the prompt above promises "Kept if it is not fully merged".
+				// `-d` refusing to drop commits that exist nowhere else is the point of asking.
 				forceDeleteBranch: false,
 			});
-			if (getFocus()?.path === target.path) setFocus(ctx, undefined);
+			// After the removal succeeded, and through `moveFocus`: focus carries the
+			// lease, so clearing it here is what gets the session back onto its own
+			// worktree rather than pointing at a directory that no longer exists.
+			if (getFocus()?.path === target.path) await moveFocus(ctx, undefined);
 			await refresh();
 			// The branch may have gone with the worktree: completing a dead branch
 			// costs a pointless fetch when it is accepted.
 			await refreshBranches(info);
-			say(ctx, `removed ${basename(target.path)}`, "info");
+			say(ctx, `removed ${target.name}`, "info");
 		} catch (error) {
 			say(ctx, (error as Error).message, "error");
 		}

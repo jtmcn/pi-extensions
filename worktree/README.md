@@ -264,6 +264,30 @@ on, checking out an existing branch could put the model to work directly on a
 shared branch instead of a scratch one, so it stays a user decision — like
 `focus` and `remove`.
 
+## Removing a worktree
+
+`/worktree remove <name>` is a `Registry.remove`, so what it accepts is a name
+the registry knows. A worktree jimothy did not create has no record and is now
+refused — `unmanaged` in the listing means unmanaged here too, where the
+extension's own git-level removal used to delete it anyway. Taking one into the
+registry first is a later phase.
+
+The two confirmations are two different questions, and neither leaks into the
+other. The first is about *files*: `<n> uncommitted file(s) will be lost` is what
+maps to git's `--force`, and it says nothing about whether another agent is
+working in that worktree. That is the *lease's* question, and a lease held by
+anyone else refuses the removal outright and names the holder — no confirmation
+about uncommitted work can break it. The one lease that is not an obstacle is
+this session's own, on a worktree it is focused on: that one is released first,
+which is not the same as breaking it. The second confirmation is the branch,
+deleted with `-d`, so a branch holding commits that exist nowhere else is kept
+and said so, even though jimothy's own default would force-delete a branch it
+created; the worktree is gone either way.
+
+Removing the focused worktree clears focus through the same transition `/worktree
+focus off` uses, so the session reacquires its own worktree instead of pointing
+at a directory that no longer exists.
+
 ## Tool
 
 The model gets a `worktree` tool with `action: "list" | "create"`. It can spin
@@ -459,7 +483,7 @@ worktree/branches.ts     branch listing, resolution and naming (pure + two git c
 worktree/focus.ts        tool-input rewriting (pure, heavily tested)
 worktree/select.ts       argument parsing and name matching (pure)
 worktree/suggest.ts      the transcript-derived name seed `new` offers (pure)
-worktree/worktrees.ts    create / remove / prune
+worktree/worktrees.ts    prune, plus the create the model's tool still calls (its remove has none)
 worktree/pr.ts           PR display formatting and poll cadence (pure)
 worktree/gh.ts           the gh calls behind the PR status display
 ```

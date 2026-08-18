@@ -21,10 +21,24 @@
  * scripted, including "the user said no".
  */
 
+import { spawn } from "node:child_process";
 import { lstat, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { assertions, execRunner, loadExt, pexec } from "../harness.mjs";
+
+/**
+ * A live process that is neither us nor our parent, to hold a lease `remove`
+ * has to refuse.
+ *
+ * Same reasoning as `transition.test.mjs`: a lease under a dead pid is a *stale*
+ * lease and takes an entirely different row, so a stranger has to be genuinely
+ * alive. Unref'd and killed from an exit hook so it can neither hold this run
+ * open nor outlive it.
+ */
+const stranger = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60_000)"], { stdio: "ignore" });
+stranger.unref();
+process.on("exit", () => stranger.kill());
 
 const { ok, done } = assertions();
 const { createCommands } = await loadExt("worktree/commands.ts");
@@ -87,6 +101,30 @@ async function makeRepo(branches = ["exp"], { jimothy = {}, lockfile = false } =
 	return { dir, paths };
 }
 
+/** Who the registry says holds a worktree, read straight off disk. */
+async function ownerOf(dir, name) {
+	return (await readRegistry(dir)).worktrees.find((record) => record.name === name)?.owner;
+}
+
+/**
+ * A repo whose worktrees jimothy *created*, which is what `remove` needs now
+ * that it goes through `Registry.remove`: a worktree only git knows about has no
+ * record to remove. `makeRepo`'s `git worktree add` worktrees stay unmanaged
+ * deliberately — the listing half of this file is about exactly those, and so is
+ * the refusal below.
+ *
+ * Created through the registry rather than hand-written, so the records carry
+ * jimothy's own path, branch and `branchCreated` — the three things `remove`
+ * decides from.
+ */
+async function makeManagedRepo(names = ["exp"], options = {}) {
+	const { dir } = await makeRepo([], options);
+	const model = await openModel(execRunner(), dir);
+	const records = {};
+	for (const name of names) records[name] = await model.registry.create(name, { base: "main" });
+	return { dir, model, records };
+}
+
 /**
  * An upstream repo plus a clone of it, for the remote half of `checkout`.
  * `remoteOnly` branches are created upstream *after* the clone, so the clone
@@ -132,6 +170,8 @@ async function setup({
 	entries = [],
 	config = {},
 	withModel = true,
+	leases = [],
+	withSession = true,
 	install = { stdout: "", stderr: "", code: 0, killed: false },
 } = {}) {
 	const said = [];
@@ -179,10 +219,30 @@ async function setup({
 
 	const model = dir && withModel ? await openModel(modelRunner, dir) : undefined;
 
+	// The session's lease bookkeeping, which `doRemove` has to go through: a
+	// worktree this session holds must be handed *back* before the removal, and
+	// `dropLease` is how the real session gives one up. Only the part `commands.ts`
+	// touches, for the reason its header gives — session state lives in the caller.
+	const held = leases.map((lease) => ({ ...lease }));
+	const dropped = [];
+	const session = {
+		dropLease: (path) => {
+			const index = held.findIndex((lease) => lease.path === path);
+			if (index === -1) return undefined;
+			const [lease] = held.splice(index, 1);
+			dropped.push(lease);
+			return lease;
+		},
+	};
+
 	const commands = createCommands({
 		runner,
 		ui,
 		getModel: () => model,
+		// Absent outside a session, which is why `commands.ts` reads it through a
+		// getter: a command dispatched with no session must still work, holding
+		// nothing.
+		getSession: () => (withSession ? session : undefined),
 		getConfig: () => ({ ...DEFAULT_CONFIG, ...config }),
 		getConfigSources: () => [],
 		getFocus: () => focus,
@@ -235,6 +295,8 @@ async function setup({
 		prompts,
 		focusCalls,
 		setFocusCalls,
+		held,
+		dropped,
 		gitCalls,
 		installCalls,
 		setFocus: (target) => {
@@ -315,46 +377,166 @@ async function setup({
 }
 
 {
-	const { dir, paths } = await makeRepo();
-	await writeFile(join(paths.exp, "uncommitted.txt"), "gone\n");
+	const { dir, records } = await makeManagedRepo();
+	await writeFile(join(records.exp.path, "uncommitted.txt"), "gone\n");
 
 	// Confirm the removal, decline the branch deletion: two decisions.
 	const h = await setup({ dir, confirms: [true, false] });
 	const info = await getRepoInfo(execRunner(), dir);
 	await h.commands.dispatch(info, h.ctx, "remove exp");
 
-	ok("confirming removes the worktree", !(await exists(paths.exp)));
+	ok("confirming removes the worktree", !(await exists(records.exp.path)), JSON.stringify(h.said));
+	ok("and its record with it", (await readRegistry(dir)).worktrees.length === 0, JSON.stringify(await readRegistry(dir)));
+	ok("the confirmation about uncommitted files is what forced it", h.prompts.confirm[0]?.detail.includes("uncommitted file(s) will be lost"), JSON.stringify(h.prompts.confirm));
 	ok("the branch is a separate question", h.prompts.confirm.length === 2 && h.prompts.confirm[1].question.includes("delete branch"));
-	const branches = await pexec("git", ["branch", "--list", "exp"], { cwd: dir });
-	ok("declining keeps the branch", branches.stdout.includes("exp"), JSON.stringify(branches.stdout));
+	const branches = await pexec("git", ["branch", "--list", records.exp.branch], { cwd: dir });
+	ok("declining keeps the branch", branches.stdout.includes(records.exp.branch), JSON.stringify(branches.stdout));
 	ok("removal is reported", h.messages().some((m) => m.includes("removed exp")), JSON.stringify(h.said));
 
 	await rm(dir, { recursive: true, force: true });
 }
 
 {
-	const { dir, paths } = await makeRepo();
+	const { dir, records } = await makeManagedRepo();
 	const h = await setup({ dir, confirms: [true, true] });
 	const info = await getRepoInfo(execRunner(), dir);
 	await h.commands.dispatch(info, h.ctx, "remove exp");
 
-	ok("confirming both removes the worktree", !(await exists(paths.exp)));
-	const branches = await pexec("git", ["branch", "--list", "exp"], { cwd: dir });
-	ok("and deletes the merged branch", !branches.stdout.includes("exp"), JSON.stringify(branches.stdout));
+	ok("confirming both removes the worktree", !(await exists(records.exp.path)), JSON.stringify(h.said));
+	const branches = await pexec("git", ["branch", "--list", records.exp.branch], { cwd: dir });
+	ok("and deletes the merged branch", !branches.stdout.includes(records.exp.branch), JSON.stringify(branches.stdout));
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// "Kept if it is not fully merged" is a promise the prompt makes, so `-d` is
+	// what has to run. jimothy's own default is to force-delete a branch it created
+	// that has no upstream, which is every `/worktree new` branch — passing
+	// `forceDeleteBranch: false` is what keeps the prompt honest.
+	const { dir, records } = await makeManagedRepo();
+	await writeFile(join(records.exp.path, "work.txt"), "unmerged\n");
+	await pexec("git", ["add", "."], { cwd: records.exp.path });
+	await pexec("git", ["commit", "-q", "-m", "work that exists nowhere else"], { cwd: records.exp.path });
+
+	const h = await setup({ dir, confirms: [true, true] });
+	const info = await getRepoInfo(execRunner(), dir);
+	await h.commands.dispatch(info, h.ctx, "remove exp");
+
+	ok("the worktree is still removed", !(await exists(records.exp.path)), JSON.stringify(h.said));
+	const branches = await pexec("git", ["branch", "--list", records.exp.branch], { cwd: dir });
+	ok("but an unmerged branch is kept", branches.stdout.includes(records.exp.branch), JSON.stringify(branches.stdout));
+	ok(
+		"and the user is told rather than left to discover it",
+		h.errors().some((m) => /was kept/.test(m)),
+		JSON.stringify(h.said),
+	);
 
 	await rm(dir, { recursive: true, force: true });
 }
 
 {
 	// Removing the focused worktree must drop focus, or every later tool call is
-	// redirected into a directory that no longer exists.
-	const { dir, paths } = await makeRepo();
+	// redirected into a directory that no longer exists. Through `moveFocus`, so
+	// the session reacquires its own worktree and its lease list goes with it.
+	const { dir, records } = await makeManagedRepo();
 	const h = await setup({ dir, confirms: [true, false] });
-	h.setFocus({ path: paths.exp, branch: "exp" });
+	h.setFocus({ path: records.exp.path, branch: records.exp.branch });
 	const info = await getRepoInfo(execRunner(), dir);
 	await h.commands.dispatch(info, h.ctx, "remove exp");
 
-	ok("removing the focused worktree clears focus", h.focusCalls.at(-1) === undefined && h.focusCalls.length === 1);
+	ok("removing the focused worktree clears focus", h.focusCalls.at(-1) === undefined && h.focusCalls.length === 1, JSON.stringify(h.focusCalls));
+	ok("through moveFocus, not setFocus", h.setFocusCalls.length === 0, JSON.stringify(h.setFocusCalls));
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+// ============================================ remove: leases
+
+{
+	// A session leases the worktree it works in, so removing one it holds means
+	// handing that lease *back* first — `remove` refuses a live lease, which is
+	// exactly what it should do for anyone else's.
+	const { dir, model, records } = await makeManagedRepo(["spike"]);
+	await model.registry.acquireLease("spike", "run-1", process.pid, { label: "pi session" });
+	const h = await setup({
+		dir,
+		confirms: [true, false],
+		leases: [{ name: "spike", path: records.spike.path, runId: "run-1", provenance: "ours" }],
+	});
+	ok("the session holds the lease to begin with", (await ownerOf(dir, "spike"))?.pid === process.pid, JSON.stringify(await ownerOf(dir, "spike")));
+
+	// The ordering, not just the outcome: this is the one moment a test can look at
+	// the world *during* the removal, and a lease released afterwards — or not at
+	// all, with `breakLease` doing the work instead — would still be here.
+	const removeCalls = [];
+	const realRemove = h.model.registry.remove.bind(h.model.registry);
+	h.model.registry.remove = async (name, opts) => {
+		removeCalls.push({ name, opts, owner: await ownerOf(dir, name) });
+		return realRemove(name, opts);
+	};
+
+	const info = await getRepoInfo(execRunner(), dir);
+	await h.commands.dispatch(info, h.ctx, "remove spike");
+
+	// Every one of these names `removeCalls.length`: an implementation that never
+	// reaches the registry at all would otherwise satisfy all three.
+	ok("the removal goes through the registry", removeCalls.length === 1, JSON.stringify(removeCalls));
+	ok("the lease is handed back before the removal is attempted", removeCalls.length === 1 && removeCalls[0].owner === undefined, JSON.stringify(removeCalls));
+	ok("released, never broken", removeCalls.length === 1 && removeCalls[0].opts?.breakLease !== true, JSON.stringify(removeCalls));
+	ok("and the branch is never force-deleted behind the user's back", removeCalls.length === 1 && removeCalls[0].opts?.forceDeleteBranch !== true, JSON.stringify(removeCalls));
+	ok("the session forgets it too", h.dropped.length === 1 && h.dropped[0]?.path === records.spike.path, JSON.stringify(h.dropped));
+	ok("and our own lease did not block the removal", (await readRegistry(dir)).worktrees.length === 0, JSON.stringify(await readRegistry(dir)));
+	ok("the worktree is gone", !(await exists(records.spike.path)));
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// The case the release above must not accidentally cover. A dirty worktree the
+	// user confirms maps to `force`, which is about files; another agent holding the
+	// worktree is about leases, and no confirmation here has anything to say about
+	// it.
+	const { dir, model, records } = await makeManagedRepo(["spike"]);
+	await writeFile(join(records.spike.path, "uncommitted.txt"), "precious\n");
+	await model.registry.acquireLease("spike", "someone-else", stranger.pid, { label: "pi session" });
+
+	const h = await setup({ dir, confirms: [true, true] });
+	const info = await getRepoInfo(execRunner(), dir);
+	await h.commands.dispatch(info, h.ctx, "remove spike");
+
+	ok(
+		"a lease held by another session refuses the removal, and says who has it",
+		h.errors().some((m) => /in use by pi session someone-else/.test(m)),
+		JSON.stringify(h.said),
+	);
+	ok("the record survives", (await readRegistry(dir)).worktrees.length === 1, JSON.stringify(await readRegistry(dir)));
+	ok("so does the worktree", await exists(records.spike.path));
+	ok("and the uncommitted work in it", await exists(join(records.spike.path, "uncommitted.txt")));
+	const branches = await pexec("git", ["branch", "--list", records.spike.branch], { cwd: dir });
+	ok("and the branch", branches.stdout.includes(records.spike.branch), JSON.stringify(branches.stdout));
+	ok("the stranger keeps the lease", (await ownerOf(dir, "spike"))?.runId === "someone-else", JSON.stringify(await ownerOf(dir, "spike")));
+	ok("and this session, holding nothing, released nothing", h.dropped.length === 0, JSON.stringify(h.dropped));
+
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// A worktree only git knows about has no record, and `Registry.remove` takes a
+	// registry name — so `/worktree remove` now refuses one where the extension's
+	// own git-level implementation used to remove it. Pinned rather than left to be
+	// discovered: it is the gap `/worktree adopt` exists to close.
+	const { dir, paths } = await makeRepo(["scratch"]);
+	const h = await setup({ dir, confirms: [true, false] });
+	const info = await getRepoInfo(execRunner(), dir);
+	await h.commands.dispatch(info, h.ctx, "remove scratch");
+
+	ok("an unmanaged worktree is refused", await exists(paths.scratch), JSON.stringify(h.said));
+	ok(
+		"and the refusal names it",
+		h.errors().some((m) => /no worktree named "scratch"/.test(m)),
+		JSON.stringify(h.said),
+	);
 
 	await rm(dir, { recursive: true, force: true });
 }
@@ -367,7 +549,7 @@ async function setup({
 	// left to catch it, so "remove feat" would delete feature-a outright. Two
 	// matches are merely ambiguous and refused either way, which is why asserting
 	// on that case cannot tell the two behaviours apart.
-	const { dir } = await makeRepo(["feature-a"]);
+	const { dir, records } = await makeManagedRepo(["feature-a"]);
 	const info = await getRepoInfo(execRunner(), dir);
 	const h = await setup({ dir, hasUI: false });
 
@@ -377,12 +559,12 @@ async function setup({
 		h.errors().some((m) => m.includes('no worktree matching "feat"')),
 		JSON.stringify(h.said),
 	);
-	ok("the worktree survives", await exists(join(dir, "wt", "feature-a")));
+	ok("the worktree survives", await exists(records["feature-a"].path));
 
 	// An exact name still works without a UI: the guard is against guessing, not
 	// against non-interactive use.
 	await h.commands.dispatch(info, h.ctx, "remove feature-a");
-	ok("an exact name is accepted with no UI", !(await exists(join(dir, "wt", "feature-a"))), JSON.stringify(h.said));
+	ok("an exact name is accepted with no UI", !(await exists(records["feature-a"].path)), JSON.stringify(h.said));
 
 	await rm(dir, { recursive: true, force: true });
 }
