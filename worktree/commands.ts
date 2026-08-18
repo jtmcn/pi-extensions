@@ -20,13 +20,13 @@ import {
 	resolveDefaultBranch,
 	type WorktreeRecord,
 } from "jimothy/worktrees";
-import { countDirty, getRepoInfo, type RepoInfo, slugify } from "../lib/git.ts";
+import { countDirty, getRepoInfo, type RepoInfo } from "../lib/git.ts";
 import { type WorktreeConfig, worktreePath } from "./config.ts";
 import type { FocusTarget } from "./focus.ts";
 import type { Model } from "./jimothy.ts";
 import { describeKnown, type KnownWorktree, toKnown } from "./known.ts";
 import { matchWorktree, parseNewArgs, tokenize } from "./select.ts";
-import { messageTexts, suggestName, uniqueName } from "./suggest.ts";
+import { messageTexts, suggestName } from "./suggest.ts";
 import type { Ui } from "./ui.ts";
 import {
 	type BranchList,
@@ -38,7 +38,7 @@ import {
 	listBranches,
 	resolveBranch,
 } from "./branches.ts";
-import { type CommandRunner, type CreateResult, createWorktree, pruneWorktrees, removeWorktree } from "./worktrees.ts";
+import { type CommandRunner, pruneWorktrees, removeWorktree } from "./worktrees.ts";
 
 /**
  * Said when the session has no model.
@@ -222,30 +222,14 @@ export function createCommands(deps: CommandDeps): Commands {
 	};
 
 	/**
-	 * Names that are already spoken for.
-	 *
-	 * Worktree names and currently checked-out branches, with `branchPrefix`
-	 * stripped so `joel/foo` occupies `foo`. Cannot see a stray non-worktree
-	 * directory or a branch checked out nowhere — those still fall back to
-	 * createWorktree's error.
-	 */
-	const takenNames = (worktrees: KnownWorktree[]): Set<string> => {
-		const prefix = getConfig().branchPrefix;
-		const taken = new Set<string>();
-		for (const wt of worktrees) {
-			taken.add(wt.name);
-			if (wt.branch) taken.add(wt.branch.startsWith(prefix) ? wt.branch.slice(prefix.length) : wt.branch);
-		}
-		return taken;
-	};
-
-	/**
 	 * A *seed* for a new worktree's name, read out of the conversation.
 	 *
 	 * Only half the job, and deliberately: turning a seed into a name that is
 	 * legal and free is `registry.suggestName`, because only the registry knows
-	 * what is taken — by a record, by a worktree git reports, or by a branch. This
-	 * half stays here because only pi has a transcript.
+	 * what is taken — by a record, by a worktree git reports, or by a branch (the
+	 * extension used to track this itself, stripping its own `branchPrefix` and
+	 * seeing only worktrees and branches a door here had made). This half stays
+	 * here because only pi has a transcript.
 	 */
 	const seedFromTranscript = (ctx: ExtensionContext): string =>
 		suggestName(messageTexts(ctx.sessionManager.getBranch()));
@@ -286,18 +270,6 @@ export function createCommands(deps: CommandDeps): Commands {
 		const choice = await ctx.ui.select(prompt, labels);
 		if (!choice) return undefined;
 		return worktrees[labels.indexOf(choice)];
-	};
-
-	/** The one place a finished create is described. `extra` goes after the branch. */
-	const reportCreated = (ctx: ExtensionContext, result: CreateResult, extra: string[] = []) => {
-		const parts = [`created ${basename(result.path)} on ${result.branch}`, ...extra];
-		if (result.copied.length) parts.push(`copied ${result.copied.join(", ")}`);
-		for (const warning of result.warnings) parts.push(warning);
-		if (result.postCreate && result.postCreate.code !== 0) {
-			parts.push(`postCreate failed (exit ${result.postCreate.code})`);
-		}
-		const degraded = result.warnings.length > 0 || Boolean(result.postCreate?.code);
-		say(ctx, parts.join("; "), degraded ? "warning" : "info");
 	};
 
 	const showList = async (info: RepoInfo, ctx: ExtensionContext) => {
@@ -407,6 +379,11 @@ export function createCommands(deps: CommandDeps): Commands {
 			say(ctx, `unexpected extra arguments: ${extra.join(" ")} (quote names containing spaces)`, "error");
 			return;
 		}
+		const model = getModel();
+		if (!model) {
+			say(ctx, MODEL_UNAVAILABLE, "error");
+			return;
+		}
 
 		let branches = await refreshBranches(info);
 		const worktrees = await refresh();
@@ -462,31 +439,50 @@ export function createCommands(deps: CommandDeps): Commands {
 			return;
 		}
 
-		// A derived name may be adjusted; a name the user typed must not be.
-		const taken = takenNames(worktrees);
-		const name = explicitName ?? uniqueName(checkoutName(match.branch, getConfig().branchPrefix), (n) => taken.has(n));
-		const slug = slugify(name);
-		const target = worktreePath(getConfig(), info.projectRoot, slug);
+		// The worktree *directory* name is a different thing from the branch: a name
+		// the user typed is used verbatim, and only a derived one may be adjusted —
+		// `registry.suggestName` is what knows a name is free, against records, every
+		// worktree git reports, and every branch. jimothy's prefix, not the
+		// extension's own (now-dead for this door): a tracked or existing branch's
+		// identity belongs to the branch itself, but the *directory* still follows
+		// jimothy's convention for stripping it, same as `new`.
+		const name = explicitName ?? (await model.registry.suggestName(checkoutName(match.branch, model.config.branchPrefix)));
 
-		say(ctx, `creating ${target} …`, "info");
+		say(ctx, `creating ${name} …`, "info");
 		try {
-			const result = await createWorktree(runner, {
-				name: slug,
-				branch: match.branch,
-				track: match.kind === "remote" ? match.full : undefined,
-				config: getConfig(),
-				projectRoot: info.projectRoot,
-				sourceWorktree: info.worktreeRoot,
-			});
+			// Mutually exclusive by construction: an existing local branch is checked
+			// out unprefixed and is not jimothy's to delete (`branchCreated: false`), and
+			// a remote branch is tracked by its full ref so the local checkout, `git
+			// push` and every PR tool keep agreeing on what the branch is called.
+			const opts = match.kind === "remote" ? { track: match.full } : { branch: match.branch };
+			const { record, provision: result } = await createAndProvision(
+				model,
+				(line) => say(ctx, line, "info"),
+				name,
+				opts,
+			);
 			await refresh();
+			// The branch this created is now checked out; a stale cache would still
+			// offer it under `checkout <tab>`.
 			await refreshBranches(info);
 
-			const extras: string[] = [];
-			if (result.track) extras.push(`tracking ${result.track}`);
-			if (match.kind === "local" && match.shadows) extras.push(`using the local branch, not ${match.shadows}`);
-			reportCreated(ctx, result, extras);
+			const extras = [
+				match.kind === "remote" ? `tracking ${match.full}` : undefined,
+				match.kind === "local" && match.shadows ? `using the local branch, not ${match.shadows}` : undefined,
+			].filter((extra): extra is string => extra !== undefined);
+			const created = [`created ${record.path}`, `branch ${record.branch}`, ...extras];
 
-			if (getConfig().autoFocus) setFocus(ctx, { path: result.path, branch: result.branch });
+			// Mirrors `doNew`: a provisioning failure still names what was created,
+			// because the worktree is real and usable for editing either way.
+			if ("failed" in result) {
+				say(ctx, [...created, `provisioning failed: ${result.failed.message}`].join("; "), "warning");
+			} else {
+				const notes = [...created, ...result.warnings];
+				say(ctx, notes.join("; "), result.warnings.length ? "warning" : "info");
+			}
+
+			// Through `moveFocus`, not `setFocus`: see `doNew`.
+			if (getConfig().autoFocus) await moveFocus(ctx, { path: record.path, branch: record.branch });
 		} catch (error) {
 			say(ctx, (error as Error).message, "error");
 		}

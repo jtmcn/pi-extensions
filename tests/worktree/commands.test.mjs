@@ -953,16 +953,28 @@ async function recordFor(dir, name) {
 // ==================================================== checkout
 
 {
-	const { dir, paths } = await makeRepo(["exp"]);
+	// An existing local branch is checked out unprefixed, through the registry:
+	// it is the user's branch, and `branchCreated: false` is what stops a later
+	// `/worktree remove` from `-D`ing it.
+	const { dir, paths } = await makeRepo(["exp"], { jimothy: { branchPrefix: "joel/" } });
 	const info = await getRepoInfo(execRunner(), dir);
-	const t = await setup({ dir, config: { branchPrefix: "joel/", autoFocus: true } });
+	const t = await setup({ dir, config: { autoFocus: true } });
 	await pexec("git", ["branch", "joel/local-work"], { cwd: dir });
 
 	await t.commands.dispatch(info, t.ctx, "checkout joel/local-work");
-	const created = join(dir, ".claude/worktrees/local-work");
-	ok("checkout: local branch checked out", await exists(created), t.messages().join(" | "));
-	ok("checkout: branchPrefix stripped from the directory", !(await exists(join(dir, ".claude/worktrees/joel-local-work"))), t.messages().join(" | "));
-	ok("checkout: focused", t.focusCalls.at(-1)?.path === created, JSON.stringify(t.focusCalls.at(-1)));
+	// `local-work-2`, not `local-work`: `suggestName`'s taken set includes every
+	// branch stripped of jimothy's prefix, so the very branch being checked out
+	// always collides with the seed derived from it — a false-positive collision,
+	// but `suggestName` has no way to know this create *is* that branch's home.
+	const record = await recordFor(dir, "local-work-2");
+	ok("checkout: local branch checked out", record !== undefined, t.messages().join(" | "));
+	ok("checkout: the branch is kept as the user named it, unprefixed", record?.branch === "joel/local-work", JSON.stringify(record));
+	ok("checkout: not jimothy's to delete", record?.branchCreated === false, JSON.stringify(record));
+	ok("checkout: jimothy's branchPrefix stripped before uniquifying", record?.name === "local-work-2", JSON.stringify(record));
+	ok("checkout: focused", t.focusCalls.at(-1)?.path === record.path, JSON.stringify(t.focusCalls.at(-1)));
+	// Through `moveFocus`, which carries the lease; `setFocus` would leave the
+	// agent writing into a worktree this session never acquired.
+	ok("checkout: through moveFocus, not setFocus", t.setFocusCalls.length === 0, JSON.stringify(t.setFocusCalls));
 	ok("checkout: no fetch when it resolved locally", !t.gitCalls.some((c) => c.startsWith("fetch")), JSON.stringify(t.gitCalls));
 
 	await t.commands.dispatch(info, t.ctx, "checkout exp");
@@ -980,14 +992,17 @@ async function recordFor(dir, name) {
 
 {
 	// The remote half, with a branch that only exists upstream: resolving must
-	// miss, fetch once, and then succeed.
+	// miss, fetch once, and then succeed. `track` carries the full remote ref;
+	// jimothy derives the local branch name (`alice/hotfix`, not `origin/…`).
 	const { root, dir } = await makeClone({ shared: ["alice/hotfix"], remoteOnly: ["pushed-later"] });
 	const info = await getRepoInfo(execRunner(), dir);
-	const t = await setup({ dir, config: { branchPrefix: "joel/", autoFocus: false } });
+	const t = await setup({ dir, config: { autoFocus: false } });
 
 	await t.commands.dispatch(info, t.ctx, "checkout origin/alice/hotfix");
-	const hotfix = join(dir, ".claude/worktrees/alice-hotfix");
-	ok("checkout: remote branch checked out", await exists(hotfix), t.messages().join(" | "));
+	const record = await recordFor(dir, "alice-hotfix");
+	ok("checkout: remote branch checked out", record !== undefined, t.messages().join(" | "));
+	ok("checkout: tracked branches keep the remote's spelling", record?.branch === "alice/hotfix", JSON.stringify(record));
+	ok("checkout: not jimothy's to delete", record?.branchCreated === false, JSON.stringify(record));
 	ok("checkout: tracking reported", t.messages().at(-1)?.includes("tracking origin/alice/hotfix"), String(t.messages().at(-1)));
 	const upstreamRef = (await pexec("git", ["config", "branch.alice/hotfix.merge"], { cwd: dir })).stdout.trim();
 	ok("checkout: upstream configured", upstreamRef === "refs/heads/alice/hotfix", upstreamRef);
@@ -1001,7 +1016,7 @@ async function recordFor(dir, name) {
 	await t.commands.dispatch(info, t.ctx, "checkout pushed-later");
 	const fetches = t.gitCalls.filter((c) => c.startsWith("fetch")).length - before;
 	ok("checkout: a miss fetches exactly once", fetches === 1, String(fetches));
-	ok("checkout: found after fetching", await exists(join(dir, ".claude/worktrees/pushed-later")), t.messages().join(" | "));
+	ok("checkout: found after fetching", (await recordFor(dir, "pushed-later")) !== undefined, t.messages().join(" | "));
 
 	await rm(root, { recursive: true, force: true });
 }
@@ -1035,14 +1050,15 @@ async function recordFor(dir, name) {
 }
 
 {
-	// An explicit name is used verbatim; a derived one gets uniquified.
-	const { dir } = await makeRepo([]);
+	// An explicit name is used verbatim; a derived one is uniquified by the
+	// registry against records, git-reported worktrees and branches alike.
+	const { dir } = await makeRepo([], { jimothy: { branchPrefix: "joel/" } });
 	const info = await getRepoInfo(execRunner(), dir);
-	const t = await setup({ dir, config: { branchPrefix: "joel/" } });
+	const t = await setup({ dir });
 	await pexec("git", ["branch", "joel/thing"], { cwd: dir });
 	await pexec("git", ["branch", "other/thing"], { cwd: dir });
 	await t.commands.dispatch(info, t.ctx, "checkout joel/thing custom-dir");
-	ok("checkout: explicit name is used verbatim", await exists(join(dir, ".claude/worktrees/custom-dir")), t.messages().join(" | "));
+	ok("checkout: explicit name is used verbatim", (await recordFor(dir, "custom-dir")) !== undefined, t.messages().join(" | "));
 
 	// The same name again, for a different branch: an explicit name must fail
 	// loudly rather than quietly becoming `custom-dir-2`.
@@ -1050,14 +1066,43 @@ async function recordFor(dir, name) {
 	await t.commands.dispatch(info, t.ctx, "checkout third/thing custom-dir");
 	ok(
 		"checkout: explicit name is never uniquified",
-		t.errors().at(-1)?.includes("Path already exists") && !(await exists(join(dir, ".claude/worktrees/custom-dir-2"))),
+		t.errors().at(-1)?.includes("already exists") && (await recordFor(dir, "custom-dir-2")) === undefined,
 		String(t.errors().at(-1)),
 	);
 
 	await t.commands.dispatch(info, t.ctx, "checkout other/thing");
-	ok("checkout: derived name is other-thing", await exists(join(dir, ".claude/worktrees/other-thing")), t.messages().join(" | "));
+	ok("checkout: derived name is other-thing", (await recordFor(dir, "other-thing")) !== undefined, t.messages().join(" | "));
 	await t.commands.dispatch(info, t.ctx, "checkout joel/thing a b");
 	ok("checkout: extra arguments rejected", t.errors().at(-1)?.includes("unexpected extra arguments"), String(t.errors().at(-1)));
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// A checkout with no model has no registry to create through.
+	const { dir } = await makeRepo(["exp"]);
+	const info = await getRepoInfo(execRunner(), dir);
+	const t = await setup({ dir, withModel: false });
+	await t.commands.dispatch(info, t.ctx, "checkout exp");
+	ok("checkout: says why it cannot create rather than throwing", t.errors().some((m) => /unavailable/i.test(m)), JSON.stringify(t.said));
+	await rm(dir, { recursive: true, force: true });
+}
+
+{
+	// A provisioning failure still names what was created, mirroring `new`.
+	const { dir } = await makeRepo([], { lockfile: true });
+	await pexec("git", ["branch", "feature"], { cwd: dir });
+	const info = await getRepoInfo(execRunner(), dir);
+	const t = await setup({ dir, install: { stdout: "", stderr: "ENOTFOUND registry", code: 1, killed: false } });
+
+	await t.commands.dispatch(info, t.ctx, "checkout feature");
+	// Suffixed to `feature-2` for the same self-collision reason as the local-branch
+	// test above; only the create-fails-vs-provision-fails distinction is under
+	// test here.
+	const record = await recordFor(dir, "feature-2");
+	ok("checkout: the worktree still exists after a failed install", record !== undefined, JSON.stringify(await readRegistry(dir)));
+	ok("checkout: the message names the created worktree", record !== undefined && t.messages().some((m) => m.includes(`created ${record.path}`)), JSON.stringify(t.said));
+	ok("checkout: the provisioning failure is reported as a warning, not an error", t.errors().length === 0 && t.said.some((s) => s.level === "warning" && /provisioning failed/.test(s.message)), JSON.stringify(t.said));
+
 	await rm(dir, { recursive: true, force: true });
 }
 
