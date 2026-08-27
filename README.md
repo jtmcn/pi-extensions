@@ -34,20 +34,12 @@ extensions/
 │   ├── run.ts
 │   ├── shell.ts
 │   └── README.md
-├── mcp/                an extension (loaded via mcp/index.ts)
-│   ├── index.ts
-│   ├── client.ts
-│   ├── config.ts
-│   ├── bridge.ts
-│   └── README.md
 ├── tests/              test harness for the collection (jiti, plain node)
 │   ├── package.json
 │   ├── harness.mjs     assertions, extension loading, fake runners
 │   ├── fake-pi.mjs     a fake `pi` for testing index.ts wiring
 │   ├── run-all.mjs     discovers and runs every **/*.test.mjs
 │   ├── fixtures/       fake servers etc. used by tests
-│   ├── mcp/
-│   │   └── mcp.test.mjs
 │   └── worktree/
 │       ├── gh.test.mjs
 │       ├── pr.test.mjs
@@ -77,10 +69,9 @@ extension means adding a directory and a test file — no script to edit.
 ## Extensions
 
 | Name | What it does |
-|---|---|
+| --- | --- |
 | [`dashboard`](dashboard/README.md) | Startup screen: mascot, location and Graphite stack, loaded skills grouped by source with size bars, and MCP server health. Run `/dashboard setup` once to suppress pi's built-in listing. |
 | [`delta`](delta/README.md) | Renders `git diff` output and `edit` diffs with the delta pager instead of pi's built-in diff styling. |
-| [`mcp`](mcp/README.md) | MCP client: spawn stdio MCP servers and expose their tools as native pi tools. |
 | [`worktree`](worktree/README.md) | Manage git worktrees; optionally redirect the agent's tool calls into one without restarting the session. Shows the branch's PR in the status bar. |
 
 ## Conventions
@@ -153,9 +144,6 @@ One failing file does not stop the others. Optional extras:
 ```bash
 # exercise a real bare-layout checkout
 PI_TEST_BARE_REPO=~/Code/hellos node tests/worktree/worktree.test.mjs
-
-# exercise a real MCP server
-PI_TEST_MCP_COMMAND="gitnexus mcp" node tests/mcp/mcp.test.mjs
 ```
 
 New test files import `tests/harness.mjs` for assertions, extension loading, and
