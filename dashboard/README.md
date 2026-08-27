@@ -83,7 +83,7 @@ Expanded view:
     coordinator ▃
       Orchestrate multiple worktree agents. Spawn, monitor, communicate, and merge.
     finish-pr ▅
-      Finish a PR for peer review — run an adversarial review→fix loop (Codex or pi subagent reviewer), auto-fix blockin
+      Finish a PR for peer review — run an adversarial review→fix loop (Codex or pi subagent reviewer), auto-fix blocking
     finish-stack ▂
       Run the finish-pr adversarial review loop across an entire Graphite stack, bottom-up — restacking between branches
     merge ▁

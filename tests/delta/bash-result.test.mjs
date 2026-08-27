@@ -14,7 +14,7 @@ import { readFile } from "node:fs/promises";
 
 const { ok, done } = assertions();
 const { createBashResult, collapsedPreview, PREVIEW_LINES, formatDuration } = await loadExt("delta/bash-result.ts");
-const { fill, FILL_SENTINEL } = await loadExt("delta/ansi.ts");
+const { fill } = await loadExt("delta/ansi.ts");
 
 const { truncateToVisualLines } = await import(`file://${await piEntry()}`);
 const { visibleWidth } = await import(`file://${await piTuiEntry()}`);
