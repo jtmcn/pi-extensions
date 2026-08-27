@@ -85,7 +85,7 @@ ok(
 const probeCalls = [];
 const probed = createRunner({
 	config,
-	spawn: async (command, args) => {
+	spawn: async (_command, args) => {
 		probeCalls.push(args.join(" "));
 		return { code: 0, stdout: "delta 0.19.2", timedOut: false };
 	},
