@@ -85,3 +85,17 @@ that have actually caused bugs here:
 - **Break a new test on purpose before trusting it.** Six tests in this repo's
   history passed for the wrong reason and were only caught by mutating the code
   under them. If the mutation still passes, the test is decoration.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and specs live as GitHub issues (managed with `gh`). See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Issues are triaged using the default labels: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: one root `CONTEXT.md` + `docs/adr/`. See `docs/agents/domain.md`.
