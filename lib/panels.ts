@@ -37,10 +37,14 @@ interface Registry {
 const KEY = Symbol.for("pi-extensions.panels");
 
 function registry(): Registry {
-	// Double cast: `globalThis` and an index signature do not overlap, so the
-	// single-step version is an error rather than a widening.
+	// SAFETY: `globalThis` has no index signature, so reading a symbol-keyed slot
+	// needs a cast; routing through `unknown` is the only spelling TypeScript
+	// accepts (a single `as Record<symbol, unknown>` would not overlap). The slot
+	// below is only ever written as a `satisfies Registry` value, so a read here
+	// is always a Registry once initialized — never a value turned into one.
 	const host = globalThis as unknown as Record<symbol, unknown>;
-	if (!host[KEY]) host[KEY] = { panels: new Map(), listeners: new Set() } satisfies Registry;
+	if (!host[KEY])
+		host[KEY] = { panels: new Map(), listeners: new Set() } satisfies Registry;
 	return host[KEY] as Registry;
 }
 
@@ -49,7 +53,11 @@ function notify(): void {
 		// One extension's broken listener must not stop the others from painting.
 		try {
 			listener();
-		} catch {}
+		} catch (error) {
+			// Deliberately absorb any listener failure: painting is best-effort, and
+			// the caller (a push/refresh) should not tear down over one bad painter.
+			void error;
+		}
 	}
 }
 
@@ -79,7 +87,9 @@ export function resetPanels(owner: string): void {
 }
 
 export function listPanels(): Panel[] {
-	return [...registry().panels.values()].sort((a, b) => a.order - b.order || a.id.localeCompare(b.id));
+	return [...registry().panels.values()].sort(
+		(a, b) => a.order - b.order || a.id.localeCompare(b.id),
+	);
 }
 
 /** Returns an unsubscribe function. */

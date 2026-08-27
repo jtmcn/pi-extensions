@@ -14,7 +14,8 @@
  */
 
 /** Flags that turn a diff command into a summary, which delta cannot render. */
-const SUMMARY = /^--(stat|numstat|name-only|name-status|shortstat|compact-summary)(=|$)/;
+const SUMMARY =
+	/^--(stat|numstat|name-only|name-status|shortstat|compact-summary)(=|$)/;
 
 /** Flags that suppress `git show`'s diff, leaving only the commit message. */
 const NO_PATCH = /^(-s|--no-patch)$/;
@@ -57,7 +58,10 @@ function tokens(segment: string): string[] {
 	return segment.trim().split(/\s+/).filter(Boolean);
 }
 
-function subcommand(rest: string[]): { name: string | undefined; args: string[] } {
+function subcommand(rest: string[]): {
+	name: string | undefined;
+	args: string[];
+} {
 	let i = 0;
 	while (i < rest.length) {
 		const token = rest[i];
@@ -84,7 +88,8 @@ function isBuiltinDiff(parts: string[]): boolean {
 		}
 		if (name === "diff" || name === "range-diff") return true;
 		if (name === "log") return args.some((arg) => PATCH.test(arg));
-		if (name === "stash") return args[0] === "show" && args.slice(1).some((arg) => PATCH.test(arg));
+		if (name === "stash")
+			return args[0] === "show" && args.slice(1).some((arg) => PATCH.test(arg));
 		return false;
 	}
 	// Plain `diff` only emits a unified diff when asked to.
@@ -92,7 +97,10 @@ function isBuiltinDiff(parts: string[]): boolean {
 	return false;
 }
 
-export function isDiffCommand(command: string, extra: readonly RegExp[] = []): boolean {
+export function isDiffCommand(
+	command: string,
+	extra: readonly RegExp[] = [],
+): boolean {
 	return segments(command).some((segment) => {
 		const parts = tokens(segment);
 		if (parts.length === 0) return false;
@@ -102,14 +110,30 @@ export function isDiffCommand(command: string, extra: readonly RegExp[] = []): b
 	});
 }
 
-/** Compile config patterns, warning about — and dropping — the invalid ones. */
-export function compilePatterns(sources: readonly string[], warnings: string[]): RegExp[] {
+/**
+ * Compile config patterns, warning about — and dropping — the invalid ones.
+ *
+ * SAFETY: `sources` is the user's own `extraCommands` config, not untrusted
+ * input, and each compiled regex is matched only against a single shell command
+ * segment (short, local, user-typed) — not long or attacker-controlled text.
+ * So a pathological pattern can only slow this user's own tool on their own
+ * command; there is no cross-tenant ReDoS surface. Malformed regexes are
+ * already dropped below rather than thrown. Deliberately built from a string so
+ * users can express matchers their environment doesn't supply a hardcoded rule
+ * for.
+ */
+export function compilePatterns(
+	sources: readonly string[],
+	warnings: string[],
+): RegExp[] {
 	const compiled: RegExp[] = [];
 	for (const source of sources) {
 		try {
 			compiled.push(new RegExp(source));
 		} catch (error) {
-			warnings.push(`extraCommands: ${source} is not a valid regex (${(error as Error).message})`);
+			warnings.push(
+				`extraCommands: ${source} is not a valid regex (${(error as Error).message})`,
+			);
 		}
 	}
 	return compiled;

@@ -49,7 +49,7 @@ export interface HerdrTarget {
  * Keyed by the runner, not by the ids alone: the pairing that matters is "same
  * pi process", and in that process `runner` is the one `pi` object every session
  * reports through. A WeakMap also means the state cannot outlive what it is
- * about to write to, and independent runners (tests, another extension) queue
+ * about to write to, and the runners (tests, another extension) queue
  * independently rather than through one process-global chain.
  */
 const queues = new WeakMap<object, Map<string, Promise<unknown>>>();
@@ -62,7 +62,11 @@ const queues = new WeakMap<object, Map<string, Promise<unknown>>>();
  * once the queue drains, so a long-lived process holds at most one entry per
  * live surface rather than one per session.
  */
-function enqueue<T>(owner: object, key: string, task: () => Promise<T>): Promise<T> {
+function enqueue<T, O extends object>(
+	owner: O,
+	key: string,
+	task: () => Promise<T>,
+): Promise<T> {
 	let byKey = queues.get(owner);
 	if (!byKey) {
 		byKey = new Map();
@@ -91,7 +95,9 @@ function enqueue<T>(owner: object, key: string, task: () => Promise<T>): Promise
  * running under herdr. Both are needed: the branch goes to the workspace, the
  * title to the pane.
  */
-export function herdrTarget(env: Record<string, string | undefined>): HerdrTarget | undefined {
+export function herdrTarget(
+	env: Record<string, string | undefined>,
+): HerdrTarget | undefined {
 	const workspaceId = env.HERDR_WORKSPACE_ID;
 	const paneId = env.HERDR_PANE_ID;
 	if (!workspaceId || !paneId) return undefined;
@@ -139,7 +145,9 @@ export interface HerdrReporter {
 	dispose: () => void;
 }
 
-export function createHerdrReporter(options: HerdrReporterOptions): HerdrReporter {
+export function createHerdrReporter(
+	options: HerdrReporterOptions,
+): HerdrReporter {
 	const { runner, target } = options;
 	const branchPrefix = options.branchPrefix ?? "";
 	const isCurrent = options.isCurrent ?? (() => true);
@@ -165,7 +173,9 @@ export function createHerdrReporter(options: HerdrReporterOptions): HerdrReporte
 	let disposed = false;
 
 	const display = (branch: string | undefined): string | undefined =>
-		branch && branchPrefix && branch.startsWith(branchPrefix) ? branch.slice(branchPrefix.length) : branch;
+		branch && branchPrefix && branch.startsWith(branchPrefix)
+			? branch.slice(branchPrefix.length)
+			: branch;
 
 	// One queue per surface, so a wedged pane write cannot delay a workspace write.
 	const workspaceKey = `workspace:${target.workspaceId}`;
@@ -189,7 +199,9 @@ export function createHerdrReporter(options: HerdrReporterOptions): HerdrReporte
 		target.workspaceId,
 		"--source",
 		SOURCE,
-		...(value ? ["--token", `${BRANCH_TOKEN}=${value}`] : ["--clear-token", BRANCH_TOKEN]),
+		...(value
+			? ["--token", `${BRANCH_TOKEN}=${value}`]
+			: ["--clear-token", BRANCH_TOKEN]),
 	];
 
 	/**

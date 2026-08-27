@@ -46,6 +46,8 @@ extensions/
 │       ├── pr-status.test.mjs
 │       └── worktree.test.mjs
 ├── typecheck.sh        tsc over every extension (no build step otherwise)
+├── setup-types.sh      recreate node_modules/ symlinks into the global pi install
+├── tsconfig.json        strict options for editors/LSP (uses node_modules symlinks)
 └── worktree/           an extension (loaded via worktree/index.ts)
     ├── index.ts
     ├── branches.ts
@@ -121,15 +123,29 @@ globally first, because that is where both checks resolve pi from.
 
 ### Type checking
 
-There is no build step — pi loads TypeScript through jiti — so `./typecheck.sh`
-is the only thing that catches type errors. It generates a tsconfig pointing at
-the globally installed pi package (whose path differs per machine, which is why
-the config is not committed) and runs `tsc --noEmit --strict` recursively over
-`lib/` and every extension directory.
+There is no build step — pi loads TypeScript through jiti.
+
+`./typecheck.sh` is the only thing that *blocks* a wrong type: it generates a
+throwaway tsconfig pointing at the globally installed pi package (whose path
+differs per machine) and runs `tsc --noEmit --strict` recursively over `lib/`
+and every extension directory.
 
 The glob is recursive deliberately. It was once `*/[!.]*.ts`, and because
 tsconfig glob syntax has no character classes, that pattern matched *nothing* —
 the script reported success while checking a single file.
+
+There is also a committed [`tsconfig.json`](tsconfig.json) for editors/LSP so
+the same strict options surface without needing the `typecheck.sh` machinery.
+It resolves pi's types from a git-ignored `node_modules/` that is *symlinked*
+into the global pi install — recreate it after a fresh clone or a pi reinstall:
+
+```bash
+./setup-types.sh    # links @earendil-works/{pi-coding-agent,pi-ai,pi-tui},
+                    # typebox, and @types/node into the global pi install
+```
+
+The symlink rather than commit-in-the-config keeps the machine-specific pi path
+out of git; the committed config itself stays portable.
 
 ### Tests
 
