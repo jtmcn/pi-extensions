@@ -65,11 +65,13 @@ export function createFakePi({
 } = {}) {
 	// A static string is the common case; a function lets tests change the
 	// prompt between session_start fires without rebuilding the whole harness.
-	const resolvePrompt = typeof systemPromptInput === "function"
-		? systemPromptInput
-		: () => systemPromptInput;
+	const resolvePrompt =
+		typeof systemPromptInput === "function"
+			? systemPromptInput
+			: () => systemPromptInput;
 	// Same for mode: a function lets the same pi run TUI and non-TUI sessions.
-	const resolveMode = typeof modeInput === "function" ? modeInput : () => modeInput;
+	const resolveMode =
+		typeof modeInput === "function" ? modeInput : () => modeInput;
 
 	const events = new Map();
 	const tools = new Map();
@@ -135,7 +137,12 @@ export function createFakePi({
 
 	/** Identity theme and a no-op tui, shared across all sessions. */
 	const headerTheme = { fg: (_color, text) => text, bold: (text) => text };
-	const headerTui = { requestRender() { renderRequestCount++; }, invalidate() {} };
+	const headerTui = {
+		requestRender() {
+			renderRequestCount++;
+		},
+		invalidate() {},
+	};
 
 	/** A context, recording its own writes as well as the aggregate ones. */
 	const makeCtx = () => {
@@ -220,10 +227,12 @@ export function createFakePi({
 		 */
 		fire: async (event, payload = {}) => {
 			if (event === "session_start") current = makeCtx();
-			for (const handler of events.get(event) ?? []) await handler(payload, current);
+			for (const handler of events.get(event) ?? [])
+				await handler(payload, current);
 		},
 		/** Invoke a registered tool. */
-		call: (name, params, signal) => tools.get(name)?.execute("call-1", params, signal),
+		call: (name, params, signal) =>
+			tools.get(name)?.execute("call-1", params, signal),
 		/** Invoke a registered slash command. */
 		command: (name, args = "") => commands.get(name)?.handler(args, current),
 		/** Let fire-and-forget work settle. */
