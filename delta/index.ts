@@ -39,10 +39,12 @@ import {
 	truncateToVisualLines,
 } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
+import { fileURLToPath } from "node:url";
 import { fill } from "./ansi.ts";
 import { createBashResult } from "./bash-result.ts";
 import { createDiffBody } from "./body.ts";
 import { createCache } from "./cache.ts";
+import { toolCollisions, type ToolSurvivor } from "./collision.ts";
 import { configVersion, DEFAULT_CONFIG, type DeltaConfig, loadConfig } from "./config.ts";
 import { compilePatterns } from "./detect.ts";
 import { createEngine } from "./engine.ts";
@@ -87,6 +89,11 @@ function boxBackgroundPrefix(theme: Theme, key: "toolPendingBg" | "toolSuccessBg
 }
 
 export default function deltaExtension(pi: ExtensionAPI): void {
+	/** The names this extension registers; surviving ownership is checked per session. */
+	const OWNED_TOOLS = ["bash", "edit"] as const;
+	/** This extension's own entry path, to compare against `getAllTools().sourceInfo`. */
+	const ownPath = fileURLToPath(import.meta.url);
+
 	let config: DeltaConfig = { ...DEFAULT_CONFIG };
 	let version = configVersion(DEFAULT_CONFIG);
 	let patterns: RegExp[] = [];
@@ -192,6 +199,30 @@ export default function deltaExtension(pi: ExtensionAPI): void {
 
 		const warnings = [...loaded.warnings];
 		patterns = compilePatterns(config.extraCommands, warnings);
+
+		// A second extension registering `bash` or `edit` beats us on the name
+		// (first registration wins, and load order is readdir order), so delta's
+		// renderer silently never runs for it. `getAllTools()` misses; the
+		// survivor's `sourceInfo` reveals who to blame. Only checked when this
+		// window is visible — `notify` needs `hasUI`, and print mode has no tools.
+		if (ctx.hasUI) {
+			try {
+				const survivors: ToolSurvivor[] = (pi.getAllTools?.() ?? []).map((tool) => ({
+					name: tool.name,
+					path: tool.sourceInfo?.path ?? "",
+					source: tool.sourceInfo?.source ?? "",
+				}));
+				for (const lost of toolCollisions(survivors, ownPath, OWNED_TOOLS)) {
+					ctx.ui.notify(
+						`delta: \`${lost.name}\` is owned by another extension (${lost.owner}); delta cannot render its diff.`,
+						"warning",
+					);
+				}
+			} catch {
+				// A diagnostic; never take the session down over it.
+			}
+		}
+
 		for (const warning of warnings) {
 			if (ctx.hasUI) ctx.ui.notify(`delta: ${warning}`, "warning");
 			else if (ctx.mode === "print") process.stdout.write(`delta: ${warning}\n`);

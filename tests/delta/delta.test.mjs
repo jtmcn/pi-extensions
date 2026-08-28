@@ -8,6 +8,7 @@
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createFakePi } from "../fake-pi.mjs";
 import { assertions, loadExt, pexec, piEntry, piTuiEntry } from "../harness.mjs";
 
@@ -46,6 +47,76 @@ try {
 		ok("bash keeps its parameters schema", h.tools.get("bash").parameters !== undefined);
 		ok("bash keeps its prompt snippet", typeof h.tools.get("bash").promptSnippet === "string");
 		ok("edit defines both render slots", typeof h.tools.get("edit").renderCall === "function" && typeof h.tools.get("edit").renderResult === "function");
+	}
+
+	// ---- tool-name collision warns (another extension owns bash/edit)
+	//
+	// Ownership is reported at session_start, from `pi.getAllTools().sourceInfo`.
+	// The survivor's path is compared (symlink-collapsing) against our own entry
+	// path, so a healthy install where delta wins is silent.
+
+	{
+		const ownPath = fileURLToPath(new URL("../../delta/index.ts", import.meta.url));
+		const foreignPath = "/some/other/collection/router/index.ts";
+		const h = createFakePi({
+			cwd: project,
+			hasUI: true,
+			getAllTools: () => [
+				{ name: "bash", sourceInfo: { path: foreignPath, source: "local" } },
+				{ name: "edit", sourceInfo: { path: ownPath, source: "local" } },
+			],
+		});
+		extension(h.pi);
+		await h.fire("session_start");
+		ok("a lost tool name warns", h.messages().some((m) => m.includes("bash") && m.includes("owned by another extension")), JSON.stringify(h.messages()));
+		ok("it names the thief's path", h.messages().some((m) => m.includes(foreignPath)), JSON.stringify(h.messages()));
+		ok("it does not warn about the name delta still owns", !h.messages().some((m) => m.includes("edit") && m.includes("owned by another")), JSON.stringify(h.messages()));
+	}
+
+	{
+		// A clean registry — delta owns both — warns about neither.
+		const ownPath = fileURLToPath(new URL("../../delta/index.ts", import.meta.url));
+		const h = createFakePi({
+			cwd: project,
+			hasUI: true,
+			getAllTools: () => [
+				{ name: "bash", sourceInfo: { path: ownPath, source: "local" } },
+				{ name: "edit", sourceInfo: { path: ownPath, source: "local" } },
+			],
+		});
+		extension(h.pi);
+		await h.fire("session_start");
+		ok("no warning when delta wins every name", h.messages().filter((m) => m.includes("owned by another")).length === 0, JSON.stringify(h.messages()));
+	}
+
+	{
+		// delta's own built-in as the owner means delta was filtered out entirely,
+		// not beaten by another extension — pi itself alone can also hide it. Not a
+		// collision to warn about.
+		const h = createFakePi({
+			cwd: project,
+			hasUI: true,
+			getAllTools: () => [{ name: "bash", sourceInfo: { path: "<builtin:bash>", source: "builtin" } }],
+		});
+		extension(h.pi);
+		await h.fire("session_start");
+		ok(!h.messages().some((m) => m.includes("owned by another")), JSON.stringify(h.messages()));
+	}
+
+	{
+		// `enabled:false` cannot prevent the registration-time conflict (registration
+		// happens unconditionally when the extension loads), so the collision still
+		// deserves its warning.
+		await writeFile(join(agentDir, "delta.json"), JSON.stringify({ enabled: false, command: "delta-does-not-exist" }));
+		const h = createFakePi({
+			cwd: project,
+			hasUI: true,
+			getAllTools: () => [{ name: "bash", sourceInfo: { path: "/else/conflicting/bash.ts", source: "local" } }],
+		});
+		extension(h.pi);
+		await h.fire("session_start");
+		ok("the collision warns even with enabled:false", h.messages().some((m) => m.includes("owned by another")), JSON.stringify(h.messages()));
+		await rm(join(agentDir, "delta.json"), { force: true });
 	}
 
 	// ---- execution runs with the session's cwd and the user's shell settings

@@ -41,7 +41,7 @@ keep the reduced framing described below, and you get one warning per session.
 ```
 
 | Key | Default | Meaning |
-|---|---|---|
+| --- | --- | --- |
 | `enabled` | `true` | Master switch |
 | `command` | `"delta"` | Binary to run |
 | `args` | `["--minus-style", "syntax normal", "--plus-style", "syntax normal"]` | Extra delta flags, appended last so they win over git config |
@@ -84,11 +84,18 @@ be picked up until this extension learns about it.
 Two consequences worth knowing:
 
 - **Do not combine it with an extension that routes `bash` elsewhere** (a
-  container or SSH router). Both register the same name and the last one wins.
-  Registration happens unconditionally when the extension loads, before any
-  config is read, so `enabled: false` cannot prevent the conflict — it only
-  stops text reaching delta once registered. The only fix is to not load this
-  extension in that setup.
+  container or SSH router). pi keeps one definition per tool name: registration
+  is first-wins among extensions in load order, that survivor *replaces* pi's
+  built-in wholesale, and load order is the order pi discovers files in a
+  directory — effectively non-deterministic from your end. So two extensions
+  that register `bash` fight, and the loser stops rendering silently. delta
+  now detects this at `session_start` by comparing `getAllTools().sourceInfo`
+  against its own entry path, and warns once per session when another
+  extension owns a name it registered. The warning cannot fix the override
+  though — registration happens unconditionally when the extension loads,
+  before any config is read, so `enabled: false` only stops text reaching
+  delta once registered. The only real fix is to not load this extension
+  alongside a bash-router.
 - **The `edit` row is more sparsely framed than pi's.** Pi's `edit` renders
   itself (`renderShell: "self"`) into a `Box` with one column of padding, a
   blank line above and below, and a background colour that tracks state — amber

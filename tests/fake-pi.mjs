@@ -60,6 +60,7 @@ export function createFakePi({
 	entries = () => [],
 	projectTrusted = false,
 	systemPrompt: systemPromptInput = "",
+	getAllTools = () => [],
 	commands: commandInfos = () => [],
 } = {}) {
 	// A static string is the common case; a function lets tests change the
@@ -115,6 +116,7 @@ export function createFakePi({
 			commands.set(name, spec);
 		},
 		getCommands: () => commandInfos(),
+		getAllTools: () => getAllTools(),
 		appendEntry: (customType, data) => appended.push({ customType, data }),
 		sendMessage: (message, options) => sent.push({ message, options }),
 	};
@@ -126,7 +128,7 @@ export function createFakePi({
 	 * `setHeader` is called again. This mirrors that behaviour so tests that
 	 * check disposal or live-model reads see the real invariant.
 	 */
-	let currentComponent = undefined;
+	let currentComponent;
 
 	/** Number of `requestRender` calls received across all header components. */
 	let renderRequestCount = 0;
