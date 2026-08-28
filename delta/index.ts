@@ -39,11 +39,18 @@ import {
 	truncateToVisualLines,
 } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
+import { fileURLToPath } from "node:url";
 import { fill } from "./ansi.ts";
 import { createBashResult } from "./bash-result.ts";
 import { createDiffBody } from "./body.ts";
 import { createCache } from "./cache.ts";
-import { configVersion, DEFAULT_CONFIG, type DeltaConfig, loadConfig } from "./config.ts";
+import { toolCollisions, type ToolSurvivor } from "./collision.ts";
+import {
+	configVersion,
+	DEFAULT_CONFIG,
+	type DeltaConfig,
+	loadConfig,
+} from "./config.ts";
 import { compilePatterns } from "./detect.ts";
 import { createEngine } from "./engine.ts";
 import { bashWarnings, splitBashFooter } from "./footer.ts";
@@ -81,12 +88,20 @@ const BG_PREFIX_MARKER = "\uE001";
  * `ToolExecutionComponent.updateDisplay` chooses `bgFn` — see `backgroundKey` in
  * `render-rules.ts`.
  */
-function boxBackgroundPrefix(theme: Theme, key: "toolPendingBg" | "toolSuccessBg" | "toolErrorBg"): string {
+function boxBackgroundPrefix(
+	theme: Theme,
+	key: "toolPendingBg" | "toolSuccessBg" | "toolErrorBg",
+): string {
 	const [prefix] = theme.bg(key, BG_PREFIX_MARKER).split(BG_PREFIX_MARKER);
 	return prefix ?? "";
 }
 
 export default function deltaExtension(pi: ExtensionAPI): void {
+	/** The names this extension registers; surviving ownership is checked per session. */
+	const OWNED_TOOLS = ["bash", "edit"] as const;
+	/** This extension's own entry path, to compare against `getAllTools().sourceInfo`. */
+	const ownPath = fileURLToPath(import.meta.url);
+
 	let config: DeltaConfig = { ...DEFAULT_CONFIG };
 	let version = configVersion(DEFAULT_CONFIG);
 	let patterns: RegExp[] = [];
@@ -119,7 +134,8 @@ export default function deltaExtension(pi: ExtensionAPI): void {
 	 * how much padding a coloured line is actually short of a full row; `fill`
 	 * itself stays free of a `pi` import (see `delta/ansi.ts`).
 	 */
-	const fillWidth = (text: string, width: number): string => fill(text, width, visibleWidth);
+	const fillWidth = (text: string, width: number): string =>
+		fill(text, width, visibleWidth);
 
 	const cache = createCache();
 	const runner = createRunner({ config: () => config });
@@ -149,11 +165,18 @@ export default function deltaExtension(pi: ExtensionAPI): void {
 	// `shellPath`/`shellCommandPrefix`, so `execute` builds (and memoizes) a
 	// definition from the ExtensionContext it is handed instead.
 
-	let bashDefinition: { key: string; tool: ReturnType<typeof createBashToolDefinition> } | undefined;
-	let editDefinition: { key: string; tool: ReturnType<typeof createEditToolDefinition> } | undefined;
+	let bashDefinition:
+		| { key: string; tool: ReturnType<typeof createBashToolDefinition> }
+		| undefined;
+	let editDefinition:
+		| { key: string; tool: ReturnType<typeof createEditToolDefinition> }
+		| undefined;
 
 	const bashFor = async (ctx: ExtensionContext) => {
-		const settings = await loadShellSettings({ projectRoot: ctx.cwd, projectTrusted: ctx.isProjectTrusted() });
+		const settings = await loadShellSettings({
+			projectRoot: ctx.cwd,
+			projectTrusted: ctx.isProjectTrusted(),
+		});
 		const key = shellSettingsKey(ctx.cwd, settings);
 		if (bashDefinition?.key !== key) {
 			bashDefinition = { key, tool: createBashToolDefinition(ctx.cwd, settings) };
@@ -184,7 +207,10 @@ export default function deltaExtension(pi: ExtensionAPI): void {
 		bashDefinition = undefined;
 		editDefinition = undefined;
 
-		const loaded = await loadConfig({ projectRoot: ctx.cwd, projectTrusted: ctx.isProjectTrusted() });
+		const loaded = await loadConfig({
+			projectRoot: ctx.cwd,
+			projectTrusted: ctx.isProjectTrusted(),
+		});
 		if (generation !== sessionGeneration) return;
 
 		config = loaded.config;
@@ -192,6 +218,33 @@ export default function deltaExtension(pi: ExtensionAPI): void {
 
 		const warnings = [...loaded.warnings];
 		patterns = compilePatterns(config.extraCommands, warnings);
+
+		// A second extension registering `bash` or `edit` beats us on the name
+		// (first registration wins, and load order is readdir order), so delta's
+		// renderer silently never runs for it. `getAllTools()` misses; the
+		// survivor's `sourceInfo` reveals who to blame. Only checked when this
+		// window is visible — `notify` needs `hasUI`, and the renderer this warns
+		// about only runs in the TUI.
+		if (ctx.hasUI) {
+			try {
+				const survivors: ToolSurvivor[] = (pi.getAllTools?.() ?? []).map(
+					(tool) => ({
+						name: tool.name,
+						path: tool.sourceInfo?.path ?? "",
+						source: tool.sourceInfo?.source ?? "",
+					}),
+				);
+				for (const lost of toolCollisions(survivors, ownPath, OWNED_TOOLS)) {
+					ctx.ui.notify(
+						`delta: \`${lost.name}\` is owned by another extension (${lost.owner}); delta cannot render its diff.`,
+						"warning",
+					);
+				}
+			} catch {
+				// A diagnostic; never take the session down over it.
+			}
+		}
+
 		for (const warning of warnings) {
 			if (ctx.hasUI) ctx.ui.notify(`delta: ${warning}`, "warning");
 			else if (ctx.mode === "print") process.stdout.write(`delta: ${warning}\n`);
@@ -215,16 +268,42 @@ export default function deltaExtension(pi: ExtensionAPI): void {
 
 	const bash = createBashToolDefinition(process.cwd());
 	type BashSlots = typeof bash;
-	const bashExecute: BashSlots["execute"] = (toolCallId, params, signal, onUpdate, ctx) =>
-		bashFor(ctx).then((tool) => tool.execute(toolCallId, params, signal, onUpdate, ctx));
-	const bashRenderResult: NonNullable<BashSlots["renderResult"]> = (result, options, theme, context) => {
+	const bashExecute: BashSlots["execute"] = (
+		toolCallId,
+		params,
+		signal,
+		onUpdate,
+		ctx,
+	) =>
+		bashFor(ctx).then((tool) =>
+			tool.execute(toolCallId, params, signal, onUpdate, ctx),
+		);
+	const bashRenderResult: NonNullable<BashSlots["renderResult"]> = (
+		result,
+		options,
+		theme,
+		context,
+	) => {
 		// `lastComponent` can be ours even when this result has to go to pi's own
 		// renderer, and handing pi our component crashes it — see `isOurComponent`.
-		const previous = context.lastComponent as ReturnType<typeof createBashResult> | undefined;
+		const previous = context.lastComponent as
+			| ReturnType<typeof createBashResult>
+			| undefined;
 		const ours = isOurComponent(previous);
 
-		if (!usesDelta({ command: bashCommand(context.args), isError: context.isError, patterns })) {
-			return bash.renderResult!(result, options, theme, ours ? { ...context, lastComponent: undefined } : context);
+		if (
+			!usesDelta({
+				command: bashCommand(context.args),
+				isError: context.isError,
+				patterns,
+			})
+		) {
+			return bash.renderResult!(
+				result,
+				options,
+				theme,
+				ours ? { ...context, lastComponent: undefined } : context,
+			);
 		}
 
 		const state = context.state as { startedAt?: number; endedAt?: number };
@@ -244,7 +323,8 @@ export default function deltaExtension(pi: ExtensionAPI): void {
 						.map((line) => theme.fg("toolOutput", line))
 						.join("\n"),
 				invalidate: context.invalidate,
-				truncate: (value, maxLines, width) => truncateToVisualLines(value, maxLines, width),
+				truncate: (value, maxLines, width) =>
+					truncateToVisualLines(value, maxLines, width),
 				fill: fillWidth,
 				wrap,
 				// Same wording as pi's own hint (bash.js), minus its width clamp:
@@ -264,7 +344,10 @@ export default function deltaExtension(pi: ExtensionAPI): void {
 			// The error branch is unreachable today (isError returns above,
 			// before this component is ever built) but mirrored for fidelity in
 			// case that guard ever moves.
-			bgPrefix: boxBackgroundPrefix(theme, backgroundKey({ isPartial: options.isPartial, isError: context.isError })),
+			bgPrefix: boxBackgroundPrefix(
+				theme,
+				backgroundKey({ isPartial: options.isPartial, isError: context.isError }),
+			),
 			timing: timing({
 				startedAt: state.startedAt,
 				endedAt: state.endedAt,
@@ -298,11 +381,20 @@ export default function deltaExtension(pi: ExtensionAPI): void {
 
 	const edit = createEditToolDefinition(process.cwd());
 	type EditSlots = typeof edit;
-	const editExecute: EditSlots["execute"] = (toolCallId, params, signal, onUpdate, ctx) =>
-		editFor(ctx).execute(toolCallId, params, signal, onUpdate, ctx);
+	const editExecute: EditSlots["execute"] = (
+		toolCallId,
+		params,
+		signal,
+		onUpdate,
+		ctx,
+	) => editFor(ctx).execute(toolCallId, params, signal, onUpdate, ctx);
 
 	/** `edit <path>`, in pi's colours. */
-	const header = (args: Record<string, unknown> | undefined, theme: RenderTheme, cwd: string): string =>
+	const header = (
+		args: Record<string, unknown> | undefined,
+		theme: RenderTheme,
+		cwd: string,
+	): string =>
 		`${theme.fg("toolTitle", theme.bold("edit"))} ${theme.fg("accent", displayPath(args, cwd))}`;
 
 	interface EditComponent {
@@ -316,7 +408,11 @@ export default function deltaExtension(pi: ExtensionAPI): void {
 	}
 
 	/** The one component both slots share, reached through `context.state`. */
-	const editComponent = (state: Record<string, unknown>, theme: RenderTheme, invalidate: () => void): EditComponent => {
+	const editComponent = (
+		state: Record<string, unknown>,
+		theme: RenderTheme,
+		invalidate: () => void,
+	): EditComponent => {
 		const existing = state.editComponent as EditComponent | undefined;
 		if (existing) return existing;
 		const body = createDiffBody({
@@ -345,7 +441,11 @@ export default function deltaExtension(pi: ExtensionAPI): void {
 		return component;
 	};
 
-	const editRenderCall: NonNullable<EditSlots["renderCall"]> = (args, theme, context) => {
+	const editRenderCall: NonNullable<EditSlots["renderCall"]> = (
+		args,
+		theme,
+		context,
+	) => {
 		const component = editComponent(context.state, theme, context.invalidate);
 		component.head = header(args as Record<string, unknown>, theme, context.cwd);
 		// pi re-renders the call slot while arguments stream, and can render it
@@ -355,15 +455,26 @@ export default function deltaExtension(pi: ExtensionAPI): void {
 		return component;
 	};
 
-	const editRenderResult: NonNullable<EditSlots["renderResult"]> = (result, _options, theme, context) => {
+	const editRenderResult: NonNullable<EditSlots["renderResult"]> = (
+		result,
+		_options,
+		theme,
+		context,
+	) => {
 		const component = editComponent(context.state, theme, context.invalidate);
-		component.head = header(context.args as Record<string, unknown>, theme, context.cwd);
+		component.head = header(
+			context.args as Record<string, unknown>,
+			theme,
+			context.cwd,
+		);
 		component.settled = true;
 		if (context.isError) {
 			component.error = resultText(result.content);
 			component.body.set(undefined, undefined);
 		} else {
-			const details = result.details as { diff?: string; patch?: string } | undefined;
+			const details = result.details as
+				| { diff?: string; patch?: string }
+				| undefined;
 			component.error = undefined;
 			component.body.set(details?.patch, details?.diff);
 		}
